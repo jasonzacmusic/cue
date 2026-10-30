@@ -895,7 +895,10 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'ext-add') return addExtension(a);
   if (cmd === 'ext-remove') return removeExtension(a.id);
   if (cmd === 'lens-file') return lensFile(a);
-  if (cmd === 'rec-start') { const t = byId(activeId); if (!t || !t.view) return null; recTabId = t.id; pushState(); return { title: t.title }; }
+  // A tab's view is built lazily, so a tab that has not been looked at yet has
+  // none. Recording used to refuse with "Open a tab first" in that case, which
+  // is both wrong and baffling. Build the view, then record it.
+  if (cmd === 'rec-start') { const t = byId(activeId); if (!t) return null; ensureView(t); if (!t.view) return null; recTabId = t.id; pushState(); return { title: t.title }; }
   if (cmd === 'rec-cancel') { recTabId = null; pushState(); return true; }
   if (cmd === 'rec-save') {
     recTabId = null; pushState();
@@ -1475,7 +1478,12 @@ function createMain() {
     ...b, minWidth: 760, minHeight: 480, title: 'Cue', backgroundColor: '#E3E6E9',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 16, y: 18 },
   });
-  uiView = new WebContentsView({ webPreferences: { preload: UI_PRELOAD, contextIsolation: true, sandbox: true } });
+  uiView = new WebContentsView({ webPreferences: { preload: UI_PRELOAD, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  // Cue's own chrome must never be throttled. When the window sat behind
+  // another app, Chromium slowed this renderer down and starting a recording
+  // could stall indefinitely — which is exactly when you are recording a tab
+  // and looking at something else.
+  uiView.webContents.setBackgroundThrottling(false);
   uiView.setBackgroundColor('#00000000');
   mainWin.contentView.addChildView(uiView);
   uiView.webContents.loadFile(UI_HTML);

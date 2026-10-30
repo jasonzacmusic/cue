@@ -482,7 +482,11 @@ function showPalette(colors) {
 let rec = null;
 async function startRecording() {
   if (rec) { toast('Already recording.'); return; }
-  const info = await window.cue.invoke('rec-start');
+  // This call sat outside the try below, so anything it threw killed recording
+  // silently: no file, no message, nothing to tell you it had not started.
+  let info = null;
+  try { info = await window.cue.invoke('rec-start'); }
+  catch (e) { toast(`Recording could not start: ${e && e.message ? e.message : e}`); return; }
   if (!info) { toast('Open a tab first.'); return; }
   // The session exists from this moment, so a stop pressed while the capture is
   // still being granted finds something to cancel instead of silently doing

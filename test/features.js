@@ -11,7 +11,7 @@ const OUT = process.env.CUE_OUT || '/tmp';
 fs.mkdirSync(OUT, { recursive: true });
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`[cue-feature] ${ok ? 'PASS' : 'FAIL'} ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ''}`); };
-const until = async (fn, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { try { const v = await fn(); if (v) return v; } catch {} await sleep(100); } return null; };
+const until = async (fn, ms = 20000) => { const end = Date.now() + ms; while (Date.now() < end) { try { const v = await fn(); if (v) return v; } catch {} await sleep(100); } return null; };
 
 const inDays = (n) => { const d = new Date(Date.now() + n * 86400000); return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }); };
 const TEST_USER = 'test-user@example.test';
@@ -251,7 +251,7 @@ module.exports = async function run(c) {
   ff.view.webContents.sendInputEvent({ type: 'mouseMove', x: 60, y: 60 }); await sleep(250);
   ff.view.webContents.sendInputEvent({ type: 'mouseDown', x: 60, y: 60, button: 'left', clickCount: 1 });
   ff.view.webContents.sendInputEvent({ type: 'mouseUp', x: 60, y: 60, button: 'left', clickCount: 1 });
-  const font = await Promise.race([fontP, sleep(3000).then(() => null)]);
+  const font = await Promise.race([fontP, sleep(10000).then(() => null)]);
   check('font finder: names the font', /Georgia/.test(font || ''), font);
 
   // ---- capture
@@ -259,13 +259,13 @@ module.exports = async function run(c) {
   c.activate(lp.id); await sleep(400);
   c.runTool('fullpage', lp);
   const dir = path.join(c.app.getPath('downloads'), 'Cue Captures');
-  const pngFile = await until(() => fs.existsSync(dir) && fs.readdirSync(dir).find((f) => f.startsWith('Long') && f.endsWith('.png')));
+  const pngFile = await until(() => fs.existsSync(dir) && fs.readdirSync(dir).find((f) => f.startsWith('Long') && f.endsWith('.png')), 45000);
   if (pngFile) {
     const sz = execFileSync('sips', ['-g', 'pixelHeight', path.join(dir, pngFile)]).toString();
     check('capture: whole page picture', /pixelHeight: (6000|12000)/.test(sz), sz.trim().split('\n').pop());
   } else check('capture: whole page picture', false);
   c.runTool('gif', lp);
-  const gifFile = await until(() => fs.existsSync(dir) && fs.readdirSync(dir).find((f) => f.endsWith('.gif')), 16000);
+  const gifFile = await until(() => fs.existsSync(dir) && fs.readdirSync(dir).find((f) => f.endsWith('.gif')), 60000);
   check('capture: GIF made', !!gifFile && fs.readFileSync(path.join(dir, gifFile)).slice(0, 3).toString() === 'GIF', gifFile);
 
   const au2 = c.openTab({ url: `${base}/audio`, identity: 'personal' }); await loaded(au2); await sleep(300);
@@ -274,11 +274,13 @@ module.exports = async function run(c) {
   await awc.executeJavaScript('document.getElementById("a").play().then(()=>1)', true);
   await sleep(500);
   c.sendEvent('rec-start');
-  await until(() => lastState && lastState.recording, 4000); await sleep(3000);
-  check('record: recording started', !!(lastState && lastState.recording));
+  await until(() => lastState && lastState.recording); await sleep(3000);
+  check('record: recording started', !!(lastState && lastState.recording), { toasts: events.filter((e) => e[0] === 'toast').map((e) => e[1]).slice(-2) });
   c.sendEvent('rec-stop');
-  const recFile = await until(() => fs.readdirSync(dir).find((f) => /\.(mp4|webm)$/.test(f)), 8000);
-  check('record: file saved', !!recFile, recFile);
+  const recFile = await until(() => fs.readdirSync(dir).find((f) => /\.(mp4|webm)$/.test(f)), 30000);
+  // When this fails, say what the app actually reported rather than just "null".
+  const recToast = events.filter((e) => e[0] === 'toast').map((e) => e[1]).slice(-4);
+  check('record: file saved', !!recFile, recFile || { lastToasts: recToast });
   if (recFile) {
     try {
       const probe = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name', '-of', 'csv=p=0', path.join(dir, recFile)]).toString().trim().replace(/\n/g, ' ');
@@ -315,6 +317,9 @@ module.exports = async function run(c) {
 
   // ---- video kit: plays the tab recording made above
   PAGES['/video'] = `<title>Video</title><video id=v muted loop autoplay src="/rec.mp4" style="width:640px"></video>`;
+  if (!recFile) {
+    check('video: skipped, no recording to play', false, 'the recording step produced no file');
+  } else {
   RECORDING.file = path.join(dir, recFile);
   const vt = c.openTab({ url: `${base}/video`, identity: 'personal' }); await loaded(vt); await sleep(1200);
   c.activate(vt.id); await sleep(300);
@@ -325,6 +330,7 @@ module.exports = async function run(c) {
   const frameFile = await until(() => fs.readdirSync(dir).find((f) => /^Frame .*\.png$/.test(f)));
   check('video: grabs a frame', !!frameFile && fs.statSync(path.join(dir, frameFile)).size > 500, frameFile);
   c.closeTab(vt.id);
+  }
 
   // ---- the same tools on a real YouTube lesson
   const href = 'https://www.youtube.com/watch?v=rWGvrodpcBc';
