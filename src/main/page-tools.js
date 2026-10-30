@@ -92,7 +92,15 @@ function palette(image, count = 6) {
   const px = [];
   for (let i = 0; i + 3 < width * height * 4; i += 4) { if (bmp[i + 3] > 200) px.push([bmp[i + 2], bmp[i + 1], bmp[i]]); }
   if (!px.length) return [];
-  let centres = Array.from({ length: count }, (_, i) => px[Math.floor((i + 0.5) * px.length / count)].slice());
+  // Start from colours as far apart as possible, so two strong colours can't blur into their mix.
+  const dist = (a, b) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+  let centres = [px[0].slice()];
+  while (centres.length < count) {
+    let far = px[0]; let fd = -1;
+    for (const p of px) { const d = Math.min(...centres.map((c) => dist(c, p))); if (d > fd) { fd = d; far = p; } }
+    if (fd <= 0) break;
+    centres.push(far.slice());
+  }
   for (let round = 0; round < 10; round++) {
     const sum = centres.map(() => [0, 0, 0, 0]);
     for (const p of px) {

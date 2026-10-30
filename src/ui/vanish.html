@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>Vanish</title>
+<style>
+  :root { --ink: #ECE9E4; --dim: #8E8A84; --line: #26262B; --face: #15151A; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 46px; overflow: hidden; background: #0B0B0D; color: var(--ink); font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; user-select: none; }
+  #bar { height: 46px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 82px; -webkit-app-region: drag; border-bottom: 1px solid var(--line); }
+  body.flat #bar { padding-left: 12px; }
+  button, input { -webkit-app-region: no-drag; font: inherit; color: inherit; }
+  .mark { width: 16px; height: 16px; border-radius: 50%; border: 1.5px dashed var(--dim); flex: none; }
+  .nav { width: 28px; height: 28px; border: 0; background: none; border-radius: 7px; display: grid; place-items: center; color: var(--dim); cursor: pointer; }
+  .nav:hover:not(:disabled) { background: var(--face); color: var(--ink); }
+  .nav:disabled { opacity: .3; cursor: default; }
+  .nav svg { width: 15px; height: 15px; }
+  #url { flex: 1; min-width: 80px; height: 30px; border: 1px solid var(--line); border-radius: 15px; background: var(--face); padding: 0 14px; outline: 0; user-select: text; }
+  #url:focus { border-color: var(--dim); }
+  #url::placeholder { color: var(--dim); }
+  #tabs { display: flex; gap: 4px; max-width: 40%; overflow: hidden; }
+  .tab { width: 26px; height: 26px; border-radius: 50%; border: 1px solid transparent; background: var(--face); display: grid; place-items: center; cursor: pointer; padding: 0; flex: none; }
+  .tab.on { border-color: var(--dim); }
+  .tab img { width: 14px; height: 14px; border-radius: 3px; }
+  .tab i { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="mark" title="Vanish: nothing here is saved"></span>
+  <button id="back" class="nav" aria-label="Back"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg></button>
+  <button id="fwd" class="nav" aria-label="Forward"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg></button>
+  <button id="reload" class="nav" aria-label="Reload"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.5-3.5L13 6V2.5"/></svg></button>
+  <input id="url" type="text" spellcheck="false" autocomplete="off" placeholder="Search or type an address. Nothing here is saved." aria-label="Address">
+  <div id="tabs"></div>
+  <button id="new" class="nav" aria-label="New Vanish tab" title="New Vanish tab (⌘T)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg></button>
+</div>
+<script src="vanish.js"></script>
+</body>
+</html>

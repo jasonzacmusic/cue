@@ -82,6 +82,11 @@ class Library {
     return this.db.prepare(`SELECT source AS url, title FROM board_items WHERE title LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\' LIMIT ?`).all(like, like, limit);
   }
 
+  // History is the one table that grows for ever, so the oldest rows go first.
+  trim(keep) {
+    this.db.prepare('DELETE FROM history WHERE rowid NOT IN (SELECT rowid FROM history ORDER BY last DESC LIMIT ?)').run(keep);
+  }
+
   close() { try { this.db.close(); } catch {} }
 }
 

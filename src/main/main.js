@@ -1,7 +1,7 @@
 // Cue — the browser for people who make things.
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -17,17 +17,22 @@ const tools = require('./page-tools');
 const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
+const { createVanish } = require('./vanish');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
 if (process.env.CUE_USER_DATA) app.setPath('userData', process.env.CUE_USER_DATA);
+if (process.env.CUE_QUIET) app.commandLine.appendSwitch('mute-audio'); // tests must not depend on, or play through, whatever headphones are connected
 if (process.env.CUE_TEST) { app.commandLine.appendSwitch('use-mock-keychain'); app.setPath('downloads', path.join(app.getPath('userData'), 'downloads')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'cue', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+const CACHE_MB = 256; // per login; browsers that leave this open-ended quietly reach many gigabytes
+const STORAGE_MB = 600; // everything a login may keep in caches before Cue trims it, sign-ins untouched
 // The cache cap has to be set before Chromium starts, so read it straight from the settings file.
 try {
   const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'cue.json'), 'utf8'));
-  app.commandLine.appendSwitch('disk-cache-size', String((saved.settings.cacheCapMB || 1024) * 1048576));
-} catch { app.commandLine.appendSwitch('disk-cache-size', String(1024 * 1048576)); }
+  const cap = saved.settings.cacheCapMB && saved.settings.cacheCapMB !== 1024 ? saved.settings.cacheCapMB : CACHE_MB;
+  app.commandLine.appendSwitch('disk-cache-size', String(cap * 1048576));
+} catch { app.commandLine.appendSwitch('disk-cache-size', String(CACHE_MB * 1048576)); }
 const ROOT = path.join(__dirname, '..');
 const UI_HTML = path.join(ROOT, 'ui', 'index.html');
 const STAGE_HTML = path.join(ROOT, 'ui', 'stage.html');
@@ -35,11 +40,11 @@ const START_URL = pathToFileURL(path.join(ROOT, 'ui', 'start.html')).href;
 const TAB_PRELOAD = path.join(ROOT, 'preload', 'tab.js');
 const UI_PRELOAD = path.join(ROOT, 'preload', 'ui.js');
 const PAGES = path.join(ROOT, 'ui', 'pages');
-const SIDEBAR = 264;
+const SIDE_MIN = 64; const SIDE_MAX = 420; const SIDE_EDGE = 8;
 const TOOLBAR = 52;
-const GAP = 6;
+const GAP = 8;
 const AGENT_PORT = 8813;
-const AI_W = 440;
+const AI_MIN = 320; const AI_MAX = 720; const AI_GRIP = 8;
 const AI_HEAD = 38;
 const STRIP = 44;
 const SPACES = ['Teach', 'Create', 'Business', 'Build'];
@@ -52,6 +57,12 @@ const KITS = {
   business: { name: 'Business', what: 'Bills radar and alert tray' },
 };
 const AI_HOME = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
+// Links that belong to another app on the computer. These open straight away; anything else asks first.
+const EXTERNAL = /^(mailto|tel|sms|facetime|zoommtg|zoomus|msteams|slack|spotify|whatsapp|webcal|obsproject):/i;
+// Sign-in pages have to stay a popup, or the site that opened them never hears back.
+const AUTH_PAGE = /^https:\/\/(accounts\.google\.com|appleid\.apple\.com|login\.microsoftonline\.com|github\.com\/login|www\.facebook\.com\/(v[\d.]+\/)?dialog)/;
+const TEAM_SITE = 'https://team.nathanielschool.com';
+const LABS_PAGE = 'https://labs.nathanielschool.com/products/cue';
 const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsapp\.com|facebook\.com|linkedin\.com)$/;
 
 const IDENTITIES = {
@@ -109,6 +120,8 @@ let peek = null;
 let aiView = null;
 let stripOpen = false;
 let recTabId = null;
+let sideReveal = false;
+let vanish = null;
 let heldCount = 0;
 let repos = [];
 let extDir = '';
@@ -119,6 +132,9 @@ const copy = (text) => { if (!process.env.CUE_TEST) clipboard.writeText(text); }
 const byId = (id) => tabs.find((t) => t.id === id);
 const byWC = (wc) => tabs.find((t) => t.view && t.view.webContents === wc);
 const isStart = (url) => !url || url === START_URL;
+const sideWidth = () => Math.max(SIDE_MIN, Math.min(SIDE_MAX, settings().sideWidth || 248));
+const sideSpace = () => (settings().sideHidden ? SIDE_EDGE : sideWidth());
+const aiWidth = () => Math.max(AI_MIN, Math.min(AI_MAX, settings().aiWidth || 440));
 
 // ---------------------------------------------------------------- sessions
 function sessionFor(identity) {
@@ -138,20 +154,29 @@ function sessionFor(identity) {
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
     const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management'];
     if (always.includes(permission)) return cb(true);
-    if (permission === 'notifications') return cb(!live);
+    if (permission === 'notifications') return cb(!live && identity !== 'vanish');
+    if (permission === 'openExternal') {
+      const link = details.externalURL || '';
+      const from = byWC(wc);
+      if (identity !== 'vanish' && (!from || from.agent)) return cb(false);
+      if (EXTERNAL.test(link)) { if (from) logTab(from, 'external', link); return cb(!process.env.CUE_TEST); }
+      const r = await dialog.showMessageBox(mainWin, { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Open this link in another app?', detail: link.slice(0, 200) });
+      return cb(r.response === 0);
+    }
     if (permission === 'media' || permission === 'geolocation') {
       const origin = safeOrigin(details.requestingUrl || wc.getURL());
       const key = `${identity}|${origin}|${permission}`;
       const remembered = store.data.permissions[key];
-      if (remembered !== undefined) return cb(remembered);
+      const keepAwake = (ok) => { const x = byWC(wc); if (x && ok && permission === 'media') x.holdAwake = true; return ok; };
+      if (remembered !== undefined) return cb(keepAwake(remembered));
       const what = permission === 'media' ? (details.mediaTypes || []).map((m) => (m === 'video' ? 'camera' : 'microphone')).join(' and ') || 'microphone' : 'location';
       const r = await dialog.showMessageBox(mainWin, {
         type: 'question', buttons: ['Allow', 'Block'], defaultId: 0, cancelId: 1,
-        message: `${origin} wants to use your ${what}.`, checkboxLabel: 'Remember for this site', checkboxChecked: true,
+        message: `${origin} wants to use your ${what}.`, ...(identity === 'vanish' ? {} : { checkboxLabel: 'Remember for this site', checkboxChecked: true }),
       });
       const ok = r.response === 0;
-      if (r.checkboxChecked) { store.data.permissions[key] = ok; store.save(); }
-      return cb(ok);
+      if (r.checkboxChecked && identity !== 'vanish') { store.data.permissions[key] = ok; store.save(); }
+      return cb(keepAwake(ok));
     }
     cb(false);
   });
@@ -159,6 +184,7 @@ function sessionFor(identity) {
   ses.setDisplayMediaRequestHandler((request, callback) => {
     if (pendingShare) pendingShare({});
     pendingShare = callback;
+    try { const x = byWC(webContents.fromFrame(request.frame)); if (x) x.holdAwake = true; } catch {}
     desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
       .catch(() => [])
       .then((sources) => {
@@ -173,15 +199,17 @@ function sessionFor(identity) {
   ses.on('will-download', (_e, item) => {
     const dir = app.getPath('downloads');
     let name = item.getFilename(); let file = path.join(dir, name); let n = 1;
-    while (fs.existsSync(file)) { const ext = path.extname(name); file = path.join(dir, `${path.basename(name, ext)} (${n++})${ext}`); }
+    while (fs.existsSync(file) || downloads.some((x) => x.file === file && x.state === 'progressing')) { const ext = path.extname(name); file = path.join(dir, `${path.basename(name, ext)} (${n++})${ext}`); }
     // Vanish leaves no file behind unless you choose where it goes.
     if (identity === 'vanish') item.setSaveDialogOptions({ title: 'Vanish tab: save this file?', defaultPath: file });
     else item.setSavePath(file);
+    if (identity === 'vanish') return; // the save dialog is the only trace, and it is yours
     const d = { id: Date.now() + Math.random(), name: path.basename(file), file, kind: fileKind(file), received: 0, total: item.getTotalBytes(), state: 'progressing' };
     downloads.unshift(d); downloads.length = Math.min(downloads.length, 30);
     item.on('updated', (_ev, state) => { d.received = item.getReceivedBytes(); d.state = state; pushState(); });
     item.once('done', (_ev, state) => {
-      d.state = state; d.received = d.total;
+      d.state = state; d.received = item.getReceivedBytes();
+      if (state === 'completed') d.total = d.received;
       if (item.getSavePath()) { d.file = item.getSavePath(); d.name = path.basename(d.file); }
       pushState();
     });
@@ -260,7 +288,7 @@ function safeOrigin(url) { try { return new URL(url).origin; } catch { return ur
 // ---------------------------------------------------------------- tabs
 function makeTab(opts) {
   const t = {
-    id: nextId++, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
+    id: nextId++, uid: opts.uid || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
     identity: IDENTITIES[opts.identity] ? opts.identity : (settings().spaceLogins[opts.space || store.data.space] || settings().defaultIdentity),
     pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
@@ -307,6 +335,7 @@ function wireTab(t) {
     pushState(); persist();
   });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
+  wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; });
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
@@ -322,7 +351,8 @@ function wireTab(t) {
     t.playing = true;
     if (settings().onePlayer) {
       for (const o of tabs) {
-        if (o !== t && o.view && o.playing && o.id !== programId) o.view.webContents.send('cue:media', 'pause');
+        const together = sharesSplit(t) && sharesSplit(o);
+        if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together) o.view.webContents.send('cue:media', 'pause');
       }
     }
     pushState();
@@ -334,14 +364,22 @@ function wireTab(t) {
   wc.on('focus', () => {
     if (t.id !== activeId && store.data.split.ids.includes(t.id) && t.host === 'main') { activeId = t.id; t.lastActive = Date.now(); pushState(); }
   });
-  wc.on('render-process-gone', () => { t.crashed = true; pushState(); });
+  wc.on('render-process-gone', (_e, d) => {
+    if (d.reason === 'clean-exit') return;
+    t.crashed = true; pushState();
+    // Bring it straight back once; a page that keeps crashing waits for you to press reload.
+    if (Date.now() - (t.crashAt || 0) < 60000) { sendEvent('toast', `${t.title} keeps crashing. Press reload to try again.`); return; }
+    t.crashAt = Date.now();
+    sendEvent('toast', `${t.title} crashed. Reloading it.`);
+    setTimeout(() => { if (t.view && t.view.webContents === wc && !wc.isDestroyed()) wc.reload(); }, 500);
+  });
   wc.on('context-menu', (_e, p) => contextMenu(t, p));
   wc.on('did-finish-load', () => {
     if (t.volume !== 1) wc.send('cue:volume', t.volume);
   });
   wc.setWindowOpenHandler(({ url, disposition }) => {
     if (recTabId === t.id) return { action: 'deny' };
-    if (disposition === 'new-window') {
+    if (disposition === 'new-window' || AUTH_PAGE.test(url)) {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
     }
     const nt = openTab({ url, identity: t.identity, background: disposition === 'background-tab', after: t, agent: t.agent });
@@ -349,6 +387,8 @@ function wireTab(t) {
     return { action: 'deny' };
   });
 }
+
+function sharesSplit(t) { const sp = store.data.split; return sp.mode !== 'single' && sp.ids.includes(t.id); }
 
 function hostWindow(t) { return t.host === 'stage' ? stageWin : t.host === 'popout' ? t.popout : mainWin; }
 
@@ -359,6 +399,7 @@ function hostOf(u) {
 }
 
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
+  if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const t = makeTab({ url: url || START_URL, identity, agent, pinned });
   if (after) {
     const i = tabs.indexOf(after);
@@ -387,13 +428,16 @@ function closeTab(id) {
   const i = tabs.findIndex((t) => t.id === id); if (i < 0) return;
   const t = tabs[i];
   if (t.identity !== 'vanish') closedStack.push(serialize(t));
+  if (t.fullscreen) { const w = hostWindow(t); if (w) w.setFullScreen(false); }
+  if (recTabId === id) { sendEvent('rec-stop'); recTabId = null; }
   if (t.id === programId) { programId = null; showStandby(); }
   destroyView(t);
   if (t.popout) { const w = t.popout; t.popout = null; w.destroy(); }
   tabs.splice(i, 1);
   store.data.split.ids = store.data.split.ids.filter((x) => x !== id);
+  fitSplit(store.data.split);
   if (activeId === id) {
-    const next = spaceOrder()[0];
+    const next = byId(store.data.split.ids[0]) || spaceOrder()[0];
     if (next) activate(next.id); else openTab({});
   }
   layout(); pushState(); persist();
@@ -407,48 +451,89 @@ function destroyView(t) {
 }
 
 function serialize(t) {
-  const { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive } = t;
-  return { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive };
+  const { uid, url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent } = t;
+  return { uid, url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent };
 }
 
 function persist() {
   store.data.tabs = tabs.filter((t) => t.identity !== 'vanish' && !t.agentTemp).map(serialize);
   const a = byId(activeId);
-  store.data.activeIndex = a ? store.data.tabs.findIndex((s) => s.order === a.order) : 0;
+  store.data.activeIndex = a ? store.data.tabs.findIndex((s) => s.uid === a.uid) : 0;
+  // Tab numbers change on every launch, so split views are saved by each tab's lasting id.
+  const lasting = (sp) => ({ ...sp, ids: undefined, uids: sp.ids.map((id) => byId(id)?.uid).filter(Boolean) });
+  store.data.savedSplit = lasting(store.data.split);
+  store.data.savedSpaceSplit = Object.fromEntries(Object.entries(store.data.spaceSplit).map(([k, v]) => [k, lasting(v)]));
   store.save();
 }
 
 // ---------------------------------------------------------------- layout
 function contentRect() {
   const [w, h] = mainWin.getContentSize();
-  const top = TOOLBAR + (stripOpen ? STRIP : 0);
-  return { x: SIDEBAR, y: top, width: Math.max(0, w - SIDEBAR - (aiView ? AI_W : 0)), height: Math.max(0, h - top) };
+  const top = TOOLBAR + (stripOpen ? STRIP : 0); const x = sideSpace();
+  return { x, y: top, width: Math.max(0, w - x - (aiView ? aiWidth() + AI_GRIP : 0)), height: Math.max(0, h - top) };
 }
 
-function splitRects(mode, r) {
+function splitRects(mode, r, sp = {}) {
   const g = GAP; const out = [];
-  const cols = (n) => { const w = (r.width - g * (n + 1)) / n; for (let i = 0; i < n; i++) out.push({ x: r.x + g + i * (w + g), y: r.y, width: w, height: r.height - g }); };
+  const cols = (n) => {
+    const room = r.width - g * (n + 1); const fr = sp.fr && sp.fr.length === n ? sp.fr : Array(n).fill(1 / n); let x = r.x + g;
+    for (let i = 0; i < n; i++) { const w = room * fr[i]; out.push({ x, y: r.y, width: w, height: r.height - g }); x += w + g; }
+  };
   if (mode === 'cols2') cols(2);
   else if (mode === 'cols3') cols(3);
-  else if (mode === 'rows2') { const h = (r.height - g * 2) / 2; for (let i = 0; i < 2; i++) out.push({ x: r.x + g, y: r.y + i * (h + g), width: r.width - g * 2, height: h }); }
-  else if (mode === 'grid4') {
-    const w = (r.width - g * 3) / 2; const h = (r.height - g * 2) / 2;
-    for (let i = 0; i < 4; i++) out.push({ x: r.x + g + (i % 2) * (w + g), y: r.y + Math.floor(i / 2) * (h + g), width: w, height: h });
+  else if (mode === 'rows2') {
+    const room = r.height - g * 2; const fr = sp.fr && sp.fr.length === 2 ? sp.fr : [0.5, 0.5]; let y = r.y;
+    for (let i = 0; i < 2; i++) { const h = room * fr[i]; out.push({ x: r.x + g, y, width: r.width - g * 2, height: h }); y += h + g; }
+  } else if (mode === 'grid4') {
+    const rx = r.width - g * 3; const ry = r.height - g * 2; const fx = sp.fx || 0.5; const fy = sp.fy || 0.5;
+    const xs = [r.x + g, r.x + g * 2 + rx * fx]; const ws = [rx * fx, rx * (1 - fx)];
+    const ys = [r.y, r.y + g + ry * fy]; const hs = [ry * fy, ry * (1 - fy)];
+    for (let i = 0; i < 4; i++) out.push({ x: xs[i % 2], y: ys[Math.floor(i / 2)], width: ws[i % 2], height: hs[Math.floor(i / 2)] });
   } else out.push({ ...r });
   return out.map((b) => ({ x: Math.round(b.x), y: Math.round(b.y), width: Math.max(0, Math.round(b.width)), height: Math.max(0, Math.round(b.height)) }));
 }
 
+// The gaps between split panes are real handles: dragging one resizes the panes either side.
+function resizeSplit({ i, axis, pos }) {
+  const sp = store.data.split; const r = contentRect(); const n = SPLITS[sp.mode];
+  const clamp = (v) => Math.max(0.14, Math.min(0.86, v));
+  if (sp.mode === 'grid4') {
+    if (axis === 'x') sp.fx = clamp((pos - r.x) / r.width); else sp.fy = clamp((pos - r.y) / r.height);
+  } else if (sp.mode !== 'single') {
+    const size = axis === 'x' ? r.width : r.height; const from = axis === 'x' ? r.x : r.y;
+    const fr = sp.fr && sp.fr.length === n ? [...sp.fr] : Array(n).fill(1 / n);
+    const before = fr.slice(0, i).reduce((a, b) => a + b, 0); const pair = fr[i] + fr[i + 1];
+    const left = Math.max(0.14, Math.min(pair - 0.14, (pos - from) / size - before));
+    fr[i] = left; fr[i + 1] = pair - left; sp.fr = fr;
+  }
+  layout(); pushState(); persist();
+}
+
+function splitGutters(rects, mode) {
+  const out = [];
+  if (mode === 'cols2' || mode === 'cols3') rects.slice(0, -1).forEach((b, i) => out.push({ i, axis: 'x', x: b.x + b.width, y: b.y, width: GAP, height: b.height }));
+  else if (mode === 'rows2') out.push({ i: 0, axis: 'y', x: rects[0].x, y: rects[0].y + rects[0].height, width: rects[0].width, height: GAP });
+  else if (mode === 'grid4') {
+    out.push({ i: 0, axis: 'x', x: rects[0].x + rects[0].width, y: rects[0].y, width: GAP, height: rects[2].y + rects[2].height - rects[0].y });
+    out.push({ i: 0, axis: 'y', x: rects[0].x, y: rects[0].y + rects[0].height, width: rects[1].x + rects[1].width - rects[0].x, height: GAP });
+  }
+  return out;
+}
+
 let panes = [];
+let gutters = [];
 function layout() {
   if (!mainWin || mainWin.isDestroyed()) return;
   const [w, h] = mainWin.getContentSize();
-  uiView.setBounds({ x: 0, y: 0, width: w, height: h });
+  // A revealed sidebar floats over the page, so the page itself never jumps.
+  uiView.setBounds({ x: 0, y: 0, width: sideReveal && !overlay ? sideWidth() : w, height: h });
   const sp = store.data.split;
   const active = byId(activeId);
   let ids = sp.mode !== 'single' && sp.ids.includes(activeId) ? sp.ids.filter((id) => byId(id)) : [activeId];
   ids = ids.filter((id) => { const t = byId(id); return t && t.host === 'main' && !(live && id === programId); });
   const full = active && active.fullscreen && active.host === 'main';
-  const rects = full ? [{ x: 0, y: 0, width: w, height: h }] : splitRects(ids.length > 1 ? sp.mode : 'single', contentRect());
+  const rects = full ? [{ x: 0, y: 0, width: w, height: h }] : splitRects(ids.length > 1 ? sp.mode : 'single', contentRect(), sp);
+  gutters = !full && ids.length > 1 ? splitGutters(rects, sp.mode) : [];
   panes = [];
   const shown = full ? [activeId] : ids;
   for (const t of tabs) {
@@ -457,7 +542,7 @@ function layout() {
     if (k >= 0 && rects[k]) { t.view.setBounds(rects[k]); t.view.setVisible(true); panes.push({ id: t.id, rect: rects[k] }); }
     else { t.view.setVisible(false); t.view.setBounds(rects[0] || contentRect()); }
   }
-  if (aiView) aiView.setBounds({ x: w - AI_W, y: TOOLBAR + AI_HEAD, width: AI_W, height: Math.max(0, h - TOOLBAR - AI_HEAD) });
+  if (aiView) aiView.setBounds({ x: w - aiWidth(), y: TOOLBAR + AI_HEAD, width: aiWidth(), height: Math.max(0, h - TOOLBAR - AI_HEAD) });
   if (peek) {
     const r = contentRect(); const pw = Math.round(r.width * 0.5);
     peek.view.setBounds({ x: r.x + r.width - pw - 8, y: r.y + 8, width: pw, height: r.height - 16 });
@@ -476,7 +561,7 @@ function layout() {
 
 function setSplit(mode) {
   if (!SPLITS[mode]) return;
-  const sp = store.data.split; sp.mode = mode;
+  const sp = store.data.split; if (sp.mode !== mode) { delete sp.fr; delete sp.fx; delete sp.fy; } sp.mode = mode;
   if (mode === 'single') { sp.ids = [activeId]; }
   else {
     const ordered = spaceOrder().filter((t) => t.host === 'main' && !(live && t.id === programId));
@@ -486,6 +571,15 @@ function setSplit(mode) {
     sp.ids.forEach((id) => ensureView(byId(id)));
   }
   layout(); pushState(); persist();
+}
+
+// A split with fewer tabs than its layout has room for closes up rather than leaving a hole.
+function fitSplit(sp) {
+  const n = sp.ids.length; const was = sp.mode;
+  if (n <= 1) sp.mode = 'single';
+  else if (n < SPLITS[sp.mode]) sp.mode = n === 3 ? 'cols3' : (sp.mode === 'rows2' ? 'rows2' : 'cols2');
+  if (sp.mode !== was) { delete sp.fr; delete sp.fx; delete sp.fy; }
+  return sp;
 }
 
 function addToSplit(id) {
@@ -514,14 +608,16 @@ function enterSpace(name) {
   store.data.spaceSplit[store.data.space] = store.data.split;
   store.data.space = name;
   const saved = store.data.spaceSplit[name] || { mode: 'single', ids: [] };
-  store.data.split = { mode: saved.mode, ids: saved.ids.filter((id) => byId(id)) };
+  store.data.split = fitSplit({ mode: saved.mode, ids: saved.ids.filter((id) => byId(id)) });
   if (store.data.split.ids.length < 2) store.data.split = { mode: 'single', ids: [] };
+  store.data.split.ids.forEach((id) => ensureView(byId(id)));
 }
 function switchSpace(name) {
   if (name === store.data.space) return;
   enterSpace(name);
   const list = tabs.filter((t) => t.space === name && t.id !== programId).sort((a, b) => b.lastActive - a.lastActive);
-  if (list[0]) activate(list[0].id); else openTab({});
+  const first = list.find((t) => store.data.split.ids.includes(t.id)) || list[0];
+  if (first) activate(first.id); else openTab({});
   layout(); pushState(); persist();
 }
 
@@ -650,7 +746,7 @@ function contextMenu(t, p) {
     items.push({ label: 'Copy image', click: () => wc.copyImageAt(p.x, p.y) });
     items.push({ label: 'Search this image with Google Lens', click: () => openTab({ url: 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(p.srcURL), identity: t.identity, after: t }) });
     items.push({ label: 'Ask Claude about this image', click: () => askAI('claude', `Tell me about this image: ${p.srcURL}`) });
-    if (kit('designer')) {
+    if (kit('designer') && t.identity !== 'vanish') {
       const boards = lib.boardList();
       items.push({ label: 'Add to board', submenu: [...boards.map((b) => ({ label: b.name, click: () => addToBoard(t, p, b.id) })), { type: 'separator' }, { label: 'New board', click: () => addToBoard(t, p, lib.boardCreate(`Board ${boards.length + 1}`)) }] });
       items.push({ label: 'Palette from this image', click: () => imagePalette(t, p) });
@@ -666,11 +762,16 @@ function contextMenu(t, p) {
     items.push({ label: 'Ask ChatGPT about this', click: () => openTab({ url: resolveInput(sel, 'chatgpt'), identity: t.identity, after: t }) });
     items.push({ type: 'separator' });
   }
+  if (p.misspelledWord) {
+    for (const word of (p.dictionarySuggestions || []).slice(0, 5)) items.push({ label: word, click: () => wc.replaceMisspelling(word) });
+    items.push({ label: 'Add to dictionary', click: () => wc.session.addWordToSpellCheckerDictionary(p.misspelledWord) }, { type: 'separator' });
+  }
   if (p.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'pasteAndMatchStyle' }, { role: 'selectAll' }, { type: 'separator' });
   items.push(
     { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() },
     { label: 'Forward', enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() },
     { label: 'Reload', click: () => wc.reload() },
+    { label: 'Print…', click: () => wc.print() },
     { type: 'separator' },
     { label: 'Inspect', click: () => wc.inspectElement(p.x, p.y) },
   );
@@ -686,7 +787,7 @@ function tabMenu(t) {
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     { label: 'Open as…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
-    { label: 'Move to Space', submenu: SPACES.map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
+    { label: 'Move to Space', submenu: SPACES.map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
     { label: 'Private: never goes on air', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
@@ -725,9 +826,19 @@ function setVolume(t, v) {
 function setOverlay(on) {
   overlay = !!on;
   if (!mainWin) return;
-  if (overlay) mainWin.contentView.addChildView(uiView);
+  if (overlay || sideReveal) mainWin.contentView.addChildView(uiView);
   else mainWin.contentView.addChildView(uiView, 0);
+  layout();
 }
+
+function setSideReveal(on) {
+  if (!settings().sideHidden && on) return;
+  if (sideReveal === !!on) return;
+  sideReveal = !!on;
+  setOverlay(overlay); pushState();
+}
+
+function setSideHidden(on) { settings().sideHidden = !!on; sideReveal = false; store.save(); setOverlay(overlay); pushState(); }
 
 // ---------------------------------------------------------------- UI state
 let stateTimer = null;
@@ -749,7 +860,7 @@ function sendState() {
     space: store.data.space, spaces: SPACES, kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
     ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
     activeId, programId, live, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
-    split: store.data.split, panes, settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
+    split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
     agent: { port: AGENT_PORT, on: s.agentPort, last: agentLog[agentLog.length - 1] || null },
   });
@@ -776,6 +887,13 @@ ipcMain.on('cue:tab-init', (e) => {
   e.returnValue = { volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live };
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
+ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
+ipcMain.on('cue:play-link', (e, op) => {
+  const sp = store.data.split;
+  const t = byWC(e.sender);
+  if (!settings().syncPlay || !t || !sharesSplit(t)) return;
+  for (const id of sp.ids) { const o = byId(id); if (o && o !== t && o.view) o.view.webContents.send('cue:media', op); }
+});
 ipcMain.on('cue:scroll', (e, ratio) => {
   const sp = store.data.split;
   if (!settings().syncScroll || sp.mode === 'single') return;
@@ -859,6 +977,12 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
       cb({});
       break;
     }
+    case 'side-width': settings().sideWidth = a.w; store.save(); layout(); pushState(); break;
+    case 'side-hide': setSideHidden(!settings().sideHidden); break;
+    case 'side-reveal': setSideReveal(a.on); break;
+    case 'ai-width': settings().aiWidth = a.w; store.save(); layout(); pushState(); break;
+    case 'split-size': resizeSplit(a); break;
+    case 'clear-cache': clearCaches(); break;
     case 'space': switchSpace(a.name); break;
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
@@ -867,7 +991,7 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'strip': stripOpen = !stripOpen; layout(); pushState(); break;
     case 'music': if (wc) wc.send('cue:music', a.op, a.value); break;
     case 'tool': runTool(a.name, t); break;
-    case 'open-page': openTab({ url: `cue://${a.page}`, identity: byId(activeId)?.identity === 'vanish' ? undefined : byId(activeId)?.identity }); break;
+    case 'open-page': openCuePage(a.page, byId(activeId)?.identity); break;
     case 'cred-save': if (pendingCred) { vault.save({ ...pendingCred, auto: !!a.auto }); pendingCred = null; sendEvent('toast', 'Password saved.'); } break;
     case 'cred-never': if (pendingCred) { vault.neverFor(pendingCred.origin); pendingCred = null; } break;
     case 'cred-dismiss': pendingCred = null; break;
@@ -887,10 +1011,12 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
 
 ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'obs-scenes') return obs.scenes();
-  if (cmd === 'suggest') return suggestions(a.q);
+  if (cmd === 'suggest') { const r = suggestions(a.q); warmUp(r); return r; }
   if (cmd === 'import-find') return findImports();
   if (cmd === 'import-run') return runImport(a);
   if (cmd === 'passwords') return vault.list();
+  if (cmd === 'storage') return storageReport();
+  if (cmd === 'team-vault') return loadTeamVault();
   if (cmd === 'ext-find') return findExtensions();
   if (cmd === 'ext-add') return addExtension(a);
   if (cmd === 'ext-remove') return removeExtension(a.id);
@@ -985,12 +1111,87 @@ function suggestions(q) {
   };
 }
 
+// Open the connection to the most likely page before Enter is pressed.
+function warmUp(r) {
+  const top = r.history[0] || r.bookmarks[0];
+  if (!top || !/^https:/.test(top.url)) return;
+  try { sessionFor(byId(activeId)?.identity || 'personal').preconnect({ url: top.url, numSockets: 1 }); } catch {}
+}
+
 async function loadRepos() {
   const user = settings().githubUser; repos = [];
   if (!user) return;
   try {
-    const r = await net.fetch(`https://api.github.com/users/${encodeURIComponent(user)}/repos?per_page=100&sort=pushed`, { headers: { accept: 'application/vnd.github+json' } });
-    if (r.ok) repos = (await r.json()).map((x) => ({ name: x.name, what: x.description || '', url: x.html_url }));
+    for (let page = 1; page <= 5; page++) {
+      const r = await net.fetch(`https://api.github.com/users/${encodeURIComponent(user)}/repos?per_page=100&sort=pushed&page=${page}`, { headers: { accept: 'application/vnd.github+json' } });
+      if (!r.ok) break;
+      const list = await r.json();
+      repos.push(...list.map((x) => ({ name: x.name, what: x.description || '', url: x.html_url })));
+      if (list.length < 100) break;
+    }
+  } catch {}
+}
+
+// ---------------------------------------------------------------- cache limits
+const CACHE_DIRS = ['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'Service Worker/CacheStorage', 'Service Worker/ScriptCache'];
+async function folderBytes(dir) {
+  let total = 0;
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) total += await folderBytes(p);
+    else total += await fs.promises.stat(p).then((s) => s.size, () => 0);
+  }
+  return total;
+}
+const persistentLogins = () => Object.keys(IDENTITIES).filter((k) => k !== 'vanish');
+async function cacheBytes(ses) { let n = 0; for (const d of CACHE_DIRS) n += await folderBytes(path.join(ses.storagePath, d)); return n; }
+async function dropCaches(ses) {
+  await ses.clearCache().catch(() => {});
+  await ses.clearCodeCaches({ urls: [] }).catch(() => {});
+  await ses.clearStorageData({ storages: ['cachestorage', 'shadercache'] }).catch(() => {}); // sign-ins and site data stay
+}
+// Sites write to more places than the normal cache, so the disk cap alone does not hold.
+async function trimCaches() {
+  for (const k of persistentLogins()) {
+    const ses = sessionFor(k);
+    if (await cacheBytes(ses) > STORAGE_MB * 1048576) await dropCaches(ses);
+  }
+  const log = path.join(app.getPath('userData'), 'agent-log.jsonl');
+  try { if (fs.statSync(log).size > 5242880) fs.renameSync(log, `${log}.old`); } catch {}
+  lib.trim(50000);
+}
+async function clearCaches() {
+  for (const k of persistentLogins()) await dropCaches(sessionFor(k));
+  sendEvent('toast', 'Cache cleared. You are still signed in.');
+}
+async function storageReport() {
+  const out = {}; let caches = 0;
+  for (const k of persistentLogins()) caches += await cacheBytes(sessionFor(k));
+  out.cacheMB = Math.round(caches / 1048576);
+  out.totalMB = Math.round(await folderBytes(app.getPath('userData')) / 1048576);
+  out.limitMB = STORAGE_MB * persistentLogins().length;
+  return out;
+}
+
+// ---------------------------------------------------------------- updates
+function newerVersion(a, b) {
+  const p = (v) => String(v).split('.').map((n) => parseInt(n, 10) || 0);
+  const [x, y] = [p(a), p(b)];
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
+  return false;
+}
+// Only says a new version exists. Nothing installs by itself, least of all in the middle of a class.
+async function checkUpdate() {
+  if (process.env.CUE_TEST) return;
+  try {
+    const r = await net.fetch('https://api.github.com/repos/jasonzacmusic/cue/releases/latest', { headers: { accept: 'application/vnd.github+json' } });
+    if (!r.ok) return;
+    const v = String((await r.json()).tag_name || '').replace(/^v/, '');
+    if (!newerVersion(v, app.getVersion()) || store.data.updateTold === v) return;
+    store.data.updateTold = v;
+    addAlert({ source: 'Cue', title: `Cue ${v} is ready`, body: 'Open this to get the new version.', url: LABS_PAGE });
+    sendEvent('toast', `Cue ${v} is ready. See Bills & alerts.`);
   } catch {}
 }
 
@@ -1097,7 +1298,7 @@ function archiveOldTabs() {
   const cutoff = Date.now() - days * 86400000;
   const inSplit = new Set(store.data.split.ids);
   for (const t of [...tabs]) {
-    if (t.pinned || t.id === activeId || t.id === programId || t.identity === 'vanish' || t.agent || t.playing || t.audible || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
+    if (t.pinned || t.id === activeId || t.id === programId || t.identity === 'vanish' || t.agent || t.playing || t.audible || mustStayAwake(t) || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
     store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
     destroyView(t); tabs.splice(tabs.indexOf(t), 1);
   }
@@ -1106,6 +1307,14 @@ function archiveOldTabs() {
 }
 
 // ---------------------------------------------------------------- Cue's own pages
+// One Library, one Boards, one Bills: go back to the page you already have open.
+function openCuePage(page, identity) {
+  const open = tabs.filter((x) => x.url.startsWith(`cue://${page}`));
+  const have = open.find((x) => x.space === store.data.space) || open[0];
+  if (have) { activate(have.id); return have; }
+  return openTab({ url: `cue://${page}`, identity: identity === 'vanish' ? undefined : identity });
+}
+
 const internal = {
   open: ({ url }) => { if (/^https?:/.test(url)) openTab({ url }); },
   'boards.list': () => lib.boardList(),
@@ -1173,6 +1382,41 @@ async function runImport({ browser, profile, identity, what }) {
   return done;
 }
 
+// ---------------------------------------------------------------- the school's own password vault
+// Reads the team site's vault from inside your signed-in tab and keeps the logins in Cue's
+// locked vault, so the portals and their admin pages sign themselves in. Cards, banks and
+// Wi-Fi stay out: they aren't website logins, and they should never be filled in by themselves.
+const READ_TEAM_VAULT = `(async () => {
+  const r = await fetch('/api/vault/passwords', { credentials: 'include' });
+  if (!r.ok) return { signedIn: false };
+  const rows = await r.json();
+  const logins = rows.filter((x) => x.url && !/card|bank|wi-?fi|insurance|confidential/i.test(String(x.category) + ' ' + String(x.siteName)));
+  const out = [];
+  for (const x of logins) {
+    const d = await fetch('/api/vault/passwords/' + x.id + '/decrypt', { method: 'POST', credentials: 'include' });
+    if (!d.ok) continue;
+    const { password } = await d.json();
+    if (password) out.push({ origin: /^https?:/.test(x.url) ? x.url : 'https://' + x.url, username: x.username || '', password });
+  }
+  return { signedIn: true, rows: out };
+})()`;
+async function loadTeamVault(site = TEAM_SITE) {
+  const open = tabs.find((t) => t.url.startsWith(site) && t.identity !== 'vanish');
+  const t = open || openTab({ url: `${site}/vault`, identity: 'school', background: true });
+  ensureView(t);
+  const wc = t.view.webContents;
+  for (let i = 0; i < 100 && wc.isLoading(); i++) await wait(100);
+  let got;
+  try { got = await wc.executeJavaScript(READ_TEAM_VAULT, true); } catch { got = { signedIn: false }; }
+  if (!got.signedIn) { activate(t.id); sendEvent('toast', 'Sign in to the team site here, then press Load again.'); return { signedIn: false }; }
+  let n = 0;
+  for (const who of ['school', 'personal']) n = vault.importMany(who, got.rows);
+  vault.autoForOwnSites();
+  if (!open) closeTab(t.id);
+  sendEvent('toast', `${n} logins loaded from the team site.`);
+  return { signedIn: true, count: n };
+}
+
 // ---------------------------------------------------------------- extensions
 function findExtensions() {
   const out = []; const seen = new Set(); const have = new Set(extensions.installed(extDir).map((e) => e.id));
@@ -1238,7 +1482,7 @@ async function imagePalette(t, p) {
 
 async function runTool(name, t) {
   if (!t) return;
-  if (name === 'boards' || name === 'library' || name === 'bills' || name === 'thumbcheck') { openTab({ url: `cue://${name}`, identity: t.identity === 'vanish' ? undefined : t.identity }); return; }
+  if (name === 'boards' || name === 'library' || name === 'bills' || name === 'thumbcheck') { openCuePage(name, t.identity); return; }
   ensureView(t);
   const wc = t.view.webContents;
   try {
@@ -1299,15 +1543,14 @@ function logAgent(entry) {
 const agentApi = {
   identities: () => Object.entries(IDENTITIES).filter(([k]) => k !== 'vanish').map(([k, v]) => ({ id: k, name: v.name, account: settings().identityLabels[k] || '' })),
   list: () => sidebarOrder().filter((t) => t.identity !== 'vanish').map((t) => ({
-    id: t.id, title: t.title, url: isStart(t.url) ? '' : t.url, identity: t.identity, group: groupOf(t),
+    id: t.id, title: hiddenFromAI(t) ? 'Private' : t.title, url: isStart(t.url) || hiddenFromAI(t) ? '' : t.url, identity: t.identity, group: groupOf(t),
     onAir: t.id === programId, private: t.private, agentTab: t.agent, aiCanAct: agentCanAct(t), audible: t.audible, muted: t.muted, volume: t.volume,
   })),
   get: (id) => byId(Number(id)),
-  canRead: (t) => t && t.identity !== 'vanish' && !t.private && !t.url.startsWith('cue://'), // your Library and Bills pages stay yours
+  canRead: (t) => !!t && t.identity !== 'vanish' && !hiddenFromAI(t) && !/^(cue|file):/.test(t.url), // your Library, Bills and own files stay yours
   canAct: (t) => agentCanAct(t),
   open: ({ url, identity = 'agent', background = true, newTab = false }) => {
-    const target = resolveInput(url);
-    if (target.startsWith('cue://')) throw new Error('Cue\'s own pages are private to the person using it.');
+    const target = agentApi.safeUrl(url);
     const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent';
     // One tab per site, not one per instruction. An agent sent to WhatsApp six
     // times used to leave six WhatsApp tabs behind; now it goes back to the one
@@ -1324,6 +1567,11 @@ const agentApi = {
     }
     return openTab({ url: target, identity: who, background, agent: true });
   },
+  safeUrl: (url) => {
+    const target = resolveInput(url);
+    if (!/^(https?:|about:blank)/i.test(target)) throw new Error('Only web pages can be opened here. Cue\'s own pages and files on this computer stay private.');
+    return target;
+  },
   ensure: (t) => ensureView(t),
   capture: (t) => captureTab(t),
   close: (t) => closeTab(t.id),
@@ -1338,7 +1586,7 @@ const agentApi = {
   // Jason's own tabs are the slots: a background tab an agent opened must
   // never become what a class is looking at.
   slots: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent)
-    .map((t) => ({ id: t.id, title: t.title, url: isStart(t.url) ? '' : t.url, showing: t.id === activeId })),
+    .map((t) => ({ id: t.id, title: t.private ? 'Private' : t.title, url: isStart(t.url) || t.private ? '' : t.url, showing: t.id === activeId })),
   show: (id) => activate(Number(id)),
   take: () => take(),
   // Raise the window WITHOUT taking focus. He is usually teaching over Zoom
@@ -1361,9 +1609,11 @@ const agentApi = {
   log: logAgent,
 };
 
+function hiddenFromAI(t) { return t.private || t.id === programId; }
 function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed); }
 
 // ---------------------------------------------------------------- menus
+const MAC = process.platform === 'darwin';
 function buildMenu() {
   const cmd = (c, a) => () => ipcMain.emit('ui:cmd', {}, c, a);
   const ids = Object.keys(IDENTITIES);
@@ -1380,6 +1630,7 @@ function buildMenu() {
         { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: () => { uiView.webContents.focus(); sendEvent('palette-open'); } },
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
+        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => { const t = byId(activeId); if (t && t.view) t.view.webContents.print(); } },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => closeTab(activeId) },
         { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: () => moveTab({ id: activeId, dir: -1 }) },
         { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: () => moveTab({ id: activeId, dir: 1 }) },
@@ -1389,6 +1640,7 @@ function buildMenu() {
     {
       label: 'View', submenu: [
         { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: cmd('reload') },
+        { label: 'Hide or Show Sidebar', accelerator: 'CmdOrCtrl+\\', click: () => setSideHidden(!settings().sideHidden) },
         { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: () => { uiView.webContents.focus(); sendEvent('focus-find'); } },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: cmd('zoom', { dir: 1 }) },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: cmd('zoom', { dir: -1 }) },
@@ -1420,12 +1672,12 @@ function buildMenu() {
     { label: 'Tools', submenu: toolMenu(cmd) },
     {
       label: 'Tab', submenu: [
-        ...SPACES.map((n, i) => ({ label: `Space: ${n}`, accelerator: `Ctrl+${i + 1}`, click: () => switchSpace(n) })),
+        ...SPACES.map((n, i) => ({ label: `Space: ${n}`, accelerator: `${MAC ? 'Ctrl' : 'Alt'}+${i + 1}`, click: () => switchSpace(n) })),
         { type: 'separator' },
         { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: () => cycle(1) },
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
-        { label: 'Play / Pause Tab', accelerator: 'Ctrl+P', click: cmd('media', { cmd: 'toggle' }) },
+        { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
         ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
       ],
     },
@@ -1468,19 +1720,21 @@ function cycle(d) {
 }
 
 // ---------------------------------------------------------------- sleep
+// A call, a tab being recorded and a half-typed form are all lost if the tab goes to sleep.
+function mustStayAwake(t) { return t.holdAwake || t.dirty || t.id === recTabId; }
 setInterval(() => {
   const mins = settings && store ? settings().sleepMinutes : 30;
   const cutoff = Date.now() - mins * 60000;
   const visible = new Set(panes.map((p) => p.id));
   for (const t of tabs) {
     if (!t.view || t.host !== 'main' || visible.has(t.id) || t.id === activeId) continue;
-    if (t.audible || t.playing || t.lastActive > cutoff) continue;
+    if (t.audible || t.playing || t.lastActive > cutoff || mustStayAwake(t)) continue;
     destroyView(t);
   }
   pushState();
 }, 60000);
 
-setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(); loadRepos(); } }, 3600000);
+setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(); loadRepos(); checkUpdate(); trimCaches(); } }, 3600000);
 
 // ---------------------------------------------------------------- start
 async function setupBlocker() {
@@ -1497,6 +1751,20 @@ async function setupBlocker() {
     for (const ses of sessionsReady) enableBlocker(ses);
   } catch (e) { console.error('blocker', e.message); }
 }
+
+// One bad page or a failed background job must never bring the whole browser down.
+function logProblem(kind, e) {
+  const line = `${new Date().toISOString()} ${kind} ${e && e.stack ? e.stack : e}\n`;
+  console.error(line);
+  try {
+    const f = path.join(app.getPath('userData'), 'problems.log');
+    if (fs.existsSync(f) && fs.statSync(f).size > 1048576) fs.rmSync(f);
+    fs.appendFileSync(f, line);
+  } catch {}
+}
+process.on('uncaughtException', (e) => logProblem('uncaught', e));
+process.on('unhandledRejection', (e) => logProblem('rejected', e));
+app.on('child-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') logProblem('process', `${d.type} ${d.reason}`); });
 
 function createMain() {
   const b = store.data.bounds || { width: 1440, height: 900 };
@@ -1522,7 +1790,11 @@ function createMain() {
   for (const s of saved) tabs.push(makeTab(s));
   if (!tabs.length) tabs.push(makeTab({ url: START_URL }));
   const first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
-  store.data.split = { mode: 'single', ids: [] };
+  const current = (sp) => ({ ...sp, uids: undefined, ids: (sp.uids || []).map((u) => tabs.find((t) => t.uid === u)?.id).filter(Boolean) });
+  store.data.spaceSplit = Object.fromEntries(Object.entries(store.data.savedSpaceSplit || {}).map(([k, v]) => [k, current(v)]));
+  store.data.split = fitSplit(current(store.data.savedSplit || { mode: 'single' }));
+  if (!store.data.split.ids.includes(first.id)) store.data.split = { mode: 'single', ids: [] };
+  store.data.split.ids.forEach((id) => ensureView(byId(id)));
   activate(first.id);
 }
 
@@ -1530,15 +1802,17 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 app.on('second-instance', (_e, argv) => {
   if (!mainWin) return;
+  if (mainWin.isMinimized()) mainWin.restore();
   mainWin.focus();
   const url = argv.find((x) => /^https?:\/\//.test(x)); if (url) openTab({ url });
 });
 let pendingUrls = [];
 app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openTab({ url }); else pendingUrls.push(url); });
+app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL(file).href; if (mainWin) openTab({ url }); else pendingUrls.push(url); });
 
 app.whenReady().then(async () => {
   store = new Store(app.getPath('userData'), 'cue.json', {
-    tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, collapsed: {}, permissions: {},
+    tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, savedSplit: null, savedSpaceSplit: {}, collapsed: {}, permissions: {},
     space: 'Teach', spaceSplit: {}, aiWhich: 'claude', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
     settings: {
       autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
@@ -1546,11 +1820,17 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 30,
     },
   });
-  store.data.settings = { ...{ autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '' }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '' }, ...store.data.settings };
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  if (store.data.settings.cacheCapMB === 1024) store.data.settings.cacheCapMB = CACHE_MB;
   extDir = path.join(app.getPath('userData'), 'extensions');
   lib = new Library(app.getPath('userData'));
+  vanish = createVanish({
+    session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
+    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput,
+  });
+  ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
   vault = new Vault(app.getPath('userData'));
   vault.autoForOwnSites();
   store.data.settings.obs = { host: '127.0.0.1', port: 4455, password: '', ...(store.data.settings.obs || {}) };
@@ -1562,7 +1842,8 @@ app.whenReady().then(async () => {
   });
   buildMenu();
   createMain();
-  checkBills(); tidyInstallers(); loadRepos();
+  checkBills(); tidyInstallers(); loadRepos(); setTimeout(checkUpdate, 8000); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
+  const launchLink = process.argv.slice(1).find((x) => /^https?:\/\//.test(x)); if (launchLink) pendingUrls.push(launchLink);
   pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
   setupBlocker();
   startThumbs();
@@ -1571,7 +1852,7 @@ app.whenReady().then(async () => {
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
   if (settings().obs.autoConnect) obs.connect(settings().obs);
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === 'features' ? 'features.js' : 'in-app.js'))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

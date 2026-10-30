@@ -71,7 +71,7 @@ async function startAgentPort({ port, tokenFile, api }) {
       await waitLoad(t.view.webContents);
       return { id: t.id, title: t.view.webContents.getTitle(), url: t.view.webContents.getURL(), identity: t.identity };
     },
-    navigate: async (a) => { const t = api.get(a.id); const wc = need(t, true); await wc.loadURL(a.url).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
+    navigate: async (a) => { const t = api.get(a.id); const wc = need(t, true); await wc.loadURL(api.safeUrl(a.url)).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
     back: async (a) => { const t = api.get(a.id); const wc = need(t, true); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return { url: wc.getURL() }; },
     close: async (a) => { const t = api.get(a.id); need(t, true); api.close(t); return { closed: a.id }; },
     read: async (a) => {

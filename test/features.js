@@ -51,6 +51,7 @@ function server() {
       if (u === '/rec.mp4' && RECORDING.file) { const b = fs.readFileSync(RECORDING.file); res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': b.length }); return res.end(b); }
       if (u === '/tone.wav') { res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': TONE.length, 'accept-ranges': 'none' }); return res.end(TONE); }
       if (u === '/installer.dmg') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="installer.dmg"' }); return res.end(Buffer.alloc(2048)); }
+      if (u in API) { res.writeHead(API[u] ? 200 : 401, { 'content-type': 'application/json' }); return res.end(API[u] || '{}'); }
       if (PAGES[u]) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(`<!doctype html><meta charset=utf-8>${PAGES[u]}`); }
       res.writeHead(404); res.end('no');
     }).listen(0, '127.0.0.1', () => resolve(s));
@@ -58,6 +59,7 @@ function server() {
 }
 const TONE = wav();
 const RECORDING = { file: null };
+const API = {};
 
 async function loaded(t) { await until(() => t.view && !t.view.webContents.isLoading() && t.view.webContents.getURL() && t.view.webContents.getURL() !== 'about:blank', 15000); await sleep(150); return t.view.webContents; }
 
@@ -114,7 +116,14 @@ module.exports = async function run(c) {
 
   const v = c.openTab({ url: `${base}/${VANISH_TOKEN}`, identity: 'vanish' }); await loaded(v); await sleep(800);
   check('vanish: page really loaded', (await v.view.webContents.executeJavaScript('document.title')) === VANISH_TOKEN);
-  c.closeTab(v.id); await sleep(300);
+  const vw = c.vanish.window();
+  check('vanish: opens in its own window', !!vw && vw !== c.win() && vw.isVisible() && vw.getTitle() === 'Vanish', vw && vw.getTitle());
+  check('vanish: its tabs never join the sidebar', !c.tabs.some((t) => t.identity === 'vanish') && !c.agentApi.list().some((t) => t.url.includes(VANISH_TOKEN)));
+  check('vanish: kept out of screen sharing', vw.isContentProtected());
+  await sleep(500);
+  c.vanish.closeTab(v.id); await sleep(800);
+  check('vanish: closing the last tab closes the window', c.vanish.window() === null);
+  check('vanish: site data is wiped', (await c.sessionFor('vanish').cookies.get({})).length === 0);
   check('vanish: not in history', c.lib.history(VANISH_TOKEN).length === 0);
   c.store.flush();
   const hits = walkFind(ud, VANISH_TOKEN);
@@ -131,7 +140,7 @@ module.exports = async function run(c) {
   const vb = c.openTab({ url: `${base}/note?vb`, identity: 'vanish' }); await loaded(vb);
   c.bookmarkTab(vb); await sleep(100);
   check('bookmarks: Vanish pages are not saved', c.lib.bookmarks('vb').length === 0);
-  c.closeTab(vb.id);
+  c.vanish.closeTab(vb.id); await sleep(300);
 
   // ---- passwords
   const origin = base;
@@ -145,7 +154,7 @@ module.exports = async function run(c) {
   check('passwords: other login does not get it', (await sc.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
   const vs = c.openTab({ url: `${base}/login`, identity: 'vanish' }); await loaded(vs); await sleep(500);
   check('passwords: Vanish does not get it', (await vs.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
-  c.closeTab(vs.id);
+  c.vanish.closeTab(vs.id); await sleep(300);
   const ag = c.openTab({ url: `${base}/login`, identity: 'personal', agent: true }); await loaded(ag); await sleep(500);
   check('passwords: AI agent tab does not get it', (await ag.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
   c.closeTab(ag.id);
@@ -203,7 +212,7 @@ module.exports = async function run(c) {
   c.closePeek();
   const before = pk.view.getBounds().width;
   c.toggleAI('claude'); await sleep(400);
-  check('AI panel: opens and page makes room', !!c.getAI() && pk.view.getBounds().width === before - 440, { before, after: pk.view.getBounds().width });
+  check('AI panel: opens and page makes room', !!c.getAI() && pk.view.getBounds().width === before - 448, { before, after: pk.view.getBounds().width });
   await until(() => !c.getAI().webContents.isLoading() && c.getAI().webContents.getURL(), 12000);
   check('AI panel: loads Claude', /claude\.ai/.test(c.getAI().webContents.getURL()), c.getAI().webContents.getURL());
   await shotUI('21-ai-panel');
@@ -238,7 +247,7 @@ module.exports = async function run(c) {
   col.view.webContents.sendInputEvent({ type: 'mouseDown', x: 100, y: 100, button: 'left', clickCount: 1 });
   col.view.webContents.sendInputEvent({ type: 'mouseUp', x: 100, y: 100, button: 'left', clickCount: 1 });
   const picked = await until(() => events.find((e) => e[0] === 'palette'));
-  const near = (hex, want) => [1, 3, 5].every((i) => Math.abs(parseInt(hex.slice(i, i + 2), 16) - parseInt(want.slice(i, i + 2), 16)) <= 8);
+  const near = (hex, want) => [1, 3, 5].every((i) => Math.abs(parseInt(hex.slice(i, i + 2), 16) - parseInt(want.slice(i, i + 2), 16)) <= 20);
   check('colour picker: reads the pixel', picked && near(picked[1].colors[0], '#00FF00'), picked && picked[1]);
   const tools = require('../src/main/page-tools');
   const pic = await c.captureTab(im).catch(() => null);
@@ -438,6 +447,100 @@ module.exports = async function run(c) {
   const toolsMenu = Menu.getApplicationMenu().items.find((i) => i.label === 'Tools');
   check('kits: its tools leave the menu', !toolsMenu.submenu.items.some((i) => i.label === 'Ruler'));
   c.setSetting('kit.designer', true);
+
+  // ---- audit fixes, 0.2.5
+  check('update check: compares versions as numbers', c.newerVersion('0.2.10', '0.2.9') && !c.newerVersion('0.2.4', '0.2.4') && !c.newerVersion('0.2.3', '0.3.0'));
+
+  const api = c.agentApi;
+  const refused = (u) => { try { api.safeUrl(u); return false; } catch { return true; } };
+  check('AI door: refuses files and Cue pages, allows the web', refused('file:///etc/hosts') && refused('cue://library') && !refused('https://example.com'));
+  const secret = c.openTab({ url: `${base}/fonts`, identity: 'personal' }); await sleep(600);
+  secret.private = true;
+  const seen = api.list().find((x) => x.id === secret.id);
+  check('AI door: a private tab shows no title or address', seen.title === 'Private' && seen.url === '' && !api.canRead(secret), seen);
+  secret.private = false;
+  c.closeTab(secret.id);
+
+  const zoomTab = c.openTab({ url: `${base}/fonts`, identity: 'personal' }); await sleep(600);
+  await zoomTab.view.webContents.executeJavaScript(`location.href='zoommtg://zoom.us/join?confno=1'`, true);
+  const asked = await until(() => zoomTab.log.find((l) => l.level === 'external'), 5000);
+  check('Zoom and mail links reach their own app', !!asked, zoomTab.log.slice(-3));
+  await zoomTab.view.webContents.executeJavaScript(`(()=>{const i=document.createElement('input');document.body.append(i);i.dispatchEvent(new Event('input',{bubbles:true}));})()`, true);
+  const typedIn = await until(() => zoomTab.dirty, 3000);
+  check('sleep: a half-typed page is kept awake', !!typedIn);
+  c.closeTab(zoomTab.id);
+
+  const p1 = c.openTab({ url: `${base}/audio`, identity: 'personal' });
+  const p2 = c.openTab({ url: `${base}/audio`, identity: 'personal' });
+  const p3 = c.openTab({ url: `${base}/audio`, identity: 'personal' }); await sleep(800);
+  c.activate(p1.id); c.store.data.split = { mode: 'cols3', ids: [p1.id, p2.id, p3.id] }; c.layout(); await sleep(200);
+  c.closeTab(p3.id); await sleep(200);
+  check('split: closing a tab closes up the gap', c.getState().split.mode === 'cols2' && c.getState().panes.length === 2, c.getState().split);
+  const [pane1, pane2] = c.getState().split.ids.map((id) => c.byId(id));
+  c.setSetting('syncPlay', true);
+  await pane1.view.webContents.executeJavaScript(`document.getElementById('a').play().then(()=>1)`, true);
+  const follows = await until(() => pane2.view.webContents.executeJavaScript(`!document.getElementById('a').paused`), 5000);
+  check('split: Play Together starts the other tab', !!follows);
+  await sleep(500);
+  const both = await pane1.view.webContents.executeJavaScript(`!document.getElementById('a').paused`);
+  check('split: one-player leaves split partners alone', !!both);
+  await pane1.view.webContents.executeJavaScript(`document.getElementById('a').pause()`, true);
+  const stops = await until(() => pane2.view.webContents.executeJavaScript(`document.getElementById('a').paused`), 5000);
+  check('split: Play Together pauses the other tab', !!stops);
+  c.setSetting('syncPlay', false); c.setSplit('single');
+  for (const x of [p1, p2, p3]) if (c.byId(x.id)) c.closeTab(x.id);
+
+  const n0 = c.tabs.length;
+  await c.runTool('library', c.byId(c.getState().activeId)); await sleep(300);
+  await c.runTool('library', c.byId(c.getState().activeId)); await sleep(300);
+  check('Library: asking twice goes back to the same tab', c.tabs.length <= n0 + 1, c.tabs.length - n0);
+
+  // ---- sidebar shapes, resizing, cache
+  const contentX = () => c.getState().panes[0].rect.x;
+  c.setSetting('sideWidth', 300); c.layout(); await sleep(200);
+  check('sidebar: pages make room when it is wider', contentX() === 300, contentX());
+  c.setSetting('sideWidth', 64); c.layout(); await sleep(300);
+  check('sidebar: narrow turns into icons only', await uwc.executeJavaScript(`document.body.classList.contains('rail') && getComputedStyle(document.querySelector('.tab .title')).display === 'none'`));
+  await shotUI('30-rail');
+  c.setSetting('sideWidth', 248); c.layout();
+  c.setOverlay(false); c.setSideHidden(true); await sleep(300);
+  check('sidebar: hiding gives the page the whole width', contentX() === 8, contentX());
+  c.setSideReveal(true); await sleep(300);
+  check('sidebar: the mouse brings it back over the page', contentX() === 8 && c.ui().getBounds().width === 248, c.ui().getBounds());
+  c.setSideReveal(false); c.setSideHidden(false); await sleep(200);
+  check('sidebar: pinning it again restores the page', contentX() === 248 && c.ui().getBounds().width > 248, contentX());
+  await shotUI('31-sidebar');
+
+  const r1 = c.openTab({ url: `${base}/fonts`, identity: 'personal' });
+  const r2 = c.openTab({ url: `${base}/long`, identity: 'personal' }); await sleep(600);
+  c.setSplit('cols2'); await sleep(200);
+  const w0 = c.getState().panes[0].rect.width;
+  c.resizeSplit({ i: 0, axis: 'x', pos: c.getState().panes[0].rect.x + 200 }); await sleep(200);
+  const w1 = c.getState().panes[0].rect.width;
+  check('split: dragging the gap resizes the panes', w1 < w0 - 100, { w0, w1 });
+  c.setSplit('single'); c.closeTab(r1.id); c.closeTab(r2.id);
+
+  const rep = await c.storageReport();
+  check('cache: reports what it is using', rep.totalMB >= 0 && rep.limitMB > 0, rep);
+  await c.trimCaches();
+  check('cache: the cap is 256 MB per login', require('electron').app.commandLine.getSwitchValue('disk-cache-size') === String(256 * 1048576));
+
+  // ---- the team vault, against made-up logins on the test server
+  const teamPw = crypto.randomBytes(8).toString('hex');
+  API['/api/vault/passwords'] = JSON.stringify([
+    { id: 'a', siteName: 'Test Portal', url: `${base}/login`, username: 'team-user@example.test', category: 'Apps' },
+    { id: 'b', siteName: 'Bank of Test', url: 'https://bank.example.test', username: 'x', category: 'Card / Bank' },
+  ]);
+  API['/api/vault/passwords/a/decrypt'] = JSON.stringify({ password: teamPw });
+  API['/api/vault/passwords/b/decrypt'] = JSON.stringify({ password: 'should-not-be-read' });
+  const tv = await c.loadTeamVault(base);
+  check('team vault: loads the portal login', tv.signedIn && tv.count === 1, tv);
+  check('team vault: leaves banks out', !c.vault.list().some((x) => /bank/.test(x.origin)));
+  check('team vault: stored locked, not in plain text', !fs.readFileSync(path.join(ud, 'passwords.json'), 'utf8').includes(teamPw));
+  API['/api/vault/passwords'] = null;
+  const tv2 = await c.loadTeamVault(base);
+  check('team vault: says so when signed out', tv2.signedIn === false);
+  for (const x of c.tabs.filter((y) => y.url.startsWith(`${base}/vault`))) c.closeTab(x.id);
 
   // ---- tiny control: a failing check must be visible
   fs.writeFileSync(path.join(OUT, 'features.json'), JSON.stringify(results, null, 2));

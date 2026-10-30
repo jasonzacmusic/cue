@@ -20,6 +20,7 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 ## Where things are
 - `src/main/main.js`: windows, tabs, Spaces, split views, on air, Peek, AI panel, menus, every wire.
 - `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
+- `src/main/vanish.js`: the Vanish window. Its tabs are kept out of Cue's tab list on purpose, so nothing that saves or shares tabs can reach them.
 - `src/main/db.js`: history, bookmarks, Boards. `vault.js`: passwords (OS keychain). `bills.js`: bill reader.
 - `src/main/importer.js`: move in from Helium, Chrome, Brave, Edge, Arc, Safari.
 - `src/main/capture.js`, `page-tools.js`, `extensions.js`, `groups.js`, `obs.js`.
@@ -29,10 +30,13 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 ## Testing: always do this before saying something works
 ```bash
 npm ci
-CUE_TEST=features CUE_USER_DATA=/tmp/cue-a CUE_OUT=/tmp/cue-a-out npx electron .   # every feature, real app
+CUE_QUIET=1 CUE_TEST=features CUE_USER_DATA=/tmp/cue-a CUE_OUT=/tmp/cue-a-out npx electron .   # every feature, real app
+CUE_TEST=restart CUE_PHASE=1 CUE_USER_DATA=/tmp/cue-r npx electron . && CUE_TEST=restart CUE_PHASE=2 CUE_USER_DATA=/tmp/cue-r npx electron .   # split views survive a restart
 CUE_TEST=1 CUE_USER_DATA=/tmp/cue-b CUE_OUT=/tmp/cue-b-out npx electron .          # real NSM sites, split views, on air
 node test/importer-test.js                                                          # move-in, with fake browser data
 ```
+`CUE_QUIET=1` keeps tests silent and independent of whatever headphones are connected: a sleeping pair of AirPods stalls every video.
+The screen must be awake and unlocked, or picture and click checks fail.
 Use a new `CUE_USER_DATA` folder each run. Results are printed as PASS/FAIL and written to `CUE_OUT`.
 `CUE_TEST` uses a mock keychain, so tests never pop a dialog and never touch his real passwords.
 Look at the pictures in `CUE_OUT`, not just the numbers. Add a check to `test/features.js` for
@@ -58,9 +62,15 @@ sign-ins arrived, make Cue the default browser, and only then move `/Application
 the Trash. Never delete Helium's data folder, and never empty the Trash. If Cue is slower, leave
 Helium installed and report the numbers.
 
+## Size and cache limits (do not loosen without a reason)
+- The app must stay under the budget in `scripts/build-mac.js`, which fails the build above it. Adding a dependency is a size decision.
+- Cache: 256 MB disk cap per login, 600 MB total per login before `trimCaches` empties it. Sign-ins survive.
+- History keeps the newest 50,000 pages. Logs rotate.
+
 ## Honest limits today
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.
+- Vanish is hidden from screen sharing with Apple's normal setting. Some capture tools on recent macOS ignore it.
 - Chrome extensions: simple ones work. Ones that need Chrome's toolbar APIs may not, until Stage 2.
 - Windows passwords and sign-ins can't be moved in, because Chrome locks them to itself there.
 - The bill reader works from each page's wording, so a redesigned billing page may need a new phrase in `bills.js`.

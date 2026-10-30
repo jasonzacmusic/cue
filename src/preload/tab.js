@@ -209,6 +209,7 @@ const call = (name, ...args) => contextBridge.executeInMainWorld({
 
 ipcRenderer.on('cue:volume', (_e, v) => call('setVolume', v));
 ipcRenderer.on('cue:media', (_e, cmd) => {
+  linkQuiet = Date.now() + 500;
   const playing = call('media', cmd);
   ipcRenderer.send('cue:media-state', !!playing);
 });
@@ -232,6 +233,18 @@ window.addEventListener('scroll', () => {
     if (max > 0) ipcRenderer.send('cue:scroll', window.scrollY / max);
   });
 }, { passive: true });
+
+// a half-typed form must not be lost to tab sleep
+let typed = false;
+window.addEventListener('input', () => { if (!typed) { typed = true; ipcRenderer.send('cue:dirty'); } }, true);
+
+// play and pause travel to the other tabs in a split view when Play Together is on
+let linkQuiet = 0;
+for (const type of ['play', 'pause']) {
+  window.addEventListener(type, (e) => {
+    if (e.target instanceof HTMLMediaElement && Date.now() >= linkQuiet) ipcRenderer.send('cue:play-link', type);
+  }, true);
+}
 
 ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
 ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));

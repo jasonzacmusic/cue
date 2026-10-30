@@ -16,12 +16,34 @@ function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp
 function hostOf(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } }
 function ringColor(t) { return t.identity === 'vanish' ? 'var(--muted)' : (S.identities[t.identity] || {}).color; }
 
+const ICON = (d) => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICONS = {
+  plus: ICON('<path d="M8 3v10M3 8h10"/>'),
+  find: ICON('<circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3.3 3.3"/>'),
+  boards: ICON('<rect x="2.5" y="2.5" width="4.5" height="6" rx="1"/><rect x="9" y="2.5" width="4.5" height="3.5" rx="1"/><rect x="9" y="8" width="4.5" height="5.5" rx="1"/><rect x="2.5" y="10.5" width="4.5" height="3" rx="1"/>'),
+  library: ICON('<path d="M3 2.5v11M6 2.5v11M9.2 2.8l3.6 10.4"/>'),
+  bills: ICON('<path d="M4 6.5a4 4 0 0 1 8 0c0 3.6 1.3 4.6 1.3 4.6H2.7S4 10.100 4 6.500zM6.700 13.300h2.600"/>'),
+  settings: ICON('<path d="M3 4.500h6M12 4.500h1M3 11.500h1M7 11.500h6"/><circle cx="10.500" cy="4.500" r="1.500"/><circle cx="5.500" cy="11.500" r="1.500"/>'),
+  hide: ICON('<rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/>'),
+};
+$('#newtab').innerHTML = ICONS.plus;
+$('#sidehide').innerHTML = ICONS.hide;
+$('#findany').innerHTML = ICONS.find;
+$('#openboards').innerHTML = ICONS.boards;
+$('#openlibrary').innerHTML = ICONS.library;
+$('#openbills').insertAdjacentHTML('afterbegin', ICONS.bills);
+$('#opensettings').innerHTML = ICONS.settings;
+
 function favEl(t) {
   const f = el('span', 'fav');
   const showRing = t.identity !== S.settings.defaultIdentity || t.agent;
   if (showRing) { f.classList.add('ringed'); f.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); }
-  if (t.favicon) { const i = new Image(); i.src = t.favicon; i.onerror = () => { f.textContent = (t.title || '?')[0].toUpperCase(); }; f.append(i); }
-  else f.textContent = (t.title || hostOf(t.url) || '?').slice(0, 1).toUpperCase();
+  const letter = () => { f.textContent = (t.title || hostOf(t.url) || '?').slice(0, 1).toUpperCase(); };
+  // A site that names no icon usually still has one at the usual address.
+  let src = t.favicon;
+  if (!src && /^https?:/.test(t.url)) { try { src = `${new URL(t.url).origin}/favicon.ico`; } catch {} }
+  if (src) { const i = new Image(); i.src = src; i.alt = ''; i.onerror = letter; f.append(i); } else letter();
+  if (t.audible || t.muted) f.append(el('b', 'favsound' + (t.muted ? ' off' : '')));
   return f;
 }
 
@@ -32,6 +54,8 @@ const inSpace = (t) => t.space === S.space;
 function render() {
   if (!S) return;
   document.body.dataset.live = S.live ? '1' : '';
+  document.body.dataset.space = S.space;
+  applySide();
   if (S.space !== lastSpace) {
     if (lastSpace !== null) { newIdentity = S.settings.spaceLogins[S.space] || newIdentity; }
     lastSpace = S.space;
@@ -42,6 +66,7 @@ function render() {
   renderGroups();
   renderBar();
   renderContent();
+  renderGutters();
   renderLive();
   renderDownloads();
   renderExtras();
@@ -52,24 +77,65 @@ function render() {
     : (a.on ? 'AI agents ready' : 'AI agents off');
 }
 
+// The sidebar has three shapes: full, an icon rail, and hidden until the mouse reaches the left edge.
+const RAIL_AT = 132;
+function applySide(width = S.sideWidth) {
+  const hidden = !!S.settings.sideHidden; const root = document.documentElement.style;
+  root.setProperty('--side-w', `${width}px`);
+  root.setProperty('--bar-left', hidden ? '0px' : `${width}px`);
+  root.setProperty('--content-left', hidden ? '8px' : `${width}px`);
+  root.setProperty('--ai-w', `${S.aiWidth}px`);
+  document.body.classList.toggle('rail', width < RAIL_AT);
+  document.body.classList.toggle('sidehidden', hidden);
+  document.body.classList.toggle('peeking', !!S.sideReveal);
+  $('#sidehide').title = hidden ? 'Keep the sidebar open (⌘\\)' : 'Hide the sidebar (⌘\\)';
+}
+
+function grip(handle, axis, onMove, onEnd) {
+  handle.onpointerdown = (e) => {
+    e.preventDefault(); handle.setPointerCapture(e.pointerId); handle.classList.add('drag-on');
+    const move = (m) => onMove(axis === 'x' ? m.clientX : m.clientY);
+    const up = () => { handle.classList.remove('drag-on'); handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); if (onEnd) onEnd(); };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up);
+  };
+}
+const snapSide = (x) => (x < 96 ? 64 : Math.min(420, Math.round(x)));
+grip($('#sidegrip'), 'x', (x) => { const w = snapSide(x); applySide(w); send('side-width', { w }); });
+$('#sidegrip').ondblclick = () => send('side-width', { w: S.sideWidth < RAIL_AT ? 248 : 64 });
+grip($('#aigrip'), 'x', (x) => send('ai-width', { w: Math.max(320, Math.min(720, Math.round(innerWidth - x))) }));
+$('#sidehide').onclick = () => send('side-hide');
+let hideTimer = null;
+$('#edge').onmouseenter = () => { clearTimeout(hideTimer); send('side-reveal', { on: true }); };
+$('#side').onmouseenter = () => clearTimeout(hideTimer);
+$('#side').onmouseleave = () => { hideTimer = setTimeout(() => send('side-reveal', { on: false }), 280); };
+
+function renderGutters() {
+  const box = $('#gutters'); box.innerHTML = '';
+  for (const g of S.gutters) {
+    const d = el('div', `gutter ${g.axis}`);
+    Object.assign(d.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.width}px`, height: `${g.height}px` });
+    d.setAttribute('role', 'separator'); d.title = 'Drag to resize';
+    grip(d, g.axis, (pos) => send('split-size', { i: g.i, axis: g.axis, pos }));
+    box.append(d);
+  }
+  $('#aigrip').hidden = !S.ai;
+}
+
 function renderIdPick() {
   const box = $('#idpick'); box.innerHTML = '';
   for (const [id, v] of Object.entries(S.identities)) {
-    const b = el('button', id === 'vanish' ? 'vanish' : '');
+    const b = el('button', id === 'vanish' ? 'vanish' : '', id === 'vanish' ? '' : esc(v.name[0]));
     b.style.setProperty('--c', v.color);
-    // The dots were unlabelled colours, so nobody could tell what they did.
-    b.append(el('i', '', ''), el('span', 'idname', esc(v.name)));
-    b.title = `New tabs open as ${v.name}${S.labels[id] ? ` (${S.labels[id]})` : ''}`;
-    b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === newIdentity);
+    b.title = id === 'vanish' ? 'Open the Vanish window: nothing is saved' : `New tabs open as ${v.name}${S.labels[id] ? ` · ${S.labels[id]}` : ''}`;
+    b.setAttribute('aria-label', b.title);
+    if (id !== 'vanish') { b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === newIdentity); }
     if (id === newIdentity) b.classList.add('on');
-    b.onclick = () => { newIdentity = id; try { localStorage.setItem('cue.newIdentity', id); } catch {} renderIdPick(); };
+    b.onclick = () => {
+      if (id === 'vanish') { send('new-tab', { identity: 'vanish' }); return; }
+      newIdentity = id; try { localStorage.setItem('cue.newIdentity', id); } catch {} renderIdPick();
+    };
     box.append(b);
   }
-  const v = S.identities[newIdentity];
-  const who = S.labels[newIdentity];
-  $('#idwho').textContent = newIdentity === 'vanish'
-    ? 'New tabs keep nothing on this computer.'
-    : `New tabs open as ${v ? v.name : newIdentity}${who ? ` · ${who}` : ''}`;
 }
 
 function renderSpaces() {
@@ -238,13 +304,14 @@ function renderBar() {
   oid.title = a ? `${S.identities[a.identity].name}${S.labels[a.identity] ? ` · ${S.labels[a.identity]}` : ''}` : '';
   document.querySelectorAll('[data-split]').forEach((b) => b.classList.toggle('on', b.dataset.split === S.split.mode));
   $('#syncscroll').classList.toggle('on', !!S.settings.syncScroll);
+  $('#syncplay').classList.toggle('on', !!S.settings.syncPlay);
   $('#livetoggle').checked = S.live;
   $('#take').hidden = !S.live;
 }
 
 function renderContent() {
   const fr = $('#frames'); fr.innerHTML = '';
-  const side = 264; const bar = 52;
+  const side = S.settings.sideHidden ? 8 : S.sideWidth; const bar = 52;
   if (S.panes.length > 1) {
     for (const p of S.panes) {
       const f = el('div', 'frame' + (p.id === S.activeId ? ' active' : ''));
@@ -304,8 +371,8 @@ function libraryHits(r) {
     ...r.bookmarks.map((x) => ({ k: 'Bookmark', v: x.title || x.url, run: openUrl(x.url) })),
     ...r.history.map((x) => ({ k: 'History', v: x.title || x.url, run: openUrl(x.url) })),
     ...r.boards.map((x) => ({ k: 'Board', v: x.title || x.url, run: openUrl(x.url) })),
-    ...r.apps.map((x) => ({ k: 'NSM app', v: x.name, run: openUrl(x.url) })),
-    ...r.repos.map((x) => ({ k: 'GitHub', v: x.name, run: openUrl(x.url) })),
+    ...r.apps.map((x) => ({ k: 'NSM app', v: x.name, icon: new URL('/favicon.ico', x.url).href, run: openUrl(x.url) })),
+    ...r.repos.map((x) => ({ k: 'GitHub', v: x.name, icon: 'https://github.com/favicon.ico', run: openUrl(x.url) })),
   ];
 }
 
@@ -398,7 +465,7 @@ function openPalette() {
     const paint = () => {
       list.innerHTML = '';
       items.forEach((it, i) => {
-        const r = el('div', 'sg' + (i === sel ? ' sel' : ''), `<span class="k">${esc(it.k)}</span><span class="v">${esc(it.v)}</span>`);
+        const r = el('div', 'sg' + (i === sel ? ' sel' : ''), `<span class="k">${esc(it.k)}</span><span class="v">${it.icon ? `<img src="${esc(it.icon)}" alt="" onerror="this.remove()">` : ''}${esc(it.v)}</span>`);
         r.onclick = () => { closeModal(); it.run(); };
         list.append(r);
       });
@@ -609,6 +676,7 @@ $('#fwd').onclick = () => send('forward');
 $('#reload').onclick = () => send('reload');
 document.querySelectorAll('[data-split]').forEach((b) => { b.onclick = () => send('split', { mode: b.dataset.split }); });
 $('#syncscroll').onclick = () => send('setting', { key: 'syncScroll', value: !S.settings.syncScroll });
+$('#syncplay').onclick = () => send('setting', { key: 'syncPlay', value: !S.settings.syncPlay });
 $('#livetoggle').onchange = (e) => send('live', { on: e.target.checked });
 $('#take').onclick = () => send('take');
 $('#lb-take').onclick = () => send('take');
@@ -616,7 +684,7 @@ $('#lb-end').onclick = () => send('live', { on: false });
 $('#opensettings').onclick = () => openSettings();
 
 let toastTimer;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2800); }
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); if (S && S.settings.sideHidden) { send('side-reveal', { on: true }); clearTimeout(hideTimer); hideTimer = setTimeout(() => send('side-reveal', { on: false }), 3000); } clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2800); }
 
 // ---------------------------------------------------------------- modals
 function openModal(build) {
@@ -660,6 +728,9 @@ function openSettings() {
     sh.append(el('div', 'note', 'Switch off what you don\'t use and it stays out of your way.'));
     Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
     sh.append(el('h3', '', 'Passwords'));
+    const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
+    teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
+    team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com. Cards and banks stay out.'), teamBtn); sh.append(team);
     const pwBox = el('div', 'pwlist'); sh.append(pwBox);
     window.cue.invoke('passwords').then((list) => {
       if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
@@ -683,9 +754,14 @@ function openSettings() {
     sh.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. The on-air tab is never paused.'));
     sh.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
     sh.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
+    sh.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));
     sh.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
     sh.append(settingRow('Archive unused tabs after (days, 0 = never)', text('archiveDays', s.archiveDays, '7', 'number'), 'Pinned tabs never archive. Find archived tabs in Library.'));
-    sh.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '1024', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
+    sh.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
+    const used = el('div', 'row'); const usedText = el('span', 'note', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache');
+    clearBtn.onclick = () => send('clear-cache');
+    used.append(usedText, clearBtn); sh.append(used);
+    window.cue.invoke('storage').then((r) => { usedText.textContent = `Cache ${r.cacheMB} MB. Cue in total ${r.totalMB} MB. Trimmed automatically above ${r.limitMB} MB.`; });
     sh.append(settingRow('Warn before downloading when free space falls under (GB)', text('lowDiskGB', s.lowDiskGB, '5', 'number')));
     sh.append(settingRow('Move opened installers to the Trash after a day', check('tidyInstallers', s.tidyInstallers)));
     sh.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'jasonzacmusic')));

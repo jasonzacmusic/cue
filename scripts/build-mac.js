@@ -3,6 +3,8 @@
 // Notarizing happens after, with ~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh --no-resign
 const { packager } = require('@electron/packager');
 const path = require('path');
+const fs = require('fs');
+const { execSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
 const pkg = require(path.join(root, 'package.json'));
@@ -22,6 +24,11 @@ packager({
   appCopyright: 'Nathaniel School of Music. Free and open source (GPL-3.0).',
   icon: path.join(root, 'assets', 'icon.icns'),
   asar: { unpackDir: 'bin' },
+  // Chromium ships every language it knows, about 40 MB Cue never shows. English stays.
+  afterCopy: [async ({ buildPath }) => {
+    const res = path.join(buildPath, '..', '..', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Resources');
+    for (const f of fs.readdirSync(res)) { if (f.endsWith('.lproj') && !/^en(_GB)?\.lproj$/.test(f)) fs.rmSync(path.join(res, f), { recursive: true }); }
+  }],
   prune: true,
   ignore: [/^\/build($|\/)/, /^\/test($|\/)/, /^\/scripts($|\/)/, /^\/\.git($|\/)/, /\.md$/],
   extendInfo: {
@@ -39,5 +46,11 @@ packager({
       entitlements: path.join(root, 'scripts', 'entitlements.mac.plist'),
     }),
   },
-}).then((paths) => console.log('built', paths.join(', ')))
+}).then((paths) => {
+  // A browser that creeps up by a few megabytes every release ends up huge, so growth has to be a decision.
+  const BUDGET_MB = 270;
+  const mb = Math.round(Number(execSync(`du -sk "${path.join(paths[0], 'Cue.app')}"`).toString().split('\t')[0]) / 1024);
+  console.log('built', paths.join(', '), `${mb} MB of ${BUDGET_MB} MB budget`);
+  if (mb > BUDGET_MB) { console.error(`Cue.app is ${mb} MB, over the ${BUDGET_MB} MB budget.`); process.exit(1); }
+})
   .catch((e) => { console.error(e); process.exit(1); });

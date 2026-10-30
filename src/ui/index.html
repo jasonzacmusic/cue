@@ -10,13 +10,13 @@
 <aside id="side">
   <div class="side-top drag">
     <img class="brand" src="../../assets/mark.svg" alt="Cue">
-  </div>
-  <div class="newrow">
-    <button id="newtab" class="btn wide" title="New tab (⌘T)"><span class="plus">+</span> New tab</button>
-    <div class="idpick" id="idpick" role="radiogroup" aria-label="New tabs open as"></div>
-    <p class="idwho" id="idwho"></p>
+    <button id="sidehide" class="icon nodrag" title="Hide the sidebar (⌘\\)" aria-label="Hide the sidebar"></button>
   </div>
   <div id="spaces" class="spaces" role="tablist" aria-label="Spaces"></div>
+  <div class="newrow">
+    <button id="newtab" class="newtab" title="New tab (⌘T)" aria-label="New tab"></button>
+    <div class="idpick" id="idpick" role="radiogroup" aria-label="New tabs open as"></div>
+  </div>
   <div id="pins" class="pins"></div>
   <div id="groups" class="groups"></div>
   <div id="livebox" class="livebox" hidden>
@@ -27,16 +27,16 @@
   <div id="downloads" class="downloads" hidden></div>
   <div id="credbar" class="credbar" hidden></div>
   <div class="side-tools">
-    <button id="findany" class="tool" title="Find anything (⌘K)">⌘K</button>
-    <button id="openboards" class="tool" title="Boards">Boards</button>
-    <button id="openlibrary" class="tool" title="Bookmarks, history and archived tabs (⌘Y)">Library</button>
-    <button id="openbills" class="tool" title="Bills and alerts">Bills<span id="billbadge" class="badge" hidden></span></button>
+    <button id="findany" class="tool" title="Find anything (⌘K)" aria-label="Find anything"></button>
+    <button id="openboards" class="tool" title="Boards" aria-label="Boards"></button>
+    <button id="openlibrary" class="tool" title="Bookmarks, history and archived tabs (⌘Y)" aria-label="Library"></button>
+    <button id="openbills" class="tool" title="Bills and alerts" aria-label="Bills and alerts"><span id="billbadge" class="badge" hidden></span></button>
+    <button id="opensettings" class="tool" title="Settings" aria-label="Settings"></button>
   </div>
-  <div class="side-foot">
-    <span id="agentline" class="agentline"></span>
-    <button id="opensettings" class="icon" title="Settings" aria-label="Settings">⚙︎</button>
-  </div>
+  <span id="agentline" class="agentline"></span>
+  <div id="sidegrip" class="grip" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar" title="Drag to resize. Double-click for icons only."></div>
 </aside>
+<div id="edge" class="edge" aria-hidden="true"></div>
 
 <header id="bar" class="drag">
   <div class="nav nodrag">
@@ -61,6 +61,7 @@
     <button data-split="cols3" title="Three columns (⌥⌘4)"><i class="l4"></i></button>
     <button data-split="grid4" title="Grid of four (⌥⌘5)"><i class="l5"></i></button>
     <button id="syncscroll" class="sync" title="Scroll split tabs together">⇅</button>
+    <button id="syncplay" class="sync" title="Play and pause split tabs together">⏯</button>
   </div>
   <div id="peekbar" class="peekbar nodrag" hidden>
     <span id="peektitle"></span><button id="peekkeep" class="btn">Open as tab</button><button id="peekclose" class="icon" aria-label="Close Peek">×</button>
@@ -85,6 +86,8 @@
   <button id="aiclose" class="icon" aria-label="Close AI panel">×</button>
 </div>
 
+<div id="aigrip" class="aigrip" role="separator" aria-orientation="vertical" aria-label="Resize the AI panel" hidden></div>
+<div id="gutters"></div>
 <main id="content">
   <div id="frames"></div>
   <div id="placeholder" class="placeholder" hidden></div>
