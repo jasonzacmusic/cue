@@ -18,6 +18,8 @@ const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
+const { whereToOpen } = require('./signin');
+const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
@@ -59,8 +61,6 @@ const KITS = {
 const AI_HOME = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
 // Links that belong to another app on the computer. These open straight away; anything else asks first.
 const EXTERNAL = /^(mailto|tel|sms|facetime|zoommtg|zoomus|msteams|slack|spotify|whatsapp|webcal|obsproject):/i;
-// Sign-in pages have to stay a popup, or the site that opened them never hears back.
-const AUTH_PAGE = /^https:\/\/(accounts\.google\.com|appleid\.apple\.com|login\.microsoftonline\.com|github\.com\/login|www\.facebook\.com\/(v[\d.]+\/)?dialog)/;
 const TEAM_SITE = 'https://team.nathanielschool.com';
 const LABS_PAGE = 'https://labs.nathanielschool.com/products/cue';
 const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsapp\.com|facebook\.com|linkedin\.com)$/;
@@ -122,6 +122,7 @@ let stripOpen = false;
 let recTabId = null;
 let sideReveal = false;
 let vanish = null;
+let sharedLogins = null;
 let heldCount = 0;
 let repos = [];
 let extDir = '';
@@ -379,9 +380,11 @@ function wireTab(t) {
   });
   wc.setWindowOpenHandler(({ url, disposition }) => {
     if (recTabId === t.id) return { action: 'deny' };
-    if (disposition === 'new-window' || AUTH_PAGE.test(url)) {
+    const where = whereToOpen(url, disposition, wc.getURL());
+    if (where === 'popup') {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
     }
+    if (where === 'here') { wc.loadURL(url).catch(() => {}); return { action: 'deny' }; }
     const nt = openTab({ url, identity: t.identity, background: disposition === 'background-tab', after: t, agent: t.agent });
     nt.groupOverride = t.groupOverride;
     return { action: 'deny' };
@@ -908,12 +911,13 @@ ipcMain.on('cue:note', (e, n) => {
   if (live) heldCount++;
   addAlert({ source: hostName(t.url), title: n.title, body: n.body, url: t.url, held: live });
 });
+const sharesPasswords = (identity, origin) => (identity === 'personal' || identity === 'school') && !hasTwoAccounts(hostName(origin));
 ipcMain.handle('cue:cred-get', (e) => {
   const t = byWC(e.sender);
   if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t)) return null;
   const origin = safeOrigin(e.senderFrame.url);
   if (!securePage(origin)) return null;
-  const c = vault.find(t.identity, origin);
+  const c = vault.find(t.identity, origin) || (sharesPasswords(t.identity, origin) ? vault.find(t.identity === 'school' ? 'personal' : 'school', origin) : null);
   if (!c) return null;
   vault.used(c.id);
   let submit = false;
@@ -940,7 +944,9 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'navigate': navigate(a); break;
     case 'activate': activate(a.id); break;
     case 'close': closeTab(a.id); break;
-    case 'new-tab': openTab({ identity: a.identity, url: a.url }); sendEvent('focus-omnibox'); break;
+    case 'new-tab':
+      if (!a.identity && vanish.focused()) { vanish.add(); break; }
+      openTab({ identity: a.identity, url: a.url }); sendEvent('focus-omnibox'); break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': if (wc) wc.reload(); break;
@@ -1377,6 +1383,9 @@ async function runImport({ browser, profile, identity, what }) {
         const ses = sessionFor(identity); let n = 0;
         for (const c of importer.readCookies(b, p, key)) { try { await ses.cookies.set(c); n++; } catch {} }
         await ses.cookies.flushStore(); done.cookies = n;
+        await sharedLogins.syncNow();
+        const team = await loadTeamVault(TEAM_SITE, { quiet: true }); // a Chrome sign-in to the team site brings its passwords too
+        if (team.count) done.passwords = (done.passwords || 0) + team.count;
       }
     }
   }
@@ -1401,7 +1410,7 @@ const READ_TEAM_VAULT = `(async () => {
   }
   return { signedIn: true, rows: out };
 })()`;
-async function loadTeamVault(site = TEAM_SITE) {
+async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
   const open = tabs.find((t) => t.url.startsWith(site) && t.identity !== 'vanish');
   const t = open || openTab({ url: `${site}/vault`, identity: 'school', background: true });
   ensureView(t);
@@ -1409,7 +1418,10 @@ async function loadTeamVault(site = TEAM_SITE) {
   for (let i = 0; i < 100 && wc.isLoading(); i++) await wait(100);
   let got;
   try { got = await wc.executeJavaScript(READ_TEAM_VAULT, true); } catch { got = { signedIn: false }; }
-  if (!got.signedIn) { activate(t.id); sendEvent('toast', 'Sign in to the team site here, then press Load again.'); return { signedIn: false }; }
+  if (!got.signedIn) {
+    if (quiet) { if (!open) closeTab(t.id); return { signedIn: false }; }
+    activate(t.id); sendEvent('toast', 'Sign in to the team site here, then press Load again.'); return { signedIn: false };
+  }
   let n = 0;
   for (const who of ['school', 'personal']) n = vault.importMany(who, got.rows);
   vault.autoForOwnSites();
@@ -1632,7 +1644,7 @@ function buildMenu() {
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
         { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => { const t = byId(activeId); if (t && t.view) t.view.webContents.print(); } },
-        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => closeTab(activeId) },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => { if (vanish.focused()) vanish.closeTab(vanish.activeId()); else closeTab(activeId); } },
         { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: () => moveTab({ id: activeId, dir: -1 }) },
         { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: () => moveTab({ id: activeId, dir: 1 }) },
       ],
@@ -1853,7 +1865,9 @@ app.whenReady().then(async () => {
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
   if (settings().obs.autoConnect) obs.connect(settings().obs);
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
+  setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

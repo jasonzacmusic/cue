@@ -749,11 +749,20 @@ function openSettings() {
     const pwBox = el('div', 'pwlist'); sh.append(pwBox);
     window.cue.invoke('passwords').then((list) => {
       if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
-      list.forEach((x) => {
-        const r = el('div', 'row'); const a2 = check('', x.auto); a2.title = 'Sign in by itself on this site'; a2.onchange = () => send('pw-auto', { pw: x.id, on: a2.checked });
-        const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { send('pw-remove', { pw: x.id }); r.remove(); };
-        const auto = el('label', 'note', ' auto'); auto.prepend(a2);
-        r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${S.identities[x.identity].name}`)), auto, rm); pwBox.append(r);
+      const same = new Map(); // one row per login, even when it is kept for both Personal and School
+      list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
+      const ours = (g) => /(^|\.)nathanielschool\.com$/.test(hostOf(g[0].origin));
+      const rows = [...same.values()].sort((p, q) => hostOf(p[0].origin).localeCompare(hostOf(q[0].origin)));
+      [['Nathaniel School', rows.filter(ours)], ['Other sites', rows.filter((g) => !ours(g))]].forEach(([title, group]) => {
+        if (group.length) pwBox.append(el('div', 'note', `${title} (${group.length})`));
+        group.forEach((g) => {
+          const x = g[0]; const r = el('div', 'row'); const a2 = check('', g.every((i) => i.auto)); a2.title = 'Sign in by itself on this site';
+          a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
+          const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
+          const auto = el('label', 'note', ' auto'); auto.prepend(a2);
+          const who = g.length > 1 ? 'Personal and School' : S.identities[x.identity].name;
+          r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${who}`)), auto, rm); pwBox.append(r);
+        });
       });
     });
     sh.append(el('h3', '', 'Chrome extensions'));

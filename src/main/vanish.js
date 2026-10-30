@@ -1,11 +1,10 @@
 // The Vanish window: a separate dark window with no sidebar, no history, no AI, no bookmarks.
 // Its tabs are kept here and never join Cue's own tab list, so nothing that saves, syncs or
 // shares tabs can reach them. Closing the window wipes its memory-only session.
-const { BaseWindow, WebContentsView, Menu, clipboard } = require('electron');
-const path = require('path');
+const { BaseWindow, WebContentsView, Menu, clipboard, screen } = require('electron');
+const { whereToOpen } = require('./signin');
 
-const BAR = 46;
-const AUTH_PAGE = /^https:\/\/(accounts\.google\.com|appleid\.apple\.com|login\.microsoftonline\.com|github\.com\/login|www\.facebook\.com\/(v[\d.]+\/)?dialog)/;
+const BAR = 86; // tab strip + address bar
 
 function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1;
@@ -16,7 +15,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (!ui || ui.webContents.isDestroyed()) return;
     const a = byId(activeId);
     ui.webContents.send('vanish:state', {
-      tabs: tabs.map((t) => ({ id: t.id, title: t.title, favicon: t.favicon, active: t.id === activeId, loading: t.loading })),
+      tabs: tabs.map((t) => ({ id: t.id, title: t.url === startFile ? 'New tab' : t.title, favicon: t.favicon, active: t.id === activeId, loading: t.loading })),
       url: a && !a.url.startsWith('file:') ? a.url : '', canBack: !!a && a.view.webContents.navigationHistory.canGoBack(), canFwd: !!a && a.view.webContents.navigationHistory.canGoForward(),
     });
   }
@@ -31,23 +30,40 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     }
   }
 
+  function focusBar() {
+    if (!ui || ui.webContents.isLoading()) return;
+    ui.webContents.focus(); ui.webContents.send('vanish:focus');
+  }
+
+  function step(by) {
+    const i = tabs.indexOf(byId(activeId));
+    if (i >= 0) activate(tabs[(i + by + tabs.length) % tabs.length].id);
+  }
+
   function keys(e, input) {
     if (input.type !== 'keyDown' || !(input.meta || input.control)) return;
     const k = input.key.toLowerCase(); const a = byId(activeId); const wc = a && a.view.webContents;
+    if (k === 'tab') { e.preventDefault(); step(input.shift ? -1 : 1); return; }
+    if (/^[1-9]$/.test(k)) { // Cmd+9 is always the last tab
+      const t = k === '9' ? tabs[tabs.length - 1] : tabs[Number(k) - 1];
+      e.preventDefault(); if (t) activate(t.id); return;
+    }
     const run = {
       t: () => add(),
       n: () => add(),
       w: () => { if (a) closeTab(a.id); },
       r: () => wc && wc.reload(),
-      l: () => { ui.webContents.focus(); ui.webContents.send('vanish:focus'); },
+      l: focusBar,
       '[': () => wc && wc.navigationHistory.canGoBack() && wc.navigationHistory.goBack(),
       ']': () => wc && wc.navigationHistory.canGoForward() && wc.navigationHistory.goForward(),
+      '{': () => step(-1),
+      '}': () => step(1),
     }[k];
     if (run) { e.preventDefault(); run(); }
   }
 
   function add(url) {
-    if (!win) build();
+    if (!win) build(); else win.focus();
     const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false } });
     view.setBackgroundColor('#0B0B0D');
     const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false };
@@ -57,7 +73,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const sync = () => { t.url = wc.getURL(); state(); };
     wc.on('page-title-updated', (_e, title) => { t.title = title; state(); });
     wc.on('page-favicon-updated', (_e, f) => { t.favicon = f[0] || null; state(); });
-    wc.on('did-navigate', sync); wc.on('did-navigate-in-page', sync);
+    wc.on('did-navigate', () => { t.favicon = null; sync(); }); wc.on('did-navigate-in-page', sync);
     wc.on('did-start-loading', () => { t.loading = true; state(); });
     wc.on('did-stop-loading', () => { t.loading = false; sync(); });
     wc.on('render-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') setTimeout(() => { if (!wc.isDestroyed()) wc.reload(); }, 500); });
@@ -71,12 +87,15 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       Menu.buildFromTemplate(items).popup({ window: win });
     });
     wc.setWindowOpenHandler(({ url: u, disposition }) => {
-      if (disposition === 'new-window' || AUTH_PAGE.test(u)) return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, webPreferences: { session: session() } } };
-      add(u);
+      const where = whereToOpen(u, disposition, wc.getURL());
+      if (where === 'popup') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, webPreferences: { session: session() } } };
+      if (where === 'here') wc.loadURL(u).catch(() => {}); else add(u);
       return { action: 'deny' };
     });
+    wc.on('did-create-window', (popup) => popup.setContentProtection(true));
     wc.loadURL(t.url).catch(() => {});
     activate(t.id);
+    if (!url) focusBar();
     return t;
   }
 
@@ -84,23 +103,26 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
 
   function closeTab(id) {
     const t = byId(id); if (!t) return;
-    tabs.splice(tabs.indexOf(t), 1);
+    const i = tabs.indexOf(t);
+    tabs.splice(i, 1);
     try { win.contentView.removeChildView(t.view); t.view.webContents.close(); } catch {}
     if (!tabs.length) { win.close(); return; }
-    if (activeId === id) activate(tabs[tabs.length - 1].id); else { layout(); state(); }
+    if (activeId === id) activate(tabs[Math.min(i, tabs.length - 1)].id); else { layout(); state(); }
   }
 
   function build() {
     win = new BaseWindow({
-      width: 1180, height: 780, minWidth: 560, minHeight: 380, title: 'Vanish', backgroundColor: '#0B0B0D',
-      titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 14, y: 15 },
+      ...screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea, // fills the screen you are on
+      minWidth: 560, minHeight: 380, title: 'Vanish', backgroundColor: '#0B0B0D',
+      titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 14, y: 13 },
     });
     win.setContentProtection(true); // kept out of Zoom shares, OBS and screenshots
-    ui = new WebContentsView({ webPreferences: { preload: uiPreload, contextIsolation: true, sandbox: true } });
+    // The strip shares the wiped session, so tab icons never reach Cue's normal cache.
+    ui = new WebContentsView({ webPreferences: { session: session(), preload: uiPreload, contextIsolation: true, sandbox: true } });
     ui.setBackgroundColor('#0B0B0D');
     win.contentView.addChildView(ui);
     ui.webContents.loadFile(uiFile);
-    ui.webContents.on('did-finish-load', state);
+    ui.webContents.on('did-finish-load', () => { state(); const a = byId(activeId); if (a && a.url === startFile) focusBar(); });
     ui.webContents.on('before-input-event', keys);
     win.on('resize', layout);
     win.on('closed', () => {
@@ -129,7 +151,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'close') closeTab(a.id);
   }
 
-  return { add, closeTab, command, wipe, tabs, window: () => win, close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, wipe, tabs, activate, step, window: () => win, ui: () => ui, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };

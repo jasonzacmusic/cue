@@ -21,6 +21,7 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 - `src/main/main.js`: windows, tabs, Spaces, split views, on air, Peek, AI panel, menus, every wire.
 - `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
 - `src/main/vanish.js`: the Vanish window. Its tabs are kept out of Cue's tab list on purpose, so nothing that saves or shares tabs can reach them.
+- `src/main/signin.js`: where a page's new window goes (popup, same tab, new tab). `shared-logins.js`: copies sign-ins between Personal and School, except sites with two accounts.
 - `src/main/db.js`: history, bookmarks, Boards. `vault.js`: passwords (OS keychain). `bills.js`: bill reader.
 - `src/main/importer.js`: move in from Chrome, Safari, Helium, Brave, Edge, Arc. Safari needs Full Disk Access.
 - `src/main/capture.js`, `page-tools.js`, `extensions.js`, `groups.js`, `obs.js`.
