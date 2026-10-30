@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>Cue</title>
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="#15181C"/>
+  <path d="M703.5 351.3A250 250 0 1 0 703.5 672.7" fill="none" stroke="#F3F4F6" stroke-width="124" stroke-linecap="round"/>
+  <circle cx="724" cy="512" r="74" fill="#E5262E"/>
+</svg>

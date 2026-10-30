@@ -1,0 +1,22 @@
+{
+  "name": "cue-browser",
+  "productName": "Cue",
+  "version": "0.1.0",
+  "description": "Cue — the browser for people who make things. Free from Nathaniel Labs.",
+  "main": "src/main/main.js",
+  "author": "Jason Zac, Nathaniel School of Music",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/jasonzacmusic/cue",
+  "scripts": {
+    "start": "electron .",
+    "test": "CUE_TEST=1 electron .",
+    "dist:mac": "node scripts/build-mac.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "44.7.2"
+  },
+  "dependencies": {
+    "@ghostery/adblocker-electron": "2.20.1"
+  }
+}

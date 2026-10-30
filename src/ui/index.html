@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>Cue</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<aside id="side">
+  <div class="side-top drag">
+    <img class="brand" src="../../assets/mark.svg" alt="Cue">
+  </div>
+  <div class="newrow">
+    <button id="newtab" class="btn wide" title="New tab (⌘T)"><span class="plus">+</span> New tab</button>
+    <div class="idpick" id="idpick" role="radiogroup" aria-label="New tabs open as"></div>
+  </div>
+  <div id="pins" class="pins"></div>
+  <div id="groups" class="groups"></div>
+  <div id="livebox" class="livebox" hidden>
+    <div class="lb-head"><span class="lamp"></span>On air <span id="lb-title" class="lb-title"></span></div>
+    <img id="lb-thumb" class="lb-thumb" alt="What students see">
+    <div class="lb-row"><button id="lb-take" class="take">TAKE</button><button id="lb-end" class="btn">End live</button></div>
+  </div>
+  <div id="downloads" class="downloads" hidden></div>
+  <div class="side-foot">
+    <span id="agentline" class="agentline"></span>
+    <button id="opensettings" class="icon" title="Settings" aria-label="Settings">⚙︎</button>
+  </div>
+</aside>
+
+<header id="bar" class="drag">
+  <div class="nav nodrag">
+    <button id="back" class="icon" title="Back (⌘[)" aria-label="Back">‹</button>
+    <button id="fwd" class="icon" title="Forward (⌘])" aria-label="Forward">›</button>
+    <button id="reload" class="icon" title="Reload (⌘R)" aria-label="Reload">↻</button>
+  </div>
+  <div class="omni nodrag">
+    <span id="omni-id" class="omni-id"></span>
+    <input id="omnibox" type="text" spellcheck="false" autocomplete="off" placeholder="Search Google or type an address">
+    <div id="engines" class="engines" hidden>
+      <button data-engine="images">Images</button><button data-engine="youtube">YouTube</button><button data-engine="pinterest">Pinterest</button><button data-engine="github">GitHub</button><button data-engine="claude">Claude</button><button data-engine="chatgpt">ChatGPT</button>
+    </div>
+  </div>
+  <div id="findbar" class="findbar nodrag" hidden>
+    <input id="findinput" type="text" placeholder="Find on page" spellcheck="false"><span id="findcount"></span>
+  </div>
+  <div class="layouts nodrag" role="group" aria-label="Layout">
+    <button data-split="single" title="One tab (⌥⌘1)"><i class="l1"></i></button>
+    <button data-split="cols2" title="Side by side (⌥⌘2)"><i class="l2"></i></button>
+    <button data-split="rows2" title="Top and bottom (⌥⌘3)"><i class="l3"></i></button>
+    <button data-split="cols3" title="Three columns (⌥⌘4)"><i class="l4"></i></button>
+    <button data-split="grid4" title="Grid of four (⌥⌘5)"><i class="l5"></i></button>
+    <button id="syncscroll" class="sync" title="Scroll split tabs together">⇅</button>
+  </div>
+  <label class="live nodrag" title="Live class (⇧⌘L)"><input type="checkbox" id="livetoggle"> Live</label>
+  <button id="take" class="take nodrag" title="Put the cued tab on air (⌘↩)" hidden>TAKE</button>
+</header>
+
+<main id="content">
+  <div id="frames"></div>
+  <div id="placeholder" class="placeholder" hidden></div>
+</main>
+
+<div id="suggest" class="suggest" hidden></div>
+<div id="modal" class="modal" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="ui.js"></script>
+</body>
+</html>
