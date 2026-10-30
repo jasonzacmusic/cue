@@ -745,8 +745,9 @@ function openSettings() {
     sh.append(el('h3', '', 'Passwords'));
     const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
     teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
-    team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com. Cards and banks stay out.'), teamBtn); sh.append(team);
+    team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com, once. Cards and banks stay out.'), teamBtn);
     const pwBox = el('div', 'pwlist'); sh.append(pwBox);
+    window.cue.invoke('team-offered').then((yes) => { if (yes) pwBox.before(team); });
     window.cue.invoke('passwords').then((list) => {
       if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
       const same = new Map(); // one row per login, even when it is kept for both Personal and School

@@ -1024,6 +1024,7 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'passwords') return vault.list();
   if (cmd === 'storage') return storageReport();
   if (cmd === 'team-vault') return loadTeamVault();
+  if (cmd === 'team-offered') return teamImportOffered();
   if (cmd === 'ext-find') return findExtensions();
   if (cmd === 'ext-add') return addExtension(a);
   if (cmd === 'ext-remove') return removeExtension(a.id);
@@ -1384,8 +1385,10 @@ async function runImport({ browser, profile, identity, what }) {
         for (const c of importer.readCookies(b, p, key)) { try { await ses.cookies.set(c); n++; } catch {} }
         await ses.cookies.flushStore(); done.cookies = n;
         await sharedLogins.syncNow();
-        const team = await loadTeamVault(TEAM_SITE, { quiet: true }); // a Chrome sign-in to the team site brings its passwords too
-        if (team.count) done.passwords = (done.passwords || 0) + team.count;
+        if (await teamImportOffered()) { // only ever true for Nathaniel School staff
+          const team = await loadTeamVault(TEAM_SITE, { quiet: true });
+          if (team.count) done.passwords = (done.passwords || 0) + team.count;
+        }
       }
     }
   }
@@ -1410,6 +1413,15 @@ const READ_TEAM_VAULT = `(async () => {
   }
   return { signedIn: true, rows: out };
 })()`;
+// A one-time import for the school's own staff. Everyone else moves in from Chrome or Safari,
+// so nothing about it shows unless this computer is signed in to the team site.
+async function teamImportOffered() {
+  if (settings().teamLoaded) return false;
+  for (const who of persistentLogins()) {
+    if ((await sessionFor(who).cookies.get({ domain: new URL(TEAM_SITE).hostname })).length) return true;
+  }
+  return false;
+}
 async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
   const open = tabs.find((t) => t.url.startsWith(site) && t.identity !== 'vanish');
   const t = open || openTab({ url: `${site}/vault`, identity: 'school', background: true });
@@ -1425,6 +1437,7 @@ async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
   let n = 0;
   for (const who of ['school', 'personal']) n = vault.importMany(who, got.rows);
   vault.autoForOwnSites();
+  if (n) { settings().teamLoaded = true; store.save(); }
   if (!open) closeTab(t.id);
   sendEvent('toast', `${n} logins loaded from the team site.`);
   return { signedIn: true, count: n };
