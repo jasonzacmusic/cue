@@ -44,7 +44,7 @@ function favEl(t) {
   const page = /^cue:\/\/(\w+)/.exec(t.url || '');
   const http = /^https?:/.test(t.url || '');
   const tries = [t.favicon];
-  if (http && t.identity !== 'vanish') { try { const u = new URL(t.url); tries.push(`${u.origin}/favicon.ico`, `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`); } catch {} }
+  if (http && t.identity !== 'vanish') { try { const u = new URL(t.url); const usual = `${u.origin}/favicon.ico`; const service = `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`; tries.push(...(/\.google\.com$/.test(u.hostname) ? [service, usual] : [usual, service])); } catch {} }
   const srcs = tries.filter(Boolean);
   if (page && ICONS[page[1]]) f.innerHTML = ICONS[page[1]];
   else if (srcs.length) {
