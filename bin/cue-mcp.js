@@ -21,7 +21,7 @@ const id = { type: 'number', description: 'Tab id from cue_tabs' };
 const TOOLS = [
   ['identities', 'List the logins Cue keeps signed in (Personal, School, AI agent) and which account each holds. Use one of these instead of asking the user to log in.', {}],
   ['tabs', 'List open tabs with id, title, address, login (identity), group, and whether you may act in them.', {}],
-  ['open', 'Open a page in a new tab in your own AI lane. Pick identity "personal" or "school" to use the user\'s existing Google and other logins; "agent" is a clean login.', { url: { type: 'string', description: 'Address or search words' }, identity: { type: 'string', enum: ['agent', 'personal', 'school'] }, background: { type: 'boolean' } }, ['url']],
+  ['open', 'Open a page in your own AI lane. Cue keeps ONE tab per site for you: calling this again for the same site reuses that tab and navigates it, so WhatsApp, the Learning Portal and YouTube each stay a single tab however many times you visit them. Do not try to manage tabs yourself, and only pass newTab:true when you genuinely need two pages of the same site side by side. Pick identity "personal" or "school" to use the user\'s existing Google and other logins; "agent" is a clean login.', { url: { type: 'string', description: 'Address or search words' }, identity: { type: 'string', enum: ['agent', 'personal', 'school'] }, background: { type: 'boolean' }, newTab: { type: 'boolean', description: 'Force a second tab for a site you already have open. Rarely needed.' } }, ['url']],
   ['navigate', 'Go to an address in a tab you may act in.', { id, url: { type: 'string' } }, ['id', 'url']],
   ['back', 'Go back in a tab you may act in.', { id }, ['id']],
   ['read', 'Read the visible text of a tab.', { id, maxChars: { type: 'number' } }, ['id']],
@@ -66,7 +66,7 @@ async function handle(msg) {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
       serverInfo: { name: 'cue', version: '0.2.1' },
-      instructions: 'Cue is the user\'s browser. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open. Never use tabs marked private or on air.',
+      instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air.',
     });
   }
   if (method === 'ping') return reply(msgId, {});

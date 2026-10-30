@@ -53,7 +53,7 @@ class Vault {
       if (!r.password || !/^https?:/.test(origin)) continue;
       const enc = safeStorage.encryptString(r.password).toString('base64');
       const cur = this.items.find((i) => i.identity === identity && i.origin === origin && i.username === (r.username || ''));
-      if (cur) cur.enc = enc; else this.items.push({ id: crypto.randomUUID(), identity, origin, username: r.username || '', enc, auto: false, used: 0 });
+      if (cur) cur.enc = enc; else this.items.push({ id: crypto.randomUUID(), identity, origin, username: r.username || '', enc, auto: Vault.ownSite(origin), used: 0 });
       n++;
     }
     this.write();
@@ -61,6 +61,27 @@ class Vault {
   }
 
   used(id) { const i = this.items.find((x) => x.id === id); if (i) { i.used = Date.now(); this.write(); } }
+  // Our own apps sign themselves in. These are sites the school owns, so there is
+  // nothing to weigh up: Jason should never type a password into his own portal.
+  // Everything else stays off until he turns it on for that one site himself.
+  static ownSite(origin) {
+    try {
+      const h = new URL(origin).hostname;
+      return h === 'nathanielschool.com' || h.endsWith('.nathanielschool.com');
+    } catch { return false; }
+  }
+
+  // Switch auto sign-in on for every login we hold for our own sites. Safe to
+  // run on every launch: it only ever turns our own sites on.
+  autoForOwnSites() {
+    let n = 0;
+    for (const i of this.items) {
+      if (!i.auto && Vault.ownSite(i.origin)) { i.auto = true; n++; }
+    }
+    if (n) this.write();
+    return n;
+  }
+
   setAuto(id, on) { const i = this.items.find((x) => x.id === id); if (i) { i.auto = !!on; this.write(); } }
   remove(id) { this.items = this.items.filter((x) => x.id !== id); this.write(); }
   neverFor(origin) { if (!this.never.includes(origin)) { this.never.push(origin); this.write(); } }

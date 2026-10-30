@@ -19,10 +19,12 @@ input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; c
 .engines button:first-child { background: var(--ink); color: var(--raised); border-color: var(--ink); }
 .engines button:hover { border-color: var(--muted); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
-.tiles a { display: flex; flex-direction: column; gap: 4px; padding: 12px; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); text-decoration: none; }
+.tiles a { display: grid; grid-template-columns: 28px 1fr; grid-template-rows: auto auto; column-gap: 10px; row-gap: 2px; align-items: center; padding: 12px; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); text-decoration: none; }
+    .tiles img { grid-row: 1 / span 2; width: 28px; height: 28px; object-fit: contain; border-radius: 6px; }
+    .tiles a.nologo { grid-template-columns: 1fr; }
 .tiles a:hover { border-color: var(--muted); }
-.tiles b { font-size: 14px; }
-.tiles span { font-size: 12px; color: var(--muted); }
+.tiles b { font-size: 14px; align-self: end; }
+.tiles span { font-size: 12px; color: var(--muted); align-self: start; }
 h2 { margin: 6px 0 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 </style>
 </head>
@@ -43,20 +45,20 @@ h2 { margin: 6px 0 0; font-size: 11px; letter-spacing: .08em; text-transform: up
   </div>
   <h2>Make</h2>
   <div class="tiles">
-    <a href="https://studio.youtube.com"><b>YouTube Studio</b><span>Uploads and comments</span></a>
-    <a href="https://www.youtube.com"><b>YouTube</b><span>Watch and research</span></a>
-    <a href="https://www.instagram.com"><b>Instagram</b><span>Posts and messages</span></a>
-    <a href="https://www.pinterest.com"><b>Pinterest</b><span>Boards and ideas</span></a>
-    <a href="https://mail.google.com"><b>Gmail</b><span>Mail for this login</span></a>
-    <a href="https://claude.ai"><b>Claude</b><span>Ask and build</span></a>
-    <a href="https://chatgpt.com"><b>ChatGPT</b><span>Ask and build</span></a>
-    <a href="https://github.com/jasonzacmusic"><b>GitHub</b><span>Our code</span></a>
+    <a href="https://studio.youtube.com"><img src="../../assets/logos/youtube-studio.png" alt="" loading="lazy"><b>YouTube Studio</b><span>Uploads and comments</span></a>
+    <a href="https://www.youtube.com"><img src="../../assets/logos/youtube.png" alt="" loading="lazy"><b>YouTube</b><span>Watch and research</span></a>
+    <a href="https://www.instagram.com"><img src="../../assets/logos/instagram.png" alt="" loading="lazy"><b>Instagram</b><span>Posts and messages</span></a>
+    <a href="https://www.pinterest.com"><img src="../../assets/logos/pinterest.png" alt="" loading="lazy"><b>Pinterest</b><span>Boards and ideas</span></a>
+    <a href="https://mail.google.com"><img src="../../assets/logos/gmail.png" alt="" loading="lazy"><b>Gmail</b><span>Mail for this login</span></a>
+    <a href="https://claude.ai"><img src="../../assets/logos/claude.png" alt="" loading="lazy"><b>Claude</b><span>Ask and build</span></a>
+    <a href="https://chatgpt.com"><img src="../../assets/logos/chatgpt.png" alt="" loading="lazy"><b>ChatGPT</b><span>Ask and build</span></a>
+    <a href="https://github.com/jasonzacmusic"><img src="../../assets/logos/github.svg" alt="" loading="lazy"><b>GitHub</b><span>Our code</span></a>
   </div>
   <h2>Nathaniel School</h2>
   <div class="tiles">
-    <a href="https://learning-portal.nathanielschool.com"><b>Learning Portal</b><span>Classes and students</span></a>
-    <a href="https://apps.nathanielschool.com"><b>NSM Apps</b><span>Every practice app</span></a>
-    <a href="https://chord-trees.nathanielschool.com"><b>Chord Trees</b><span>Teaching app</span></a>
+    <a href="https://learning-portal.nathanielschool.com"><img src="../../assets/logos/learning-portal.png" alt="" loading="lazy"><b>Learning Portal</b><span>Classes and students</span></a>
+    <a href="https://apps.nathanielschool.com"><img src="../../assets/logos/nsm-apps.png" alt="" loading="lazy"><b>NSM Apps</b><span>Every practice app</span></a>
+    <a href="https://chord-trees.nathanielschool.com"><img src="../../assets/logos/chord-trees.svg" alt="" loading="lazy"><b>Chord Trees</b><span>Teaching app</span></a>
   </div>
 </main>
 <script>

@@ -11,7 +11,11 @@ function capturesDir() {
 
 function nameFor(title, ext) {
   const safe = String(title || 'Cue').replace(/[^\w\- ]+/g, '').trim().slice(0, 50) || 'Cue';
-  const when = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  // Local time, not UTC: a take made at 4:21 pm in Bangalore was being filed as
+  // 10:51, which makes the day's captures impossible to tell apart.
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  const when = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-${p2(d.getHours())}-${p2(d.getMinutes())}-${p2(d.getSeconds())}`;
   return path.join(capturesDir(), `${safe} ${when}.${ext}`);
 }
 

@@ -34,11 +34,14 @@ button { font: inherit; color: inherit; }
 .btn:hover { border-color: var(--muted); }
 .btn.wide { flex: 1; text-align: left; display: flex; gap: 6px; align-items: center; }
 .plus { font-size: 16px; line-height: 1; color: var(--muted); }
-.idpick { display: flex; gap: 3px; }
-.idpick button { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; padding: 0; cursor: pointer; background: var(--c); }
-.idpick button.vanish { background: transparent; border: 2px dashed var(--muted); }
-.idpick button.on { box-shadow: 0 0 0 2px var(--side), 0 0 0 4px var(--c); }
-.idpick button.vanish.on { box-shadow: 0 0 0 2px var(--side), 0 0 0 4px var(--muted); }
+.idpick { display: flex; flex-wrap: wrap; gap: 4px; }
+.idpick button { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px 0 5px; border-radius: 999px; border: 1px solid var(--line); background: var(--raised); color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
+.idpick button i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); flex: none; }
+.idpick button.vanish i { background: transparent; border: 1px dashed var(--muted); }
+.idpick button:hover { border-color: var(--muted); color: var(--ink); }
+.idpick button.on { border-color: var(--c); color: var(--ink); background: var(--hover); }
+.idpick button.vanish.on { border-color: var(--muted); }
+.idwho { margin: 5px 0 0; font-size: 11px; line-height: 1.35; color: var(--muted); }
 .icon { border: 0; background: transparent; width: 30px; height: 30px; border-radius: 7px; cursor: pointer; font-size: 18px; line-height: 1; color: var(--muted); display: grid; place-items: center; }
 .icon:hover { background: var(--hover); color: var(--ink); }
 .icon:disabled { opacity: .35; cursor: default; background: transparent; }
@@ -86,7 +89,9 @@ button { font: inherit; color: inherit; }
 .ctl button { border: 0; background: transparent; width: 22px; height: 22px; border-radius: 5px; display: grid; place-items: center; cursor: pointer; color: var(--muted); padding: 0; font-size: 12px; }
 .ctl button:hover { background: var(--line); color: var(--ink); }
 .ctl .close { visibility: hidden; font-size: 14px; }
-.tab:hover .close { visibility: visible; }
+.ctl .movet { visibility: hidden; font-size: 11px; width: 18px; }
+.tab:hover .close, .tab:hover .movet { visibility: visible; }
+.movet:focus-visible { visibility: visible; }
 .spk { position: relative; }
 .spk svg { width: 15px; height: 15px; }
 .spk.live { color: var(--ink); }

@@ -352,6 +352,12 @@ function wireTab(t) {
 
 function hostWindow(t) { return t.host === 'stage' ? stageWin : t.host === 'popout' ? t.popout : mainWin; }
 
+// The site a URL belongs to, with www dropped so youtube.com and www.youtube.com
+// are treated as one place.
+function hostOf(u) {
+  try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
   const t = makeTab({ url: url || START_URL, identity, agent, pinned });
   if (after) {
@@ -826,6 +832,7 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'media': if (t) { if (!t.view) ensureView(t); t.view.webContents.send('cue:media', a.cmd || 'toggle'); } break;
     case 'tab-menu': tabMenu(t); break;
     case 'reorder': reorder(a); break;
+    case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
     case 'live': setLive(!!a.on); break;
@@ -912,6 +919,23 @@ function reorder({ id, beforeId, group }) {
       if (b.pinned !== t.pinned) t.pinned = b.pinned;
     }
   } else t.order = Date.now();
+  pushState(); persist();
+}
+
+// Move a tab one place up or down inside its own group. Dragging was the only
+// way to reorder, which is awkward with a long list and impossible from the
+// keyboard.
+function moveTab({ id, dir }) {
+  const t = byId(id); if (!t || !dir) return;
+  const list = sidebarOrder().filter((x) => groupOf(x) === groupOf(t) && x.pinned === t.pinned);
+  const i = list.indexOf(t);
+  if (i < 0) return;
+  const j = i + (dir < 0 ? -1 : 1);
+  if (j < 0 || j >= list.length) return;
+  const target = list[j];
+  // Swap the two orders outright: neighbours keep their places and no
+  // fractional order can collapse onto another tab's.
+  const a = t.order; t.order = target.order; target.order = a;
   pushState(); persist();
 }
 
@@ -1278,10 +1302,24 @@ const agentApi = {
   get: (id) => byId(Number(id)),
   canRead: (t) => t && t.identity !== 'vanish' && !t.private && !t.url.startsWith('cue://'), // your Library and Bills pages stay yours
   canAct: (t) => agentCanAct(t),
-  open: ({ url, identity = 'agent', background = true }) => {
+  open: ({ url, identity = 'agent', background = true, newTab = false }) => {
     const target = resolveInput(url);
     if (target.startsWith('cue://')) throw new Error('Cue\'s own pages are private to the person using it.');
-    return openTab({ url: target, identity: IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent', background, agent: true });
+    const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent';
+    // One tab per site, not one per instruction. An agent sent to WhatsApp six
+    // times used to leave six WhatsApp tabs behind; now it goes back to the one
+    // it already has open for that site and navigates it.
+    if (!newTab) {
+      const host = hostOf(target);
+      const reuse = tabs.find((t) => t.agent && t.identity === who && t.id !== programId && hostOf(t.url) === host);
+      if (reuse) {
+        ensureView(reuse);
+        if (reuse.url !== target) reuse.view.webContents.loadURL(target);
+        if (!background) activate(reuse.id);
+        return reuse;
+      }
+    }
+    return openTab({ url: target, identity: who, background, agent: true });
   },
   ensure: (t) => ensureView(t),
   capture: (t) => captureTab(t),
@@ -1314,6 +1352,8 @@ function buildMenu() {
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => closeTab(activeId) },
+        { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: () => moveTab({ id: activeId, dir: -1 }) },
+        { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: () => moveTab({ id: activeId, dir: 1 }) },
       ],
     },
     { role: 'editMenu' },
@@ -1478,6 +1518,7 @@ app.whenReady().then(async () => {
   extDir = path.join(app.getPath('userData'), 'extensions');
   lib = new Library(app.getPath('userData'));
   vault = new Vault(app.getPath('userData'));
+  vault.autoForOwnSites();
   store.data.settings.obs = { host: '127.0.0.1', port: 4455, password: '', ...(store.data.settings.obs || {}) };
   store.data.settings.identityLabels = { personal: '', school: '', agent: '', ...(store.data.settings.identityLabels || {}) };
   obs.onStatus = () => pushState();

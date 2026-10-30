@@ -57,12 +57,19 @@ function renderIdPick() {
   for (const [id, v] of Object.entries(S.identities)) {
     const b = el('button', id === 'vanish' ? 'vanish' : '');
     b.style.setProperty('--c', v.color);
+    // The dots were unlabelled colours, so nobody could tell what they did.
+    b.append(el('i', '', ''), el('span', 'idname', esc(v.name)));
     b.title = `New tabs open as ${v.name}${S.labels[id] ? ` (${S.labels[id]})` : ''}`;
     b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === newIdentity);
     if (id === newIdentity) b.classList.add('on');
     b.onclick = () => { newIdentity = id; try { localStorage.setItem('cue.newIdentity', id); } catch {} renderIdPick(); };
     box.append(b);
   }
+  const v = S.identities[newIdentity];
+  const who = S.labels[newIdentity];
+  $('#idwho').textContent = newIdentity === 'vanish'
+    ? 'New tabs keep nothing on this computer.'
+    : `New tabs open as ${v ? v.name : newIdentity}${who ? ` · ${who}` : ''}`;
 }
 
 function renderSpaces() {
@@ -194,6 +201,14 @@ function tabRow(t, splitIds) {
   if (openVolId === t.id) row.classList.add('vol-open');
   row.append(pop);
   ctl.append(spk);
+
+  const up = el('button', 'movet', '↑'); up.title = 'Move this tab up (⌥⌘↑)';
+  up.setAttribute('aria-label', `Move ${t.title || 'tab'} up`);
+  up.onclick = (e) => { e.stopPropagation(); send('move-tab', { id: t.id, dir: -1 }); };
+  const dn = el('button', 'movet', '↓'); dn.title = 'Move this tab down (⌥⌘↓)';
+  dn.setAttribute('aria-label', `Move ${t.title || 'tab'} down`);
+  dn.onclick = (e) => { e.stopPropagation(); send('move-tab', { id: t.id, dir: 1 }); };
+  ctl.append(up, dn);
 
   const x = el('button', 'close', '×'); x.title = 'Close tab (⌘W)';
   x.onclick = (e) => { e.stopPropagation(); send('close', { id: t.id }); };
@@ -464,27 +479,74 @@ function showPalette(colors) {
 }
 
 // ---------------------------------------------------------------- tab recording
-let recorder = null;
+let rec = null;
 async function startRecording() {
+  if (rec) { toast('Already recording.'); return; }
   const info = await window.cue.invoke('rec-start');
   if (!info) { toast('Open a tab first.'); return; }
+  // The session exists from this moment, so a stop pressed while the capture is
+  // still being granted finds something to cancel instead of silently doing
+  // nothing and leaving the capture stream running.
+  const session = { info, stream: null, recorder: null, chunks: [], stopped: false, startedAt: 0 };
+  rec = session;
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 60 }, audio: true });
+    session.stream = stream;
+    if (session.stopped) { teardown(session); return; }
     const type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find((x) => MediaRecorder.isTypeSupported(x));
-    const chunks = [];
-    recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12000000, audioBitsPerSecond: 256000 });
-    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12000000, audioBitsPerSecond: 256000 });
+    session.recorder = recorder;
+    recorder.ondataavailable = (e) => { if (e.data.size) session.chunks.push(e.data); };
+    recorder.onerror = (e) => { teardown(session); toast(`Recording stopped: ${e.error ? e.error.name : 'error'}`); };
     recorder.onstop = async () => {
-      stream.getTracks().forEach((x) => x.stop());
-      const buffer = new Uint8Array(await new Blob(chunks).arrayBuffer());
-      recorder = null;
-      await window.cue.invoke('rec-save', { title: info.title, buffer, ext: type.startsWith('video/mp4') ? 'mp4' : 'webm' });
+      const tracks = stream.getTracks();
+      tracks.forEach((x) => x.stop());
+      if (rec === session) rec = null;
+      try {
+        const blob = new Blob(session.chunks, { type });
+        // An mp4 whose only chunk is the header is not a video. Saving it is
+        // worse than saying nothing was captured, because the file looks real.
+        if (blob.size < 4096) { await window.cue.invoke('rec-cancel'); toast('Nothing was captured — the recording was too short.'); return; }
+        const buffer = new Uint8Array(await blob.arrayBuffer());
+        await window.cue.invoke('rec-save', { title: session.info.title, buffer, ext: type.startsWith('video/mp4') ? 'mp4' : 'webm' });
+      } catch (e) {
+        try { await window.cue.invoke('rec-cancel'); } catch {}
+        toast(`Could not save the recording: ${e && e.message ? e.message : e}`);
+      }
     };
     recorder.start(1000);
+    session.startedAt = Date.now();
     toast('Recording this tab with its sound.');
-  } catch { window.cue.invoke('rec-cancel'); toast('Recording could not start.'); }
+  } catch (e) {
+    teardown(session);
+    toast(`Recording could not start: ${e && e.message ? e.message : e}`);
+  }
 }
-function stopRecording() { if (recorder && recorder.state !== 'inactive') recorder.stop(); }
+
+function teardown(session) {
+  session.stopped = true;
+  if (session.stream) session.stream.getTracks().forEach((x) => x.stop());
+  if (rec === session) rec = null;
+  window.cue.invoke('rec-cancel');
+}
+
+async function stopRecording() {
+  const session = rec;
+  if (!session) return;
+  session.stopped = true;
+  // Capture was asked for but has not been granted yet: there is no recorder to
+  // stop, so tear the session down rather than leaving the stream live.
+  if (!session.recorder) { teardown(session); toast('Recording cancelled.'); return; }
+  if (session.recorder.state === 'inactive') return;
+  // MediaRecorder writes an mp4 header first and the frames later. Stopping
+  // within that window produced a header-only or audio-only file, so flush
+  // what has been encoded and give a very short take time to hold a frame.
+  const held = Date.now() - session.startedAt;
+  if (held < 1200) await new Promise((r) => setTimeout(r, 1200 - held));
+  try { session.recorder.requestData(); } catch {}
+  await new Promise((r) => setTimeout(r, 120));
+  session.recorder.stop();
+}
 
 // ---------------------------------------------------------------- music bar
 const M = { speed: 100, semi: 0, loop: false };

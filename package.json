@@ -1,7 +1,7 @@
 {
   "name": "cue-browser",
   "productName": "Cue",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Cue — the browser for people who make things. Free from Nathaniel Labs.",
   "main": "src/main/main.js",
   "author": "Jason Zac, Nathaniel School of Music",
