@@ -377,7 +377,9 @@ function wireTab(t) {
   wc.on('context-menu', (_e, p) => contextMenu(t, p));
   wc.on('did-finish-load', () => {
     if (t.volume !== 1) wc.send('cue:volume', t.volume);
+    teamSignedIn(t);
   });
+  wc.on('did-navigate-in-page', () => teamSignedIn(t)); // the team site signs in without a page load
   wc.setWindowOpenHandler(({ url, disposition }) => {
     if (recTabId === t.id) return { action: 'deny' };
     const where = whereToOpen(url, disposition, wc.getURL());
@@ -1421,6 +1423,13 @@ async function teamImportOffered() {
     if ((await sessionFor(who).cookies.get({ domain: new URL(TEAM_SITE).hostname })).length) return true;
   }
   return false;
+}
+let teamLoading = false;
+async function teamSignedIn(t) { // runs itself the first time staff sign in to the team site
+  if (teamLoading || settings().teamLoaded || !t.url.startsWith(TEAM_SITE) || t.identity === 'vanish' || t.agent) return;
+  teamLoading = true;
+  try { await loadTeamVault(TEAM_SITE, { quiet: true }); } catch {}
+  teamLoading = false;
 }
 async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
   const open = tabs.find((t) => t.url.startsWith(site) && t.identity !== 'vanish');

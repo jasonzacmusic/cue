@@ -42,4 +42,5 @@ window.vanish.onState((s) => {
   if (shown === lastTabs) return; // rebuilding mid-click would lose the click
   lastTabs = shown;
   $('#tabs').replaceChildren(...s.tabs.map(tabEl));
+  $('#tabs').style.flexBasis = `${s.tabs.length * 222}px`; // tabs measure themselves, so the strip is told its full width
 });

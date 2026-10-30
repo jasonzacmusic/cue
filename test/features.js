@@ -133,6 +133,8 @@ module.exports = async function run(c) {
   check('vanish: only the chosen tab shows', c.vanish.tabs.filter((t) => t.view.getVisible()).length === 1 && v.view.getVisible());
   await c.vanish.ui().webContents.executeJavaScript(`document.querySelectorAll('.tab .x')[2].click()`); await sleep(400);
   names = await strip();
+  const wide = await c.vanish.ui().webContents.executeJavaScript(`document.querySelector('.tab').getBoundingClientRect().width`);
+  check('vanish: tabs are wide enough to read', wide > 150, wide);
   check('vanish: the X closes just that tab', c.vanish.tabs.length === 2 && names.length === 2, names);
   fs.writeFileSync(path.join(OUT, 'vanish-strip.png'), (await c.vanish.ui().webContents.capturePage()).toPNG());
   c.vanish.closeTab(v2.id); await sleep(300);
