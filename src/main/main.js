@@ -1332,6 +1332,32 @@ const agentApi = {
   alert: (a) => addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '' }),
   bills: () => store.data.bills.map((b) => ({ ...b, status: bills.status(b) })),
   setMuted, setVolume,
+  // ---- the teaching rig's door (Stream Deck pedal + OBS), not an AI agent's.
+  // OBS captures Cue as an application, so the class sees whatever tab is
+  // showing in Cue's window. A pedal press is therefore just "show slot N".
+  // Jason's own tabs are the slots: a background tab an agent opened must
+  // never become what a class is looking at.
+  slots: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent)
+    .map((t) => ({ id: t.id, title: t.title, url: isStart(t.url) ? '' : t.url, showing: t.id === activeId })),
+  show: (id) => activate(Number(id)),
+  take: () => take(),
+  // Raise the window WITHOUT taking focus. He is usually teaching over Zoom
+  // when this fires; showInactive keeps his keystrokes where they were while
+  // still giving ScreenCaptureKit a frontmost Cue window to capture.
+  front: ({ focus = false } = {}) => {
+    if (!mainWin) return { ok: false };
+    if (focus) mainWin.show(); else { mainWin.showInactive(); mainWin.moveTop(); }
+    return { ok: true };
+  },
+  rig: () => ({
+    pid: process.pid,
+    bundle: 'com.jasonzac.cue',
+    showing: activeId,
+    onAir: programId,
+    live,
+    stageOpen: !!stageWin,
+    tabs: sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent).length,
+  }),
   log: logAgent,
 };
 

@@ -124,6 +124,20 @@ async function startAgentPort({ port, tokenFile, api }) {
     fullpage: async (a) => { const t = api.get(a.id); need(t, false); return api.fullPage(t); },
     alert: async (a) => { api.alert(a); return { ok: true }; },
     bills: async () => api.bills(),
+    // ---- the teaching rig (Stream Deck pedal, OBS). These change what a
+    // CLASS is looking at, so they are the rig's tools, not an AI agent's:
+    // never call them to get a page in front of yourself.
+    slots: async () => ({ slots: api.slots() }),
+    show: async (a) => {
+      const list = api.slots();
+      const pick = a.slot !== undefined ? list[Number(a.slot) - 1] : list.find((t) => t.id === Number(a.id));
+      if (!pick) throw new Error(a.slot !== undefined ? `There is no tab ${a.slot}.` : 'No such tab.');
+      api.show(pick.id);
+      return { showing: pick.id, slot: list.indexOf(pick) + 1, title: pick.title };
+    },
+    take: async () => { api.take(); return api.rig(); },
+    front: async (a) => api.front({ focus: !!(a && a.focus) }),
+    rig: async () => api.rig(),
     volume: async (a) => { const t = api.get(a.id); need(t, false); if (a.muted !== undefined) api.setMuted(t, !!a.muted); if (a.value !== undefined) api.setVolume(t, a.value); return { volume: t.volume, muted: t.muted }; },
   };
 
