@@ -125,6 +125,13 @@ module.exports = async function run(c) {
   check('vanish: control scan does find a normal tab', walkFind(ud, ctl).length > 0, walkFind(ud, ctl).slice(0, 3));
   c.closeTab(ct.id);
 
+  c.bookmarkTab(h); await sleep(100);
+  check('bookmarks: Cmd+D saves the page', c.lib.bookmarks('hist').length > 0);
+  const vb = c.openTab({ url: `${base}/note?vb`, identity: 'vanish' }); await loaded(vb);
+  c.bookmarkTab(vb); await sleep(100);
+  check('bookmarks: Vanish pages are not saved', c.lib.bookmarks('vb').length === 0);
+  c.closeTab(vb.id);
+
   // ---- passwords
   const origin = base;
   c.vault.save({ identity: 'personal', origin, username: TEST_USER, password: TEST_PASS, auto: false });

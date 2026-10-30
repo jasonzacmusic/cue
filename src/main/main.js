@@ -1058,6 +1058,12 @@ function readBillPage(t) {
   }, 2500);
 }
 
+function bookmarkTab(t) {
+  if (!t || t.identity === 'vanish' || !/^https?:/.test(t.url)) { sendEvent('toast', 'This page can\'t be bookmarked.'); return; }
+  lib.importBookmarks([{ url: t.url, title: t.title, folder: '' }]);
+  sendEvent('toast', 'Bookmarked.');
+}
+
 // ---------------------------------------------------------------- tidying
 function archiveOldTabs() {
   const days = settings().archiveDays; if (!days) return;
@@ -1270,11 +1276,12 @@ const agentApi = {
     onAir: t.id === programId, private: t.private, agentTab: t.agent, aiCanAct: agentCanAct(t), audible: t.audible, muted: t.muted, volume: t.volume,
   })),
   get: (id) => byId(Number(id)),
-  canRead: (t) => t && t.identity !== 'vanish' && !t.private,
+  canRead: (t) => t && t.identity !== 'vanish' && !t.private && !t.url.startsWith('cue://'), // your Library and Bills pages stay yours
   canAct: (t) => agentCanAct(t),
   open: ({ url, identity = 'agent', background = true }) => {
-    const t = openTab({ url: resolveInput(url), identity: IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent', background, agent: true });
-    return t;
+    const target = resolveInput(url);
+    if (target.startsWith('cue://')) throw new Error('Cue\'s own pages are private to the person using it.');
+    return openTab({ url: target, identity: IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent', background, agent: true });
   },
   ensure: (t) => ensureView(t),
   capture: (t) => captureTab(t),
@@ -1287,7 +1294,7 @@ const agentApi = {
   log: logAgent,
 };
 
-function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && (t.agent || t.aiAllowed); }
+function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed); }
 
 // ---------------------------------------------------------------- menus
 function buildMenu() {
@@ -1331,6 +1338,7 @@ function buildMenu() {
       label: 'History', submenu: [
         { label: 'Back', accelerator: 'CmdOrCtrl+[', click: cmd('back') },
         { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: cmd('forward') },
+        { label: 'Bookmark This Page', accelerator: 'CmdOrCtrl+D', click: () => bookmarkTab(byId(activeId)) },
         { label: 'Bookmarks, History and Archived Tabs', accelerator: 'CmdOrCtrl+Y', click: cmd('open-page', { page: 'library' }) },
       ],
     },
@@ -1488,7 +1496,7 @@ app.whenReady().then(async () => {
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
   if (settings().obs.autoConnect) obs.connect(settings().obs);
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === 'features' ? 'features.js' : 'in-app.js'))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === 'features' ? 'features.js' : 'in-app.js'))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

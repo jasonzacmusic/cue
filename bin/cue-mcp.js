@@ -65,7 +65,7 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.2.0' },
+      serverInfo: { name: 'cue', version: '0.2.1' },
       instructions: 'Cue is the user\'s browser. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open. Never use tabs marked private or on air.',
     });
   }
