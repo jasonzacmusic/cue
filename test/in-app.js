@@ -6,6 +6,7 @@ const path = require('path');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const OUT = process.env.CUE_OUT || '/tmp';
+fs.mkdirSync(OUT, { recursive: true });
 const report = [];
 const log = (k, v) => { report.push({ k, v }); console.log(`[cue-test] ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`); };
 

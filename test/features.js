@@ -8,6 +8,7 @@ const crypto = require('crypto');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const OUT = process.env.CUE_OUT || '/tmp';
+fs.mkdirSync(OUT, { recursive: true });
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`[cue-feature] ${ok ? 'PASS' : 'FAIL'} ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ''}`); };
 const until = async (fn, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { try { const v = await fn(); if (v) return v; } catch {} await sleep(100); } return null; };
