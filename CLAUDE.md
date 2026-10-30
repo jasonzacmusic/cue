@@ -5,7 +5,7 @@ Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source 
 `AGENTS.md` points here so Codex reads the same file.
 
 ## The goal right now
-Cue replaces Helium as Jason's daily browser. Helium is removed only after Cue is proven better
+Cue replaces Helium as Jason's daily browser. Jason does not want Helium or Brave data moved in. Helium is removed only after Cue is proven better
 on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) has not started.
 
 ## How to work
@@ -22,7 +22,7 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 - `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
 - `src/main/vanish.js`: the Vanish window. Its tabs are kept out of Cue's tab list on purpose, so nothing that saves or shares tabs can reach them.
 - `src/main/db.js`: history, bookmarks, Boards. `vault.js`: passwords (OS keychain). `bills.js`: bill reader.
-- `src/main/importer.js`: move in from Helium, Chrome, Brave, Edge, Arc, Safari.
+- `src/main/importer.js`: move in from Chrome, Safari, Helium, Brave, Edge, Arc. Safari needs Full Disk Access.
 - `src/main/capture.js`, `page-tools.js`, `extensions.js`, `groups.js`, `obs.js`.
 - `src/preload/tab.js`: runs in every page (volume, music tools, logins, held notifications).
 - `src/ui/`: sidebar and toolbar. `src/ui/pages/`: Boards, Library, Bills, Thumbnail check (`cue://` pages).
@@ -45,7 +45,7 @@ every new feature, and run a control when a test proves something by finding not
 Testing NSM apps through Cue: open the app with `cue_open` in the agent lane, click through with
 `cue_snapshot` and `cue_click`, then report from `cue_problems`.
 
-## Releasing (Mac mini only: this needs the `nsm-notary` keychain profile)
+## Releasing (needs the `nsm-notary` keychain profile; `~/Documents/NSM Reports/codex-cue-notary-release.md` sets it up on a new Mac)
 1. Raise `version` in `package.json` and the `serverInfo` version in `bin/cue-mcp.js`.
 2. `npm run dist:mac`
 3. `~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh build/Cue-darwin-arm64/Cue.app --no-resign --dmg`
@@ -57,7 +57,7 @@ Testing NSM apps through Cue: open the app with `cue_open` in the agent lane, cl
 ## Retiring Helium
 Prove it on the Mac mini with real measured numbers (time to first page and
 memory on the same five pages, written to `speed-vs-helium.md` in iCloud `NSM Deliverables/01 Apps/Cue Browser`).
-Then, in order: move in from Helium inside Cue (File > Move In), confirm bookmarks, history and
+Then, in order: move in from Chrome inside Cue (File > Move In), confirm bookmarks, history and
 sign-ins arrived, make Cue the default browser, and only then move `/Applications/Helium.app` to
 the Trash. Never delete Helium's data folder, and never empty the Trash. If Cue is slower, leave
 Helium installed and report the numbers.
