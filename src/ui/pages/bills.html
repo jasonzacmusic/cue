@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bills and alerts</title>
+<link rel="stylesheet" href="pages.css">
+<style>
+.strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 26px; }
+.tile { background: var(--raised); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tile .k { font-size: 12px; color: var(--muted); }
+.tile .v { font-size: 28px; font-weight: 800; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.tile .s { font-size: 12.5px; color: var(--muted); }
+.tile.warn .v { color: var(--due-ink); }
+.tile.bad { border-color: var(--onair); background: var(--onair-wash); }
+.tile.bad .v { color: var(--onair-ink); }
+.tile.good .v { color: var(--cued-ink); }
+.rate { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 13px; }
+.rate input { width: 90px; padding: 5px 8px; }
+.sechead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; flex-wrap: wrap; }
+.list { display: flex; flex-direction: column; gap: 8px; margin: 0 0 34px; padding: 0; list-style: none; }
+.bill { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px 16px; align-items: center; }
+.bill.failed { border-color: var(--onair); }
+.bill .nm { font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bill .sub { color: var(--muted); font-size: 12.5px; grid-column: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bill .amt { font-weight: 800; font-size: 16px; font-variant-numeric: tabular-nums; text-align: right; grid-column: 2; grid-row: 1; }
+.bill .bd { grid-column: 3; grid-row: 1; justify-self: end; }
+.bill .acts { grid-column: 2 / 4; grid-row: 2; display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.bill .note { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; font-style: italic; }
+.form { background: var(--raised); border: 1px solid var(--accent); border-radius: 12px; padding: 14px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.form .span2 { grid-column: span 2; } .form .span3 { grid-column: span 3; } .form .span6 { grid-column: 1 / -1; }
+.form .actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.form .actions .sp { flex: 1; }
+.form .hint { font-size: 12px; color: var(--muted); }
+.alert { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 11px 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 14px; align-items: start; }
+.alert.held { border-left: 4px solid var(--due); }
+.alert .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; grid-column: 1; }
+.alert .src { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.alert .ttl { font-weight: 700; grid-column: 1; overflow-wrap: anywhere; }
+.alert .body { color: var(--muted); font-size: 13px; grid-column: 1; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.alert .when { font-size: 12px; color: var(--muted); grid-column: 2; grid-row: 1; white-space: nowrap; }
+.alert .go { grid-column: 2; grid-row: 2 / span 2; align-self: end; }
+@media (max-width: 900px) { .strip { grid-template-columns: 1fr 1fr; } .tile.rate-tile { grid-column: 1 / -1; } .form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .form .span2, .form .span3 { grid-column: span 1; } }
+@media (max-width: 560px) { .form { grid-template-columns: 1fr; } .form .span2, .form .span3 { grid-column: 1 / -1; } .strip { grid-template-columns: 1fr; } .bill { grid-template-columns: minmax(0, 1fr) auto; } .bill .bd { grid-column: 1; grid-row: 2; justify-self: start; } .bill .sub { grid-row: 3; grid-column: 1 / -1; } .bill .acts { grid-column: 1 / -1; grid-row: 4; justify-content: flex-start; } .alert { grid-template-columns: 1fr; } .alert .when, .alert .go { grid-column: 1; grid-row: auto; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>Bills and alerts</h1>
+      <p>Every subscription and card payment in one place, soonest first, and the notifications that were held back while you were teaching.</p>
+    </div>
+    <div class="sample-note" id="sampleNote" hidden>Showing sample bills</div>
+  </div>
+
+  <div class="strip" id="strip"></div>
+
+  <div class="sechead"><h2>Bills, soonest first</h2><button class="btn primary" id="addBtn" type="button">+ Add a bill</button></div>
+  <ul class="list" id="bills"></ul>
+
+  <div class="sechead"><h2>Alerts, newest first</h2><button class="btn small" id="clearAlerts" type="button">Clear all alerts</button></div>
+  <ul class="list" id="alerts"></ul>
+</div>
+<script src="bills.js"></script>
+</body>
+</html>

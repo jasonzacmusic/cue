@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thumbnail check</title>
+<link rel="stylesheet" href="pages.css">
+<style>
+.setup { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; margin-bottom: 14px; }
+.drop { border: 2px dashed var(--line); border-radius: 14px; background: var(--raised); display: flex; align-items: center; gap: 16px; padding: 14px; min-height: 150px; transition: border-color .12s, background .12s; }
+.drop.over { border-color: var(--accent); background: var(--accent-wash); }
+.drop .pv { width: 168px; aspect-ratio: 16/9; border-radius: 8px; background: var(--hover); overflow: hidden; flex: none; display: grid; place-items: center; color: var(--muted); font-size: 12px; text-align: center; }
+.drop .pv img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.drop .txt { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; min-width: 0; }
+.drop .txt p { margin: 0; color: var(--muted); font-size: 13px; }
+.drop .fn { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.fields { background: var(--raised); border: 1px solid var(--line); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.fields .count { font-size: 11.5px; color: var(--muted); text-align: right; }
+.checks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 26px; }
+.note { display: flex; gap: 10px; align-items: flex-start; border-radius: 10px; padding: 9px 12px; font-size: 13px; background: var(--due-wash); color: var(--due-ink); }
+.note.bad { background: var(--onair-wash); color: var(--onair-ink); }
+.note.good { background: var(--cued-wash); color: var(--cued-ink); }
+.note.idle { background: var(--hover); color: var(--muted); }
+.note b { white-space: nowrap; }
+.sec { margin: 0 0 30px; }
+.sec > h2 { margin-bottom: 4px; }
+.sec > p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+
+/* --- the imitation video site. Original layouts only, no logos. --- */
+.yt { --bg: #fff; --ink: #0f0f0f; --sub: #606060; --ph: #e6e6e6; --ph2: #f0f0f0; --chip: #f2f2f2; --bar: #e5e5e5;
+  position: relative; background: var(--bg); color: var(--ink); border-radius: 12px; border: 1px solid var(--line); padding: 36px 12px 12px; overflow: hidden;
+  font: 12px/1.35 Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color-scheme: light; }
+.yt.dark { --bg: #0f0f0f; --ink: #f1f1f1; --sub: #aaa; --ph: #272727; --ph2: #1d1d1d; --chip: #272727; --bar: #303030; color-scheme: dark; border-color: #303030; }
+.yt .mode { position: absolute; left: 12px; top: 10px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--sub); }
+.yt .th { position: relative; aspect-ratio: 16/9; border-radius: 10px; overflow: hidden; background: var(--ph); }
+.yt .th img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.yt .th .dur { position: absolute; right: 5px; bottom: 5px; background: rgba(0,0,0,.82); color: #fff; font-size: 10.5px; font-weight: 600; padding: 1px 4px; border-radius: 4px; }
+.yt .ph { background: var(--ph); border-radius: 4px; }
+.yt .ln { height: 9px; border-radius: 4px; background: var(--ph); }
+.yt .av { width: 30px; height: 30px; border-radius: 50%; background: var(--ph); flex: none; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+.yt .av.you { background: #b0392f; }
+.yt .ttl { font-size: 13px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.yt .sub { color: var(--sub); font-size: 11.5px; line-height: 1.35; }
+.yt .topbar { display: flex; gap: 8px; align-items: center; margin: 0 0 12px; }
+.yt .topbar .pill { flex: 1; height: 22px; border-radius: 999px; background: var(--chip); max-width: 220px; margin: 0 auto; }
+.yt .topbar .dot { width: 22px; height: 22px; border-radius: 50%; background: var(--ph); }
+.yt .chips { display: flex; gap: 6px; margin-bottom: 12px; overflow: hidden; }
+.yt .chips i { height: 22px; width: 54px; border-radius: 8px; background: var(--chip); flex: none; }
+.yt .chips i:first-child { background: var(--ink); opacity: .9; width: 40px; }
+
+.home { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px 10px; }
+.card { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.card .row { display: flex; gap: 8px; min-width: 0; }
+.card .av { width: 28px; height: 28px; font-size: 12px; }
+.card .tx { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.card .ln.a { width: 92%; } .card .ln.b { width: 60%; }
+
+.srow { display: flex; gap: 12px; margin-bottom: 14px; align-items: flex-start; }
+.srow .th { width: 46%; flex: none; }
+.srow .tx { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.srow .ttl { font-size: 14px; }
+.srow .ch { display: flex; gap: 6px; align-items: center; }
+.srow .ch .av { width: 18px; height: 18px; font-size: 9px; }
+.srow .ln { width: 100%; } .srow .ln.s { width: 70%; }
+
+.phones { display: flex; justify-content: center; }
+.yt.phonebox { padding-bottom: 0; }
+.phone { width: 272px; max-width: 100%; border: 6px solid var(--bar); border-bottom: 0; border-radius: 26px 26px 0 0; background: var(--bg); padding: 8px 0 0; overflow: hidden; }
+.phone .status { display: flex; justify-content: space-between; padding: 0 14px 8px; }
+.phone .status i { display: block; height: 7px; width: 44px; border-radius: 4px; background: var(--ph); }
+.phone .pcard { margin-bottom: 14px; }
+.phone .pcard .th { border-radius: 0; }
+.phone .pcard .row { display: flex; gap: 9px; padding: 9px 12px 0; }
+.phone .pcard .tx { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.phone .pcard .ln.a { width: 90%; } .phone .pcard .ln.b { width: 55%; }
+.phone .pcard .ttl { font-size: 13.5px; }
+
+.watch { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.5fr); gap: 12px; }
+.watch .player { aspect-ratio: 16/9; background: var(--ph); border-radius: 8px; }
+.watch .left .ln { margin-top: 8px; } .watch .left .ln.s { width: 60%; }
+.watch .left .ln.m { width: 80%; }
+.side { display: flex; flex-direction: column; gap: 8px; }
+.side .it { display: flex; gap: 8px; min-width: 0; align-items: flex-start; }
+.side .th { width: min(168px, 48%); flex: none; border-radius: 8px; }
+.side .tx { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.side .ttl { font-size: 12.5px; }
+.side .ph-t { display: flex; flex-direction: column; gap: 5px; padding-top: 2px; flex: 1; }
+.side .ph-t .ln.b { width: 55%; }
+
+.tiny { display: flex; flex-wrap: wrap; gap: 14px; }
+.tiny figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.tiny .box { border-radius: 12px; padding: 12px; border: 1px solid var(--line); }
+.tiny .box.lt { background: #fff; color: #0f0f0f; }
+.tiny .box.dk { background: #0f0f0f; color: #f1f1f1; border-color: #303030; }
+.tiny .box .th { width: 168px; height: 94.5px; border-radius: 8px; overflow: hidden; background: #888; position: relative; }
+.tiny .box .th img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tiny .box .th.gray img { filter: grayscale(1); }
+.tiny .box .th .dur { position: absolute; right: 4px; bottom: 4px; background: rgba(0,0,0,.82); color: #fff; font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 4px; }
+.tiny figcaption { font-size: 12.5px; color: var(--muted); max-width: 200px; }
+
+@media (max-width: 1000px) { .setup { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .drop { flex-direction: column; align-items: flex-start; } .watch { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>Thumbnail check</h1>
+      <p>Drop in a thumbnail and see it the way viewers will: on the home page, in search, on a phone and in the suggested list, in light and dark. Nothing is uploaded anywhere.</p>
+    </div>
+  </div>
+
+  <div class="setup">
+    <div class="drop" id="drop">
+      <div class="pv" id="pv">No picture yet</div>
+      <div class="txt">
+        <button class="btn primary" id="pick" type="button">Choose a thumbnail</button>
+        <p>or drag a picture onto this box, or paste one with Cmd+V.</p>
+        <span class="fn" id="fn"></span>
+        <input type="file" id="file" accept="image/*" hidden>
+      </div>
+    </div>
+    <div class="fields">
+      <label class="field"><span>Video title</span><input type="text" id="title" placeholder="Learn the Circle of Fifths in 10 minutes" maxlength="100" autocomplete="off"></label>
+      <div class="count" id="count">0 of 100 letters. YouTube shows about 60 before cutting off.</div>
+      <label class="field"><span>Channel name</span><input type="text" id="chan" value="Nathaniel School of Music" maxlength="60" autocomplete="off"></label>
+    </div>
+  </div>
+
+  <div class="checks" id="checks" aria-live="polite"></div>
+
+  <section class="sec"><h2>Home page</h2><p>Yours is the second one. The time badge always covers the bottom right corner, so keep words out of it.</p><div class="pair" id="s-home"></div></section>
+  <section class="sec"><h2>Search results</h2><p>Bigger picture, longer title, short description underneath.</p><div class="pair" id="s-search"></div></section>
+  <section class="sec"><h2>Phone feed</h2><p>Most people will meet it here. The picture runs edge to edge.</p><div class="pair" id="s-phone"></div></section>
+  <section class="sec"><h2>Suggested next to another video</h2><p>Small and crowded. This is where weak thumbnails vanish.</p><div class="pair" id="s-watch"></div></section>
+  <section class="sec"><h2>Tiny (168 pixels wide)</h2><p>Hold your hand out at arm's length. Can you still read the words and spot the face? The grey one shows whether it works without colour.</p><div class="tiny" id="s-tiny"></div></section>
+</div>
+<script src="thumbcheck.js"></script>
+</body>
+</html>

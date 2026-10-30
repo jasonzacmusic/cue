@@ -1,0 +1,212 @@
+[
+{
+"name": "Atlas",
+"url": "https://atlas.nathanielschool.com",
+"what": "Musician's reference/workflow web app (Labs studio list)"
+},
+{
+"name": "Bass Alchemy",
+"url": "https://bassalchemy.nathanielschool.com",
+"what": "Bass-line practice tool"
+},
+{
+"name": "Cadence Library",
+"url": "https://cadence.nathanielschool.com",
+"what": "Hear 25 piano cadences in every key — every way a song can end"
+},
+{
+"name": "Cantus",
+"url": "https://cantus.nathanielschool.com",
+"what": "Chord-voicing explorer"
+},
+{
+"name": "Chorale",
+"url": "https://labs.nathanielschool.com",
+"what": "Real-time 6-voice vocal/instrument harmonizer — Mac standalone + AU + VST3, $79 early access"
+},
+{
+"name": "Chord Randomizer",
+"url": "https://chord-randomizer.nathanielschool.com",
+"what": "Random chord/progression generator for writing prompts"
+},
+{
+"name": "Chord Trees",
+"url": "https://chord-trees.nathanielschool.com",
+"what": "Chords grow as trees on piano + guitar fretboard; intervals, ear training, Capacitor iOS-ready"
+},
+{
+"name": "Classroom LMS (Learning Portal)",
+"url": "https://learning-portal.nathanielschool.com",
+"what": "The NSM classroom LMS — students, teachers, classes, invoicing, Smart Sync"
+},
+{
+"name": "DAW Mentor",
+"url": "https://daw.nathanielschool.com",
+"what": "REAPER learning companion"
+},
+{
+"name": "Dhun",
+"url": "https://dhun.nathanielschool.com",
+"what": "The melody homework book: a well-known tune written the way Jason writes it on the board (stick rhythm, scale degree, swara). Student guesses the song, hears it, plays it and writes it in all 12 keys, then takes a quiz. Teacher room turns any melody into a WhatsApp homework link; students send back a report. 27 tunes. Built 19-Sep-2026."
+},
+{
+"name": "Everything for Life LMS",
+"url": "https://learn-music.nathanielschool.com",
+"what": "Self-paced video course portal"
+},
+{
+"name": "Fifth Harmony",
+"url": "https://circle-of-fifths.nathanielschool.com",
+"what": "Interactive circle of fifths"
+},
+{
+"name": "GRADUS",
+"url": "https://counterpoint.nathanielschool.com",
+"what": "Learn counterpoint after Fux, one step at a time"
+},
+{
+"name": "Groove Kit",
+"url": "https://groove-kit.nathanielschool.com",
+"what": "Groove practice kit"
+},
+{
+"name": "Groove Metronome",
+"url": "https://metronome.nathanielschool.com",
+"what": "Pro metronome + Swing Lab feel control, accent grid, notation and DAW export"
+},
+{
+"name": "Hexatonic",
+"url": "https://hexatonic.nathanielschool.com",
+"what": "Six-note scales in every key drilled in Carnatic groupings with real notation + piano"
+},
+{
+"name": "Horo",
+"url": "https://horo.nathanielschool.com",
+"what": "Bulgarian folk music by doing: 15 horo dances in uneven meters, tupan & gaida drone, diaphony, ear quiz"
+},
+{
+"name": "Intervals",
+"url": "https://intervals.nathanielschool.com",
+"what": "Interval ear trainer — hear the two notes, name the colour"
+},
+{
+"name": "Jazz Harmony Lab",
+"url": "https://jazz.nathanielschool.com",
+"what": "ii-V-I in every key, shell voicings, both Charlestons, 5 practice modes"
+},
+{
+"name": "Lipi — Notation Studio",
+"url": "https://lipi.nathanielschool.com",
+"what": "Fast notation editor: write, hear on real piano, export each bar as transparent 300dpi PNG; MuseScore replacement"
+},
+{
+"name": "Master Key",
+"url": "https://masterkey.nathanielschool.com",
+"what": "The Diminished Seventh Laboratory — interactive piano lab"
+},
+{
+"name": "Melakarta Sphere",
+"url": "https://melakarta.nathanielschool.com",
+"what": "Interactive 3D exploration of the 72 melakarta ragas"
+},
+{
+"name": "Melodic Curves",
+"url": "https://melody-weaver.nathanielschool.com",
+"what": "Draw a melody → real notation → real piano"
+},
+{
+"name": "MIDI Piano Visualizer",
+"url": "https://midi-visualizer.nathanielschool.com",
+"what": "Falling-notes MIDI visualizer for teachers & students — $39, 14-day trial"
+},
+{
+"name": "Nathaniel Labs site",
+"url": "https://labs.nathanielschool.com",
+"what": "labs.nathanielschool.com storefront — renders product-registry snapshot"
+},
+{
+"name": "Note Forge",
+"url": "https://note-forge.nathanielschool.com",
+"what": "Note/chord building forge"
+},
+{
+"name": "NSM App Hub",
+"url": "https://apps.nathanielschool.com",
+"what": "apps.nathanielschool.com — the 25-app practice-tools storefront (managed_apps DB + registry seed)"
+},
+{
+"name": "NSM Music Quiz",
+"url": "https://quiz.nathanielschool.com",
+"what": "Interactive music quiz (Next.js + Neon)"
+},
+{
+"name": "Pendulum",
+"url": "https://pendulum.nathanielschool.com",
+"what": "Pulse/scale-degree/progression drills with Western, Hindustani & Carnatic notation"
+},
+{
+"name": "Prima Vista (Sight Singing Studio)",
+"url": "https://sightsinging.nathanielschool.com",
+"what": "Sight-singing studio — sing what you see and it marks every note live"
+},
+{
+"name": "Rhythm Arithmetic",
+"url": "https://binary-arithmetic.nathanielschool.com",
+"what": "Rhythm as maths — add and divide beats until odd meters feel obvious"
+},
+{
+"name": "Rhythm Teacher",
+"url": "https://rhythm-master.nathanielschool.com",
+"what": "Accent-pattern & beat-division trainer with visual metronome and konnakol labels; on the App Store as NSM Rhythm Teacher"
+},
+{
+"name": "Roll the Dice",
+"url": "https://rollthedice.nathanielschool.com",
+"what": "Melody & rhythm playground with VexFlow + Tone.js"
+},
+{
+"name": "Runway",
+"url": "https://runway.nathanielschool.com",
+"what": "Improvisation run/fill/landing trainer — a practice instrument"
+},
+{
+"name": "Sangam",
+"url": "https://labs.nathanielschool.com",
+"what": "Audio driver/routing studio replacing MainStage+Loopback — $59"
+},
+{
+"name": "Shruti",
+"url": "https://labs.nathanielschool.com",
+"what": "Per-app audio control for macOS — menu-bar mixer, EQ, routing — $34"
+},
+{
+"name": "SightRead",
+"url": "https://sight-read.nathanielschool.com",
+"what": "Sight-reading companion — chord-card view of classical pieces"
+},
+{
+"name": "Solfa Studio",
+"url": "https://solfa.nathanielschool.com",
+"what": "Sing solfège and swaras in one language, plus a full modes studio: 35 modes in The Beato Book's six scale books (major, natural minor, melodic minor, harmonic minor, harmonic major, double harmonic major) — chords and 11 voicings on the piano, Beato/Hewitt scale patterns in any key, modal jams with an improviser, one tune through every mode, ear test. Also Carnatic varisai, Hindustani alankars, Kodály drills, sight-singing, jazz changes — 12 keys, 72 melakartas"
+},
+{
+"name": "Span",
+"url": "https://span.nathanielschool.com",
+"what": "Every interval in one view — circle of fifths, keyboard shapes, ear/eyes/hands/voice practice"
+},
+{
+"name": "The Complete Dominant 7th",
+"url": "https://dominant7.nathanielschool.com",
+"what": "Interactive music-theory lesson companion"
+},
+{
+"name": "Two Notes",
+"url": "https://intervals.nathanielschool.com",
+"what": "The Interval Field Guide — intervals as emotions, consonance map; class companion"
+},
+{
+"name": "Woodshed",
+"url": "https://woodshed.nathanielschool.com",
+"what": "Practice & career management — sessions, goals, material packs, daily riffs, team roles"
+}
+]

@@ -120,6 +120,10 @@ async function startAgentPort({ port, tokenFile, api }) {
       }
       return { found: false };
     },
+    problems: async (a) => { const t = api.get(a.id); need(t, false); return { url: t.url, problems: api.problems(t) }; },
+    fullpage: async (a) => { const t = api.get(a.id); need(t, false); return api.fullPage(t); },
+    alert: async (a) => { api.alert(a); return { ok: true }; },
+    bills: async () => api.bills(),
     volume: async (a) => { const t = api.get(a.id); need(t, false); if (a.muted !== undefined) api.setMuted(t, !!a.muted); if (a.value !== undefined) api.setVolume(t, a.value); return { volume: t.volume, muted: t.muted }; },
   };
 

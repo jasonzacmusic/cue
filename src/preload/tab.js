@@ -88,9 +88,98 @@ function install(init) {
     }
   };
 
+  // ---- notifications: every one goes to Cue's alert tray; during class they stay off the screen
+  let held = !!init.hold;
+  const report = (title, body) => document.dispatchEvent(new CustomEvent('cue-note', { detail: JSON.stringify({ title: String(title || ''), body: String(body || '') }) }));
+  if (window.Notification) {
+    const RealN = window.Notification;
+    const Quiet = function Notification(title, opts) {
+      report(title, opts && opts.body);
+      if (held) return new EventTarget();
+      return new RealN(title, opts);
+    };
+    Quiet.prototype = RealN.prototype;
+    Object.defineProperty(Quiet, 'permission', { get: () => RealN.permission });
+    Quiet.requestPermission = RealN.requestPermission.bind(RealN);
+    Object.defineProperty(Quiet, 'maxActions', { get: () => RealN.maxActions });
+    window.Notification = Quiet;
+  }
+  if (window.ServiceWorkerRegistration) {
+    const realShow = ServiceWorkerRegistration.prototype.showNotification;
+    ServiceWorkerRegistration.prototype.showNotification = function (title, opts) {
+      report(title, opts && opts.body);
+      return held ? Promise.resolve() : realShow.call(this, title, opts);
+    };
+  }
+
+  // ---- music kit: speed, A-B loop and transpose on whatever video or audio is playing
+  const main = () => media().filter((e) => e.duration > 0).sort((a, b) => ((b.videoWidth || 0) * (b.videoHeight || 0)) - ((a.videoWidth || 0) * (a.videoHeight || 0)) || (b.paused ? -1 : 1))[0];
+  const loop = { a: null, b: null, on: false, timer: 0 };
+  const checkLoop = () => {
+    const e = main();
+    if (e && loop.on && loop.a != null && loop.b != null && e.currentTime >= loop.b) e.currentTime = loop.a;
+  };
+  let semis = 0;
+  const shifters = new WeakMap();
+  // Two crossfaded read heads over a short delay line: steady pitch, tempo untouched.
+  const makeShifter = (el) => {
+    const ctx = new AudioContext();
+    const src = ctx.createMediaElementSource(el);
+    const node = ctx.createScriptProcessor(4096, 2, 2);
+    const size = 8192; const grain = 3072;
+    const buf = [new Float32Array(size), new Float32Array(size)];
+    let w = 0; let phase = 0;
+    const s = { ratio: 1 };
+    node.onaudioprocess = (ev) => {
+      const n = ev.inputBuffer.length;
+      for (let ch = 0; ch < 2; ch++) {
+        const i = ev.inputBuffer.getChannelData(Math.min(ch, ev.inputBuffer.numberOfChannels - 1));
+        const o = ev.outputBuffer.getChannelData(ch);
+        let wr = w; let ph = phase;
+        for (let k = 0; k < n; k++) {
+          buf[ch][wr] = i[k];
+          if (s.ratio === 1) { o[k] = i[k]; } else {
+            const read = (head) => {
+              const d = head * grain; const p = (wr - d - 1 + size * 2) % size;
+              const a = Math.floor(p); const f = p - a;
+              return buf[ch][a % size] * (1 - f) + buf[ch][(a + 1) % size] * f;
+            };
+            const h1 = ph; const h2 = (ph + 0.5) % 1;
+            const g1 = Math.sin(Math.PI * h1) ** 2; const g2 = Math.sin(Math.PI * h2) ** 2;
+            o[k] = read(h1) * g1 + read(h2) * g2;
+            ph = (ph + (1 - s.ratio) / grain + 1) % 1;
+          }
+          wr = (wr + 1) % size;
+        }
+        if (ch === 1) { w = wr; phase = ph; }
+      }
+    };
+    src.connect(node); node.connect(ctx.destination);
+    return s;
+  };
+
   Object.defineProperty(window, '__cue', {
     enumerable: false,
     value: {
+      setHold(on) { held = !!on; },
+      music(op, v) {
+        const e = main();
+        if (!e) return { none: true };
+        if (op === 'speed') { e.preservesPitch = true; e.playbackRate = Math.max(0.25, Math.min(2, v)); }
+        if (op === 'a') { loop.a = e.currentTime; if (loop.b != null && loop.b <= loop.a) loop.b = null; }
+        if (op === 'b') { loop.b = e.currentTime; if (loop.a == null) loop.a = 0; if (loop.b > loop.a) loop.on = true; }
+        if (op === 'loop') loop.on = !!v && loop.a != null && loop.b != null;
+        if (op === 'clear') { loop.a = null; loop.b = null; loop.on = false; }
+        if (op === 'transpose') {
+          semis = Math.max(-12, Math.min(12, Math.round(v)));
+          let s = shifters.get(e);
+          if (!s) { s = makeShifter(e); shifters.set(e, s); }
+          s.ratio = 2 ** (semis / 12);
+        }
+        clearInterval(loop.timer);
+        if (loop.on) loop.timer = setInterval(checkLoop, 40);
+        return { speed: e.playbackRate, a: loop.a, b: loop.b, loop: loop.on, semis };
+      },
       setVolume(v) { tabVol = clamp(v); media().forEach(apply); gains.forEach((g) => { g.gain.value = tabVol; }); },
       media(cmd) {
         const els = media();
@@ -111,7 +200,7 @@ function install(init) {
   if (init.safe) document.addEventListener('DOMContentLoaded', () => setSafe(true));
 }
 
-const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false };
+const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
 contextBridge.executeInMainWorld({ func: install, args: [init] });
 
 const call = (name, ...args) => contextBridge.executeInMainWorld({
@@ -143,3 +232,70 @@ window.addEventListener('scroll', () => {
     if (max > 0) ipcRenderer.send('cue:scroll', window.scrollY / max);
   });
 }, { passive: true });
+
+ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
+ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));
+document.addEventListener('cue-note', (e) => {
+  try { const n = JSON.parse(e.detail); ipcRenderer.send('cue:note', n); } catch {}
+});
+
+// Alt-click a link to Peek at it without leaving the page.
+document.addEventListener('click', (e) => {
+  if (!e.altKey) return;
+  const a = e.target.closest && e.target.closest('a[href]');
+  if (!a) return;
+  e.preventDefault(); e.stopPropagation();
+  ipcRenderer.send('cue:peek', a.href);
+}, true);
+
+// ---- Cue's own pages (Boards, Library, Bills, Thumbnail check)
+if (location.protocol === 'cue:') {
+  contextBridge.exposeInMainWorld('cueInternal', { invoke: (cmd, args) => ipcRenderer.invoke('cue:internal', cmd, args) });
+}
+
+// ---- saved logins: fill when a password box appears, offer to save when a form is sent
+if (window === window.top && /^https?:$/.test(location.protocol)) {
+  let filled = false; let tried = false;
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2 && getComputedStyle(el).visibility !== 'hidden'; };
+  const pwField = () => [...document.querySelectorAll('input[type=password]')].find(visible);
+  const userField = (pw) => {
+    const inputs = [...(pw.form || document).querySelectorAll('input')].filter((i) => /^(text|email|tel|)$/.test(i.type) && visible(i));
+    const before = inputs.filter((i) => i.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return before[before.length - 1] || inputs[0] || null;
+  };
+  const setVal = (el, v) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const tryFill = async () => {
+    if (filled || tried) return;
+    const pw = pwField();
+    if (!pw) return;
+    tried = true;
+    const c = await ipcRenderer.invoke('cue:cred-get');
+    if (!c) return;
+    filled = true;
+    const u = userField(pw);
+    if (u && c.username && !u.value) setVal(u, c.username);
+    setVal(pw, c.password);
+    if (c.submit) {
+      const form = pw.form;
+      const btn = (form || document).querySelector('button[type=submit],input[type=submit],button:not([type])');
+      setTimeout(() => { if (btn) btn.click(); else if (form) form.requestSubmit(); }, 250);
+    }
+  };
+  const offer = () => {
+    const pw = pwField();
+    if (!pw || !pw.value) return;
+    const u = userField(pw);
+    ipcRenderer.send('cue:cred-offer', { username: u ? u.value : '', password: pw.value });
+  };
+  document.addEventListener('submit', offer, true);
+  document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('button,input[type=submit],[role=button]')) offer(); }, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.type === 'password') offer(); }, true);
+  addEventListener('DOMContentLoaded', () => {
+    tryFill();
+    new MutationObserver(() => { if (!filled && !tried) tryFill(); }).observe(document.documentElement, { childList: true, subtree: true });
+  });
+}

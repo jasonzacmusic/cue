@@ -15,6 +15,7 @@
     <button id="newtab" class="btn wide" title="New tab (⌘T)"><span class="plus">+</span> New tab</button>
     <div class="idpick" id="idpick" role="radiogroup" aria-label="New tabs open as"></div>
   </div>
+  <div id="spaces" class="spaces" role="tablist" aria-label="Spaces"></div>
   <div id="pins" class="pins"></div>
   <div id="groups" class="groups"></div>
   <div id="livebox" class="livebox" hidden>
@@ -23,6 +24,13 @@
     <div class="lb-row"><button id="lb-take" class="take">TAKE</button><button id="lb-end" class="btn">End live</button></div>
   </div>
   <div id="downloads" class="downloads" hidden></div>
+  <div id="credbar" class="credbar" hidden></div>
+  <div class="side-tools">
+    <button id="findany" class="tool" title="Find anything (⌘K)">⌘K</button>
+    <button id="openboards" class="tool" title="Boards">Boards</button>
+    <button id="openlibrary" class="tool" title="Bookmarks, history and archived tabs (⌘Y)">Library</button>
+    <button id="openbills" class="tool" title="Bills and alerts">Bills<span id="billbadge" class="badge" hidden></span></button>
+  </div>
   <div class="side-foot">
     <span id="agentline" class="agentline"></span>
     <button id="opensettings" class="icon" title="Settings" aria-label="Settings">⚙︎</button>
@@ -53,9 +61,28 @@
     <button data-split="grid4" title="Grid of four (⌥⌘5)"><i class="l5"></i></button>
     <button id="syncscroll" class="sync" title="Scroll split tabs together">⇅</button>
   </div>
+  <div id="peekbar" class="peekbar nodrag" hidden>
+    <span id="peektitle"></span><button id="peekkeep" class="btn">Open as tab</button><button id="peekclose" class="icon" aria-label="Close Peek">×</button>
+  </div>
+  <button id="recbtn" class="rec nodrag" hidden>● Stop recording</button>
+  <button id="musicbtn" class="icon nodrag" title="Music bar: loop, transpose, speed (⇧⌘M)" aria-label="Music bar">♪</button>
+  <button id="aibtn" class="icon nodrag" title="AI side panel (⌘J)" aria-label="AI side panel">✦</button>
   <label class="live nodrag" title="Live class (⇧⌘L)"><input type="checkbox" id="livetoggle"> Live</label>
   <button id="take" class="take nodrag" title="Put the cued tab on air (⌘↩)" hidden>TAKE</button>
 </header>
+
+<div id="strip" class="strip" hidden>
+  <span class="st-label">Speed</span><button data-m="speed-">−</button><output id="m-speed">100%</output><button data-m="speed+">+</button>
+  <span class="st-label">Transpose</span><button data-m="semi-">−</button><output id="m-semi">0</output><button data-m="semi+">+</button>
+  <span class="st-label">Loop</span><button data-m="a">Set A</button><button data-m="b">Set B</button><button data-m="loop" id="m-loop">Off</button><button data-m="clear">Clear</button>
+  <span class="st-gap"></span>
+  <button data-t="mark">Mark time</button><button data-t="frame">Grab frame</button>
+</div>
+<div id="aihead" class="aihead" hidden>
+  <button data-ai="claude">Claude</button><button data-ai="chatgpt">ChatGPT</button>
+  <button id="aiask" class="btn">Ask about this page</button>
+  <button id="aiclose" class="icon" aria-label="Close AI panel">×</button>
+</div>
 
 <main id="content">
   <div id="frames"></div>

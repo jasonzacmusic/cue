@@ -1,7 +1,7 @@
 // Cue — the browser for people who make things.
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -10,19 +10,49 @@ const { Store } = require('./store');
 const { groupFor, GROUP_LIST } = require('./groups');
 const { OBS } = require('./obs');
 const { startAgentPort } = require('./agent-port');
+const { Library } = require('./db');
+const { Vault } = require('./vault');
+const bills = require('./bills');
+const tools = require('./page-tools');
+const capture = require('./capture');
+const importer = require('./importer');
+const extensions = require('./extensions');
+const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
 if (process.env.CUE_USER_DATA) app.setPath('userData', process.env.CUE_USER_DATA);
+if (process.env.CUE_TEST) { app.commandLine.appendSwitch('use-mock-keychain'); app.setPath('downloads', path.join(app.getPath('userData'), 'downloads')); }
+protocol.registerSchemesAsPrivileged([{ scheme: 'cue', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+// The cache cap has to be set before Chromium starts, so read it straight from the settings file.
+try {
+  const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'cue.json'), 'utf8'));
+  app.commandLine.appendSwitch('disk-cache-size', String((saved.settings.cacheCapMB || 1024) * 1048576));
+} catch { app.commandLine.appendSwitch('disk-cache-size', String(1024 * 1048576)); }
 const ROOT = path.join(__dirname, '..');
 const UI_HTML = path.join(ROOT, 'ui', 'index.html');
 const STAGE_HTML = path.join(ROOT, 'ui', 'stage.html');
 const START_URL = pathToFileURL(path.join(ROOT, 'ui', 'start.html')).href;
 const TAB_PRELOAD = path.join(ROOT, 'preload', 'tab.js');
 const UI_PRELOAD = path.join(ROOT, 'preload', 'ui.js');
+const PAGES = path.join(ROOT, 'ui', 'pages');
 const SIDEBAR = 264;
 const TOOLBAR = 52;
 const GAP = 6;
 const AGENT_PORT = 8813;
+const AI_W = 440;
+const AI_HEAD = 38;
+const STRIP = 44;
+const SPACES = ['Teach', 'Create', 'Business', 'Build'];
+const KITS = {
+  teacher: { name: 'Teacher', what: 'On air, OBS and Safe-share' },
+  music: { name: 'Music', what: 'Loop, transpose and speed for any video' },
+  creator: { name: 'Creator', what: 'Thumbnail check, YouTube Studio and comments' },
+  designer: { name: 'Designer', what: 'Colour picker, palettes, font finder, ruler, Boards' },
+  video: { name: 'Video', what: 'Page capture, tab recording, GIFs, timestamps, frame grabs' },
+  business: { name: 'Business', what: 'Bills radar and alert tray' },
+};
+const AI_HOME = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
+const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsapp\.com|facebook\.com|linkedin\.com)$/;
 
 const IDENTITIES = {
   personal: { name: 'Personal', color: '#2A64CC', partition: 'persist:personal' },
@@ -71,8 +101,21 @@ const downloads = [];
 const agentLog = [];
 const sessionsReady = new Set();
 let pendingShare = null;
+let lib = null;
+let vault = null;
+let pendingCred = null;
+const autoTried = {};
+let peek = null;
+let aiView = null;
+let stripOpen = false;
+let recTabId = null;
+let heldCount = 0;
+let repos = [];
+let extDir = '';
+const extsLoaded = new Set();
 
 const settings = () => store.data.settings;
+const copy = (text) => { if (!process.env.CUE_TEST) clipboard.writeText(text); };
 const byId = (id) => tabs.find((t) => t.id === id);
 const byWC = (wc) => tabs.find((t) => t.view && t.view.webContents === wc);
 const isStart = (url) => !url || url === START_URL;
@@ -85,6 +128,12 @@ function sessionFor(identity) {
   ses.setUserAgent(chromeUA());
   enableBlocker(ses);
   if (identity === 'vanish') ses.setSpellCheckerEnabled(false);
+  servePages(ses);
+  if (identity !== 'vanish') extensions.loadAll(ses, extDir).then((r) => r.forEach((x) => x.ok ? extsLoaded.add(x.id) : console.error('extension', x.name, x.error)));
+  ses.webRequest.onErrorOccurred((d) => {
+    if (d.error === 'net::ERR_BLOCKED_BY_CLIENT' || d.error === 'net::ERR_ABORTED' || !d.webContents) return;
+    const t = byWC(d.webContents); if (t) logTab(t, 'failed-request', `${d.error} ${d.url}`);
+  });
 
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
     const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management'];
@@ -125,14 +174,77 @@ function sessionFor(identity) {
     const dir = app.getPath('downloads');
     let name = item.getFilename(); let file = path.join(dir, name); let n = 1;
     while (fs.existsSync(file)) { const ext = path.extname(name); file = path.join(dir, `${path.basename(name, ext)} (${n++})${ext}`); }
-    item.setSavePath(file);
-    const d = { id: Date.now() + Math.random(), name: path.basename(file), file, received: 0, total: item.getTotalBytes(), state: 'progressing' };
+    // Vanish leaves no file behind unless you choose where it goes.
+    if (identity === 'vanish') item.setSaveDialogOptions({ title: 'Vanish tab: save this file?', defaultPath: file });
+    else item.setSavePath(file);
+    const d = { id: Date.now() + Math.random(), name: path.basename(file), file, kind: fileKind(file), received: 0, total: item.getTotalBytes(), state: 'progressing' };
     downloads.unshift(d); downloads.length = Math.min(downloads.length, 30);
     item.on('updated', (_ev, state) => { d.received = item.getReceivedBytes(); d.state = state; pushState(); });
-    item.once('done', (_ev, state) => { d.state = state; d.received = d.total; pushState(); });
+    item.once('done', (_ev, state) => {
+      d.state = state; d.received = d.total;
+      if (item.getSavePath()) { d.file = item.getSavePath(); d.name = path.basename(d.file); }
+      pushState();
+    });
     pushState();
+    warnLowDisk(item, dir);
   });
   return ses;
+}
+
+const KINDS = {
+  Installers: ['.dmg', '.pkg', '.exe', '.msi', '.deb', '.rpm', '.appimage'],
+  Video: ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'],
+  Audio: ['.wav', '.mp3', '.flac', '.aiff', '.aif', '.m4a', '.ogg', '.mid', '.midi'],
+  Images: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.heic', '.psd'],
+  Documents: ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.md', '.musicxml', '.mscz'],
+  Archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
+};
+function fileKind(file) {
+  const ext = path.extname(file).toLowerCase();
+  return Object.keys(KINDS).find((k) => KINDS[k].includes(ext)) || 'Other';
+}
+
+// A big download on a nearly full disk pauses and asks first.
+function warnLowDisk(item, dir) {
+  try {
+    const st = fs.statfsSync(dir);
+    const free = st.bavail * st.bsize; const size = item.getTotalBytes();
+    const floor = (settings().lowDiskGB || 5) * 1073741824;
+    if (free - size >= floor) return;
+    item.pause();
+    const gb = (n) => (n / 1073741824).toFixed(1);
+    const r = dialog.showMessageBoxSync(mainWin, {
+      type: 'warning', buttons: ['Download anyway', 'Cancel'], defaultId: 1, cancelId: 1,
+      message: `Your disk is nearly full (${gb(free)} GB free).`,
+      detail: size ? `${item.getFilename()} needs ${gb(size)} GB.` : `${item.getFilename()} has an unknown size.`,
+    });
+    if (r === 0) item.resume(); else item.cancel();
+  } catch {}
+}
+
+// Installers you opened go to the Trash a day later, so old copies don't pile up.
+function tidyInstallers() {
+  if (!settings().tidyInstallers) return;
+  const list = store.data.installersOpened || [];
+  const day = Date.now() - 86400000;
+  store.data.installersOpened = list.filter((i) => {
+    if (i.at > day) return true;
+    if (fs.existsSync(i.file)) shell.trashItem(i.file).catch(() => {});
+    return false;
+  });
+  store.save();
+}
+
+// Serves Cue's own pages, such as cue://boards. Only files in the pages folder can be reached.
+function servePages(ses) {
+  if (ses.protocol.isProtocolHandled('cue')) return;
+  ses.protocol.handle('cue', (req) => {
+    const u = new URL(req.url);
+    const rel = u.pathname.replace(/^\/+/, '') || `${u.hostname}.html`;
+    const file = path.normalize(path.join(PAGES, rel));
+    if (!file.startsWith(PAGES + path.sep) || !fs.existsSync(file)) return new Response('Not found', { status: 404 });
+    return net.fetch(pathToFileURL(file).href);
+  });
 }
 
 // The ad blocker registers one shared message handler; clear it before adding each new login's session.
@@ -149,11 +261,12 @@ function safeOrigin(url) { try { return new URL(url).origin; } catch { return ur
 function makeTab(opts) {
   const t = {
     id: nextId++, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
-    identity: IDENTITIES[opts.identity] ? opts.identity : settings().defaultIdentity,
+    identity: IDENTITIES[opts.identity] ? opts.identity : (settings().spaceLogins[opts.space || store.data.space] || settings().defaultIdentity),
     pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
-    order: opts.order ?? Date.now(), playing: false, audible: false, loading: false,
-    view: null, host: 'main', popout: null, lastActive: Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
+    order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: SPACES.includes(opts.space) ? opts.space : store.data.space,
+    view: null, host: 'main', popout: null, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
+    badge: 0, marks: [], log: [],
   };
   return t;
 }
@@ -187,16 +300,23 @@ function ensureView(t) {
 function wireTab(t) {
   const wc = t.view.webContents;
   wc.setAudioMuted(t.muted);
-  wc.on('page-title-updated', (_e, title) => { t.title = title; if (t.popout) t.popout.setTitle(`Cue · ${title}`); pushState(); persist(); });
+  wc.on('page-title-updated', (_e, title) => {
+    t.title = title; if (t.popout) t.popout.setTitle(`Cue · ${title}`);
+    if (remembers(t)) lib.title(wc.getURL(), title);
+    t.badge = countIn(t, title);
+    pushState(); persist();
+  });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
   };
-  wc.on('did-navigate', nav);
-  wc.on('did-navigate-in-page', nav);
+  const visit = () => { if (remembers(t) && /^https?:/.test(wc.getURL())) lib.visit(wc.getURL(), wc.getTitle()); };
+  wc.on('did-navigate', () => { nav(); visit(); });
+  wc.on('did-navigate-in-page', (_e, _u, main) => { nav(); if (main) visit(); });
   wc.on('did-start-loading', () => { t.loading = true; pushState(); });
-  wc.on('did-stop-loading', () => { t.loading = false; nav(); });
+  wc.on('did-stop-loading', () => { t.loading = false; nav(); readBillPage(t); });
+  wc.on('console-message', (e) => { if (e.level === 'error' || e.level === 'warning') logTab(t, e.level, `${e.message} (${e.sourceId}:${e.lineNumber})`); });
   wc.on('audio-state-changed', (e) => { t.audible = e.audible; pushState(); });
   wc.on('media-started-playing', () => {
     t.playing = true;
@@ -220,6 +340,7 @@ function wireTab(t) {
     if (t.volume !== 1) wc.send('cue:volume', t.volume);
   });
   wc.setWindowOpenHandler(({ url, disposition }) => {
+    if (recTabId === t.id) return { action: 'deny' };
     if (disposition === 'new-window') {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
     }
@@ -246,6 +367,7 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
 
 function activate(id) {
   const t = byId(id); if (!t) return;
+  if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
   activeId = id; t.lastActive = Date.now();
   if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
@@ -265,7 +387,7 @@ function closeTab(id) {
   tabs.splice(i, 1);
   store.data.split.ids = store.data.split.ids.filter((x) => x !== id);
   if (activeId === id) {
-    const next = tabs[Math.min(i, tabs.length - 1)];
+    const next = spaceOrder()[0];
     if (next) activate(next.id); else openTab({});
   }
   layout(); pushState(); persist();
@@ -279,8 +401,8 @@ function destroyView(t) {
 }
 
 function serialize(t) {
-  const { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed } = t;
-  return { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed };
+  const { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive } = t;
+  return { url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive };
 }
 
 function persist() {
@@ -293,7 +415,8 @@ function persist() {
 // ---------------------------------------------------------------- layout
 function contentRect() {
   const [w, h] = mainWin.getContentSize();
-  return { x: SIDEBAR, y: TOOLBAR, width: Math.max(0, w - SIDEBAR), height: Math.max(0, h - TOOLBAR) };
+  const top = TOOLBAR + (stripOpen ? STRIP : 0);
+  return { x: SIDEBAR, y: top, width: Math.max(0, w - SIDEBAR - (aiView ? AI_W : 0)), height: Math.max(0, h - top) };
 }
 
 function splitRects(mode, r) {
@@ -328,6 +451,12 @@ function layout() {
     if (k >= 0 && rects[k]) { t.view.setBounds(rects[k]); t.view.setVisible(true); panes.push({ id: t.id, rect: rects[k] }); }
     else { t.view.setVisible(false); t.view.setBounds(rects[0] || contentRect()); }
   }
+  if (aiView) aiView.setBounds({ x: w - AI_W, y: TOOLBAR + AI_HEAD, width: AI_W, height: Math.max(0, h - TOOLBAR - AI_HEAD) });
+  if (peek) {
+    const r = contentRect(); const pw = Math.round(r.width * 0.5);
+    peek.view.setBounds({ x: r.x + r.width - pw - 8, y: r.y + 8, width: pw, height: r.height - 16 });
+    if (!overlay) mainWin.contentView.addChildView(peek.view);
+  }
   if (stageWin && !stageWin.isDestroyed()) {
     const [sw, sh] = stageWin.getContentSize();
     const p = byId(programId);
@@ -344,7 +473,7 @@ function setSplit(mode) {
   const sp = store.data.split; sp.mode = mode;
   if (mode === 'single') { sp.ids = [activeId]; }
   else {
-    const ordered = sidebarOrder().filter((t) => t.host === 'main' && !(live && t.id === programId));
+    const ordered = spaceOrder().filter((t) => t.host === 'main' && !(live && t.id === programId));
     const ids = [activeId, ...sp.ids.filter((x) => x !== activeId && byId(x))];
     for (const t of ordered) { if (ids.length >= SPLITS[mode]) break; if (!ids.includes(t.id)) ids.push(t.id); }
     sp.ids = ids.slice(0, SPLITS[mode]);
@@ -369,6 +498,25 @@ function addToSplit(id) {
 function sidebarOrder() {
   const order = GROUP_LIST.map((g) => g.id);
   return [...tabs].sort((a, b) => (b.pinned - a.pinned) || (order.indexOf(groupOf(a)) - order.indexOf(groupOf(b))) || (a.order - b.order));
+}
+function spaceOrder() { return sidebarOrder().filter((t) => t.space === store.data.space); }
+
+// ---------------------------------------------------------------- spaces
+// Each Space keeps its own tabs, its own usual login and its own split layout.
+function enterSpace(name) {
+  if (!SPACES.includes(name) || name === store.data.space) return;
+  store.data.spaceSplit[store.data.space] = store.data.split;
+  store.data.space = name;
+  const saved = store.data.spaceSplit[name] || { mode: 'single', ids: [] };
+  store.data.split = { mode: saved.mode, ids: saved.ids.filter((id) => byId(id)) };
+  if (store.data.split.ids.length < 2) store.data.split = { mode: 'single', ids: [] };
+}
+function switchSpace(name) {
+  if (name === store.data.space) return;
+  enterSpace(name);
+  const list = tabs.filter((t) => t.space === name && t.id !== programId).sort((a, b) => b.lastActive - a.lastActive);
+  if (list[0]) activate(list[0].id); else openTab({});
+  layout(); pushState(); persist();
 }
 
 // ---------------------------------------------------------------- live / stage
@@ -403,9 +551,12 @@ function moveView(t, toWin, host) {
 function setLive(on, stageClosed) {
   if (on === live) return;
   live = on;
+  tabs.forEach((t) => t.view && t.view.webContents.send('cue:hold', on));
   if (on) {
+    heldCount = 0;
     openStage();
   } else {
+    if (heldCount) sendEvent('toast', `${heldCount} notification${heldCount === 1 ? '' : 's'} held during class. See Bills & alerts.`);
     const p = byId(programId);
     if (p) { p.view && p.view.webContents.send('cue:safe', false); moveView(p, mainWin, 'main'); }
     programId = null;
@@ -433,7 +584,7 @@ function take() {
     moveView(prev, mainWin, 'main');
     activeId = prev.id;
   } else {
-    const other = sidebarOrder().find((t) => t.id !== next.id);
+    const other = spaceOrder().find((t) => t.id !== next.id);
     activeId = other ? other.id : activeId;
     if (other) ensureView(other);
   }
@@ -483,6 +634,7 @@ function contextMenu(t, p) {
   const ids = Object.keys(IDENTITIES);
   if (p.linkURL) {
     items.push({ label: 'Open link in new tab', click: () => openTab({ url: p.linkURL, identity: t.identity, background: true, after: t }) });
+    items.push({ label: 'Peek at this link', click: () => openPeek(p.linkURL, t) });
     items.push({ label: 'Open link as…', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: p.linkURL, identity: i, after: t }) })) });
     items.push({ label: 'Copy link', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' });
   }
@@ -491,6 +643,12 @@ function contextMenu(t, p) {
     items.push({ label: 'Save image as…', click: () => wc.downloadURL(p.srcURL) });
     items.push({ label: 'Copy image', click: () => wc.copyImageAt(p.x, p.y) });
     items.push({ label: 'Search this image with Google Lens', click: () => openTab({ url: 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(p.srcURL), identity: t.identity, after: t }) });
+    items.push({ label: 'Ask Claude about this image', click: () => askAI('claude', `Tell me about this image: ${p.srcURL}`) });
+    if (kit('designer')) {
+      const boards = lib.boardList();
+      items.push({ label: 'Add to board', submenu: [...boards.map((b) => ({ label: b.name, click: () => addToBoard(t, p, b.id) })), { type: 'separator' }, { label: 'New board', click: () => addToBoard(t, p, lib.boardCreate(`Board ${boards.length + 1}`)) }] });
+      items.push({ label: 'Palette from this image', click: () => imagePalette(t, p) });
+    }
     items.push({ type: 'separator' });
   }
   const sel = (p.selectionText || '').trim();
@@ -522,6 +680,7 @@ function tabMenu(t) {
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     { label: 'Open as…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
+    { label: 'Move to Space', submenu: SPACES.map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
     { label: 'Private: never goes on air', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
@@ -579,8 +738,10 @@ function sendState() {
       id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
       aiAllowed: t.aiAllowed, playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
-      host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed,
+      host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
     })),
+    space: store.data.space, spaces: SPACES, kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
+    ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
     activeId, programId, live, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
     split: store.data.split, panes, settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
@@ -606,7 +767,7 @@ function startThumbs() {
 // ---------------------------------------------------------------- IPC
 ipcMain.on('cue:tab-init', (e) => {
   const t = byWC(e.sender);
-  e.returnValue = { volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare) };
+  e.returnValue = { volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live };
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:scroll', (e, ratio) => {
@@ -614,6 +775,38 @@ ipcMain.on('cue:scroll', (e, ratio) => {
   if (!settings().syncScroll || sp.mode === 'single') return;
   const t = byWC(e.sender); if (!t || !sp.ids.includes(t.id)) return;
   for (const id of sp.ids) { const o = byId(id); if (o && o !== t && o.view) o.view.webContents.send('cue:scroll-to', ratio); }
+});
+
+ipcMain.on('cue:peek', (e, url) => { const t = byWC(e.sender); if (t) openPeek(url, t); });
+ipcMain.on('cue:music-state', (_e, st) => sendEvent('music-state', st));
+ipcMain.on('cue:note', (e, n) => {
+  const t = byWC(e.sender); if (!t || t.identity === 'vanish') return;
+  if (live) heldCount++;
+  addAlert({ source: hostName(t.url), title: n.title, body: n.body, url: t.url, held: live });
+});
+ipcMain.handle('cue:cred-get', (e) => {
+  const t = byWC(e.sender);
+  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t)) return null;
+  const origin = safeOrigin(e.senderFrame.url);
+  if (!securePage(origin)) return null;
+  const c = vault.find(t.identity, origin);
+  if (!c) return null;
+  vault.used(c.id);
+  let submit = false;
+  if (c.auto && Date.now() - (autoTried[origin] || 0) > 120000) { autoTried[origin] = Date.now(); submit = true; }
+  return { username: c.username, password: c.password, submit };
+});
+ipcMain.on('cue:cred-offer', (e, c) => {
+  const t = byWC(e.sender);
+  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || agentCanAct(t) || !c.password) return;
+  const origin = safeOrigin(e.senderFrame.url);
+  if (!securePage(origin) || vault.never.includes(origin) || vault.has(t.identity, origin, c.username, c.password)) return;
+  pendingCred = { identity: t.identity, origin, username: c.username, password: c.password };
+  sendEvent('save-password', { origin, username: c.username });
+});
+ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
+  if (!e.senderFrame.url.startsWith('cue://') || !internal[cmd]) throw new Error('Not allowed');
+  return internal[cmd](a);
 });
 
 ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
@@ -659,14 +852,50 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
       cb({});
       break;
     }
+    case 'space': switchSpace(a.name); break;
+    case 'peek-close': closePeek(); break;
+    case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
+    case 'ai': toggleAI(a.which); break;
+    case 'ai-ask': askAboutPage(a.which); break;
+    case 'strip': stripOpen = !stripOpen; layout(); pushState(); break;
+    case 'music': if (wc) wc.send('cue:music', a.op, a.value); break;
+    case 'tool': runTool(a.name, t); break;
+    case 'open-page': openTab({ url: `cue://${a.page}`, identity: byId(activeId)?.identity === 'vanish' ? undefined : byId(activeId)?.identity }); break;
+    case 'cred-save': if (pendingCred) { vault.save({ ...pendingCred, auto: !!a.auto }); pendingCred = null; sendEvent('toast', 'Password saved.'); } break;
+    case 'cred-never': if (pendingCred) { vault.neverFor(pendingCred.origin); pendingCred = null; } break;
+    case 'cred-dismiss': pendingCred = null; break;
+    case 'pw-auto': vault.setAuto(a.pw, a.on); break;
+    case 'pw-remove': vault.remove(a.pw); break;
+    case 'download-run': {
+      const d = downloads.find((x) => x.id === a.id);
+      if (d) { shell.openPath(d.file); if (d.kind === 'Installers') { store.data.installersOpened.push({ file: d.file, at: Date.now() }); store.save(); } }
+      break;
+    }
+    case 'make-default': app.setAsDefaultProtocolClient('http'); app.setAsDefaultProtocolClient('https'); break;
     case 'set-scene': if (t) { t.obsScene = a.scene || ''; pushState(); persist(); } break;
     case 'agent-copy': clipboard.writeText(agentSetupText()); sendEvent('toast', 'AI setup copied.'); break;
     default: break;
   }
 });
 
-ipcMain.handle('ui:invoke', async (_e, cmd) => {
+ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'obs-scenes') return obs.scenes();
+  if (cmd === 'suggest') return suggestions(a.q);
+  if (cmd === 'import-find') return findImports();
+  if (cmd === 'import-run') return runImport(a);
+  if (cmd === 'passwords') return vault.list();
+  if (cmd === 'ext-find') return findExtensions();
+  if (cmd === 'ext-add') return addExtension(a);
+  if (cmd === 'ext-remove') return removeExtension(a.id);
+  if (cmd === 'lens-file') return lensFile(a);
+  if (cmd === 'rec-start') { const t = byId(activeId); if (!t || !t.view) return null; recTabId = t.id; pushState(); return { title: t.title }; }
+  if (cmd === 'rec-cancel') { recTabId = null; pushState(); return true; }
+  if (cmd === 'rec-save') {
+    recTabId = null; pushState();
+    const file = capture.saveRecording(a.title, a.buffer, a.ext);
+    sendEvent('toast', 'Recording saved in Cue Captures.'); capture.reveal(file);
+    return file;
+  }
   return null;
 });
 
@@ -690,11 +919,334 @@ function setSetting(key, value) {
   const s = settings();
   if (key.startsWith('obs.')) { s.obs[key.slice(4)] = key === 'obs.port' ? Number(value) || 4455 : value; }
   else if (key.startsWith('label.')) { s.identityLabels[key.slice(6)] = value; }
+  else if (key.startsWith('kit.')) { s.kits[key.slice(4)] = !!value; buildMenu(); if (key === 'kit.music' && !value) stripOpen = false; layout(); }
+  else if (key.startsWith('spaceLogin.')) { s.spaceLogins[key.slice(11)] = value; }
   else s[key] = value;
+  if (key === 'githubUser') loadRepos();
   store.save();
   if (key === 'originalSound') tabs.forEach((x) => x.view && x.view.webContents.send('cue:original-sound', value));
   if (key === 'safeShare') { const p = byId(programId); if (p && p.view) p.view.webContents.send('cue:safe', !!value); }
   pushState();
+}
+
+// ---------------------------------------------------------------- helpers for the features below
+const kit = (k) => settings().kits[k] !== false;
+const hostName = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
+const securePage = (origin) => /^https:/.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+const remembers = (t) => t.identity !== 'vanish' && !t.agent;
+
+function logTab(t, level, text) { t.log.push({ at: new Date().toISOString(), level, text: String(text).slice(0, 500) }); if (t.log.length > 200) t.log.shift(); }
+
+// "(3) Inbox" style counts in a page's title, for mail and messages.
+function countIn(t, title) {
+  if (!COUNT_HOSTS.test(hostName(t.url))) return 0;
+  const m = String(title).match(/\((\d+)\+?\)/);
+  return m ? Number(m[1]) : 0;
+}
+
+// ---------------------------------------------------------------- one bar, Cmd+K
+function suggestions(q) {
+  const ql = String(q || '').trim().toLowerCase();
+  if (!ql) return { history: [], bookmarks: [], boards: [], apps: [], repos: [] };
+  const hit = (x) => `${x.name} ${x.what || ''}`.toLowerCase().includes(ql);
+  return {
+    history: lib.suggest(ql, 6),
+    bookmarks: lib.bookmarks(ql, 5),
+    boards: kit('designer') ? lib.searchBoards(ql) : [],
+    apps: NSM_APPS.filter(hit).slice(0, 5),
+    repos: repos.filter(hit).slice(0, 5),
+  };
+}
+
+async function loadRepos() {
+  const user = settings().githubUser; repos = [];
+  if (!user) return;
+  try {
+    const r = await net.fetch(`https://api.github.com/users/${encodeURIComponent(user)}/repos?per_page=100&sort=pushed`, { headers: { accept: 'application/vnd.github+json' } });
+    if (r.ok) repos = (await r.json()).map((x) => ({ name: x.name, what: x.description || '', url: x.html_url }));
+  } catch {}
+}
+
+// ---------------------------------------------------------------- peek
+function openPeek(url, from) {
+  closePeek();
+  const view = new WebContentsView({ webPreferences: { session: sessionFor(from.identity), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
+  view.setBackgroundColor('#FFFFFF');
+  peek = { view, url, title: hostName(url), identity: from.identity };
+  const wc = view.webContents;
+  wc.on('page-title-updated', (_e, title) => { if (peek && peek.view === view) { peek.title = title; pushState(); } });
+  wc.on('did-navigate', (_e, u) => { if (peek && peek.view === view) { peek.url = u; pushState(); } });
+  wc.on('before-input-event', (e, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); closePeek(); } });
+  wc.setWindowOpenHandler(({ url: u }) => { openTab({ url: u, identity: from.identity }); return { action: 'deny' }; });
+  mainWin.contentView.addChildView(view);
+  wc.loadURL(url).catch(() => {});
+  layout(); pushState();
+  wc.focus();
+}
+function closePeek() {
+  if (!peek) return;
+  const v = peek.view; peek = null;
+  try { mainWin.contentView.removeChildView(v); v.webContents.close(); } catch {}
+  layout(); pushState();
+  const t = byId(activeId); if (t && t.view) t.view.webContents.focus();
+}
+
+// ---------------------------------------------------------------- AI side panel
+function toggleAI(which) {
+  if (aiView && (!which || which === store.data.aiWhich)) {
+    const v = aiView; aiView = null;
+    try { mainWin.contentView.removeChildView(v); v.webContents.close(); } catch {}
+  } else openAI(which || store.data.aiWhich);
+  layout(); pushState();
+}
+function openAI(which, url) {
+  const id = settings().defaultIdentity;
+  store.data.aiWhich = which; store.save();
+  if (!aiView) {
+    aiView = new WebContentsView({ webPreferences: { session: sessionFor(id), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
+    aiView.setBackgroundColor('#FFFFFF');
+    aiView.webContents.setWindowOpenHandler(({ url: u }) => { openTab({ url: u, identity: id }); return { action: 'deny' }; });
+    mainWin.contentView.addChildView(aiView);
+  }
+  aiView.webContents.loadURL(url || AI_HOME[which]).catch(() => {});
+  layout(); pushState();
+}
+function askAI(which, prompt) {
+  const base = which === 'chatgpt' ? 'https://chatgpt.com/?q=' : 'https://claude.ai/new?q=';
+  openAI(which, base + encodeURIComponent(prompt.slice(0, 6000)));
+}
+async function askAboutPage(which) {
+  const t = byId(activeId);
+  if (!t || !t.view || t.identity === 'vanish' || isStart(t.url)) { openAI(which || store.data.aiWhich); return; }
+  const wc = t.view.webContents; let text = '';
+  try { text = await wc.executeJavaScript('(getSelection().toString() || document.body.innerText).slice(0, 4000)', true); } catch {}
+  askAI(which || store.data.aiWhich, `I'm looking at this page: ${wc.getTitle()}\n${wc.getURL()}\n\n${text}\n\nWhat should I know about it?`);
+}
+
+// ---------------------------------------------------------------- alerts and bills
+function addAlert(a) {
+  store.data.alerts.unshift({ id: Date.now() + Math.random(), at: Date.now(), held: false, ...a });
+  store.data.alerts.length = Math.min(store.data.alerts.length, 200);
+  store.save(); pushState();
+}
+const alertCount = () => store.data.alerts.filter((a) => !a.seen).length + tabs.reduce((n, t) => n + (t.badge || 0), 0);
+const billCount = () => store.data.bills.filter((b) => ['due', 'failed'].includes(bills.status(b))).length;
+
+function checkBills() {
+  store.data.bills.forEach((b) => bills.roll(b));
+  for (const b of store.data.bills) {
+    const st = bills.status(b);
+    const key = `${st}|${b.renews}`;
+    if (st !== 'due' && st !== 'failed') continue;
+    if (b.warned === key) continue;
+    b.warned = key;
+    const d = b.renews ? bills.daysUntil(b.renews) : null;
+    addAlert({ source: b.name, title: st === 'failed' ? `${b.name}: card failed` : `${b.name}: due in ${d} day${d === 1 ? '' : 's'}`, body: b.amountINR ? `₹${b.amountINR.toLocaleString('en-IN')}` : '', url: b.url });
+  }
+  store.save(); pushState();
+}
+
+function readBillPage(t) {
+  if (!kit('business') || t.identity === 'vanish' || groupOf(t) !== 'ai' || !bills.BILLING_URL.test(t.url)) return;
+  const url = t.url;
+  setTimeout(async () => {
+    if (!t.view || t.url !== url) return;
+    try {
+      const text = await t.view.webContents.executeJavaScript('document.body ? document.body.innerText.slice(0, 40000) : ""', true);
+      if (bills.fromPage(store.data.bills, url, text, store.data.usdToInr)) checkBills();
+    } catch {}
+  }, 2500);
+}
+
+// ---------------------------------------------------------------- tidying
+function archiveOldTabs() {
+  const days = settings().archiveDays; if (!days) return;
+  const cutoff = Date.now() - days * 86400000;
+  const inSplit = new Set(store.data.split.ids);
+  for (const t of [...tabs]) {
+    if (t.pinned || t.id === activeId || t.id === programId || t.identity === 'vanish' || t.agent || t.playing || t.audible || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
+    store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
+    destroyView(t); tabs.splice(tabs.indexOf(t), 1);
+  }
+  store.data.archived.length = Math.min(store.data.archived.length, 500);
+  pushState(); persist();
+}
+
+// ---------------------------------------------------------------- Cue's own pages
+const internal = {
+  open: ({ url }) => { if (/^https?:/.test(url)) openTab({ url }); },
+  'boards.list': () => lib.boardList(),
+  'boards.create': ({ name }) => lib.boardCreate(name),
+  'boards.rename': ({ id, name }) => lib.boardRename(id, name),
+  'boards.delete': ({ id }) => lib.boardDelete(id),
+  'boards.removeItem': ({ itemId }) => lib.boardRemoveItem(itemId),
+  'bills.list': () => { store.data.bills.forEach((b) => bills.roll(b)); return { bills: store.data.bills.map((b) => ({ ...b, status: bills.status(b) })), usdToInr: store.data.usdToInr }; },
+  'bills.save': ({ bill }) => {
+    const cur = store.data.bills.find((b) => b.id === bill.id);
+    if (cur) Object.assign(cur, bill); else store.data.bills.push({ ...bill, id: bill.id || Date.now().toString(36) });
+    checkBills();
+  },
+  'bills.delete': ({ id }) => { store.data.bills = store.data.bills.filter((b) => b.id !== id); store.save(); pushState(); },
+  'bills.setRate': ({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); },
+  'alerts.list': () => {
+    store.data.alerts.forEach((a) => { a.seen = true; }); store.save(); pushState();
+    const counts = tabs.filter((t) => t.badge).map((t) => ({ id: `tab${t.id}`, source: hostName(t.url), title: `${t.badge} new`, body: t.title, at: Date.now(), url: t.url, held: false }));
+    return [...counts, ...store.data.alerts];
+  },
+  'alerts.clear': () => { store.data.alerts = []; store.save(); pushState(); },
+  'library.bookmarks': () => lib.bookmarks(''),
+  'library.history': ({ q }) => lib.history(q, 500),
+  'library.archived': () => store.data.archived,
+  'library.restore': ({ id }) => {
+    const a = store.data.archived.find((x) => x.id === id); if (!a) return;
+    store.data.archived = store.data.archived.filter((x) => x !== a);
+    openTab({ url: a.url, identity: a.identity });
+  },
+  'library.history.clear': () => lib.clearHistory(),
+};
+
+// ---------------------------------------------------------------- move in from another browser
+function findImports() {
+  return importer.findBrowsers().map((b) => ({
+    id: b.id, name: b.name,
+    profiles: b.profiles.map((p) => ({ ...p, counts: importer.summarize(b, p), identity: guessIdentity(p) })),
+  }));
+}
+function guessIdentity(p) {
+  const labels = settings().identityLabels;
+  const hit = Object.keys(labels).find((k) => labels[k] && labels[k].toLowerCase() === String(p.email || '').toLowerCase());
+  return hit || 'personal';
+}
+async function runImport({ browser, profile, identity, what }) {
+  const b = importer.findBrowsers().find((x) => x.id === browser);
+  const p = b && b.profiles.find((x) => x.dir === profile);
+  if (!b || !p) return { error: 'That browser was not found.' };
+  const done = {};
+  if (what.bookmarks) done.bookmarks = lib.importBookmarks(importer.readBookmarks(b, p));
+  if (what.history) done.history = lib.importHistory(importer.readHistory(b, p));
+  if (what.tabs) { const list = importer.readOpenTabs(b, p); list.forEach((x) => { const t = makeTab({ url: x.url, title: x.title, identity }); tabs.push(t); }); done.tabs = list.length; pushState(); persist(); }
+  if (what.passwords || what.cookies) {
+    const key = await importer.getKey(b);
+    if (!key) done.note = 'Sign-ins and passwords could not be unlocked.';
+    else {
+      if (what.passwords) done.passwords = vault.importMany(identity, importer.readPasswords(b, p, key));
+      if (what.cookies) {
+        const ses = sessionFor(identity); let n = 0;
+        for (const c of importer.readCookies(b, p, key)) { try { await ses.cookies.set(c); n++; } catch {} }
+        await ses.cookies.flushStore(); done.cookies = n;
+      }
+    }
+  }
+  return done;
+}
+
+// ---------------------------------------------------------------- extensions
+function findExtensions() {
+  const out = []; const seen = new Set(); const have = new Set(extensions.installed(extDir).map((e) => e.id));
+  for (const b of importer.findBrowsers()) {
+    for (const p of b.profiles) {
+      if (!b.root) continue;
+      for (const e of extensions.scan(path.join(b.root, p.dir))) {
+        if (seen.has(e.id) || have.has(e.id)) continue;
+        seen.add(e.id); out.push({ ...e, from: b.name });
+      }
+    }
+  }
+  return { available: out, installed: extensions.installed(extDir).map((e) => ({ id: e.id, name: e.name, version: e.version })) };
+}
+async function addExtension({ id, dir, name }) {
+  const to = extensions.adopt(extDir, { id, dir });
+  for (const k of ['personal', 'school', 'agent']) {
+    try { await sessionFor(k).extensions.loadExtension(to); } catch (e) { return { ok: false, error: e.message, name }; }
+  }
+  return { ok: true, name };
+}
+function removeExtension(id) {
+  for (const k of ['personal', 'school', 'agent']) {
+    const ses = sessionFor(k); const ext = ses.extensions.getAllExtensions().find((e) => path.basename(e.path) === id);
+    if (ext) ses.extensions.removeExtension(ext.id);
+  }
+  fs.rmSync(path.join(extDir, id), { recursive: true, force: true });
+  return true;
+}
+
+// ---------------------------------------------------------------- image search from a file
+async function lensFile({ name, type, bytes }) {
+  const t = openTab({ url: 'about:blank' });
+  const boundary = `----cue${Date.now()}`;
+  const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="encoded_image"; filename="${String(name || 'image').replace(/[\r\n"]/g, '')}"\r\nContent-Type: ${type || 'image/png'}\r\n\r\n`);
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  await t.view.webContents.loadURL('https://lens.google.com/v3/upload', {
+    postData: [{ type: 'rawData', bytes: Buffer.concat([head, Buffer.from(bytes), tail]) }],
+    extraHeaders: `Content-Type: multipart/form-data; boundary=${boundary}`,
+  }).catch(() => {});
+  return true;
+}
+
+// ---------------------------------------------------------------- Boards, designer and video tools
+async function addToBoard(t, p, boardId) {
+  const wc = t.view.webContents; let thumb = '';
+  try {
+    const r = await wc.executeJavaScript(tools.rectAt(p.x, p.y), true);
+    const img = await wc.capturePage(r);
+    if (!img.isEmpty()) thumb = `data:image/jpeg;base64,${img.resize({ width: 360 }).toJPEG(82).toString('base64')}`;
+  } catch {}
+  lib.boardAdd(boardId, { img: p.srcURL, source: wc.getURL(), title: p.titleText || p.altText || wc.getTitle(), thumb });
+  sendEvent('toast', 'Added to board.');
+}
+
+async function imagePalette(t, p) {
+  const wc = t.view.webContents;
+  const r = await wc.executeJavaScript(tools.rectAt(p.x, p.y), true);
+  const img = await wc.capturePage(r);
+  if (img.isEmpty()) return;
+  sendEvent('palette', { colors: tools.palette(img) });
+}
+
+async function runTool(name, t) {
+  if (!t) return;
+  if (name === 'boards' || name === 'library' || name === 'bills' || name === 'thumbcheck') { openTab({ url: `cue://${name}`, identity: t.identity === 'vanish' ? undefined : t.identity }); return; }
+  ensureView(t);
+  const wc = t.view.webContents;
+  try {
+    if (name === 'colour') {
+      const shot = await wc.capturePage();
+      const pt = await wc.executeJavaScript(tools.PICK_POINT, true);
+      if (!pt) return;
+      const size = shot.getSize();
+      const hex = tools.pixelHex(shot, pt.x * size.width / pt.w, pt.y * size.height / pt.h);
+      copy(hex); sendEvent('palette', { colors: [hex] });
+    } else if (name === 'font') {
+      const f = await wc.executeJavaScript(tools.FONT_FINDER, true);
+      if (f) { copy(f); sendEvent('toast', `Copied: ${f}`); }
+    } else if (name === 'ruler') {
+      await wc.executeJavaScript(tools.RULER, true);
+    } else if (name === 'fullpage') {
+      const r = await capture.fullPage(wc, t.title);
+      sendEvent('toast', `Page saved in Cue Captures (${r.width} × ${r.height}).`); capture.reveal(r.file);
+    } else if (name === 'gif') {
+      sendEvent('toast', 'Recording a 6 second GIF of this tab.');
+      const r = await capture.gif(wc, t.title);
+      sendEvent('toast', 'GIF saved in Cue Captures.'); capture.reveal(r.file);
+    } else if (name === 'record') {
+      sendEvent(recTabId ? 'rec-stop' : 'rec-start');
+    } else if (name === 'mark') {
+      const s = await wc.executeJavaScript(tools.VIDEO_TIME, true);
+      if (s == null) { sendEvent('toast', 'No video on this page.'); return; }
+      const whole = Math.floor(s);
+      const yt = t.url.match(/(?:v=|youtu\.be\/|shorts\/)([\w-]{11})/);
+      t.marks.push(yt ? `${tools.stamp(whole)} https://youtu.be/${yt[1]}?t=${whole}` : `${tools.stamp(whole)} ${t.url}`);
+      copy(t.marks.join('\n'));
+      sendEvent('toast', `Marked ${tools.stamp(whole)}. All ${t.marks.length} copied.`);
+    } else if (name === 'frame') {
+      const g = await wc.executeJavaScript(tools.GRAB_FRAME, true);
+      if (!g) { sendEvent('toast', 'No video on this page.'); return; }
+      const png = g.png ? Buffer.from(g.png.split(',')[1], 'base64') : (await wc.capturePage(g.rect)).toPNG();
+      const file = capture.nameFor(`Frame ${tools.stamp(g.time)} ${t.title}`, 'png');
+      fs.writeFileSync(file, png);
+      sendEvent('toast', 'Frame saved in Cue Captures.'); capture.reveal(file);
+    }
+  } catch (e) { sendEvent('toast', 'That tool could not run on this page.'); console.error(name, e.message); }
 }
 
 // ---------------------------------------------------------------- AI port
@@ -727,6 +1279,10 @@ const agentApi = {
   ensure: (t) => ensureView(t),
   capture: (t) => captureTab(t),
   close: (t) => closeTab(t.id),
+  fullPage: (t) => capture.fullPage(t.view.webContents, t.title),
+  problems: (t) => t.log,
+  alert: (a) => addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '' }),
+  bills: () => store.data.bills.map((b) => ({ ...b, status: bills.status(b) })),
   setMuted, setVolume,
   log: logAgent,
 };
@@ -744,8 +1300,10 @@ function buildMenu() {
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: cmd('new-tab') },
         { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Shift+N', click: cmd('new-tab', { identity: 'vanish' }) },
         { label: 'New Tab As', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: cmd('new-tab', { identity: i }) })) },
+        { label: 'Move In From Another Browser…', click: () => sendEvent('import') },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: () => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } } },
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: () => { uiView.webContents.focus(); sendEvent('focus-omnibox'); } },
+        { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: () => { uiView.webContents.focus(); sendEvent('palette-open'); } },
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => closeTab(activeId) },
@@ -773,21 +1331,25 @@ function buildMenu() {
       label: 'History', submenu: [
         { label: 'Back', accelerator: 'CmdOrCtrl+[', click: cmd('back') },
         { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: cmd('forward') },
+        { label: 'Bookmarks, History and Archived Tabs', accelerator: 'CmdOrCtrl+Y', click: cmd('open-page', { page: 'library' }) },
       ],
     },
-    {
+    ...(kit('teacher') ? [{
       label: 'Live', submenu: [
         { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: () => setLive(!live) },
         { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: () => take() },
       ],
-    },
+    }] : []),
+    { label: 'Tools', submenu: toolMenu(cmd) },
     {
       label: 'Tab', submenu: [
+        ...SPACES.map((n, i) => ({ label: `Space: ${n}`, accelerator: `Ctrl+${i + 1}`, click: () => switchSpace(n) })),
+        { type: 'separator' },
         { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: () => cycle(1) },
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: 'Ctrl+P', click: cmd('media', { cmd: 'toggle' }) },
-        ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = sidebarOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
+        ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
       ],
     },
     { role: 'windowMenu' },
@@ -795,8 +1357,36 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
 }
 
+function toolMenu(cmd) {
+  const tool = (label, name, accelerator) => ({ label, accelerator, click: cmd('tool', { name }) });
+  return [
+    { label: 'AI Side Panel', accelerator: 'CmdOrCtrl+J', click: cmd('ai') },
+    { label: 'Ask AI About This Page', accelerator: 'CmdOrCtrl+Shift+J', click: cmd('ai-ask') },
+    { type: 'separator' },
+    ...(kit('music') ? [{ label: 'Music Bar', accelerator: 'CmdOrCtrl+Shift+M', click: cmd('strip') }] : []),
+    ...(kit('video') ? [
+      tool('Save Whole Page as a Picture', 'fullpage', 'CmdOrCtrl+Shift+S'),
+      tool('Record This Tab / Stop', 'record', 'CmdOrCtrl+Shift+R'),
+      tool('Make a 6 Second GIF', 'gif'),
+      tool('Mark Video Timestamp', 'mark', 'CmdOrCtrl+Shift+U'),
+      tool('Grab Video Frame', 'frame', 'CmdOrCtrl+Shift+F'),
+    ] : []),
+    ...(kit('designer') ? [
+      { type: 'separator' },
+      tool('Pick a Colour', 'colour', 'CmdOrCtrl+Shift+C'), tool('Find a Font', 'font'), tool('Ruler', 'ruler'), tool('Boards', 'boards', 'CmdOrCtrl+Shift+B'),
+    ] : []),
+    ...(kit('creator') ? [
+      { type: 'separator' },
+      tool('Thumbnail Check', 'thumbcheck'),
+      { label: 'YouTube Studio', click: () => openTab({ url: 'https://studio.youtube.com' }) },
+      { label: 'YouTube Comments', click: () => openTab({ url: 'https://studio.youtube.com/channel/UC/comments/inbox' }) },
+    ] : []),
+    ...(kit('business') ? [{ type: 'separator' }, tool('Bills and Alerts', 'bills')] : []),
+  ];
+}
+
 function cycle(d) {
-  const o = sidebarOrder(); const i = o.findIndex((t) => t.id === activeId);
+  const o = spaceOrder(); const i = o.findIndex((t) => t.id === activeId);
   const n = o[(i + d + o.length) % o.length]; if (n) activate(n.id);
 }
 
@@ -813,6 +1403,8 @@ setInterval(() => {
   pushState();
 }, 60000);
 
+setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(); loadRepos(); } }, 3600000);
+
 // ---------------------------------------------------------------- start
 async function setupBlocker() {
   try {
@@ -821,6 +1413,10 @@ async function setupBlocker() {
     blocker = await ElectronBlocker.fromPrebuiltAdsAndTracking(fetch, {
       path: cache, read: fs.promises.readFile, write: fs.promises.writeFile,
     });
+    // Blocker scripts clash with YouTube's player pages, and YouTube Studio must behave exactly as in Chrome.
+    blocker.updateFromDiff({ added: ['@@||youtube.com^$document', '@@||youtube-nocookie.com^$document', '@@||ytimg.com^', '@@||googlevideo.com^'] });
+    const inject = blocker.onInjectCosmeticFilters;
+    blocker.onInjectCosmeticFilters = async (e, url, msg) => (/^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com)\//.test(url) ? undefined : inject(e, url, msg));
     for (const ses of sessionsReady) enableBlocker(ses);
   } catch (e) { console.error('blocker', e.message); }
 }
@@ -835,7 +1431,7 @@ function createMain() {
   uiView.setBackgroundColor('#00000000');
   mainWin.contentView.addChildView(uiView);
   uiView.webContents.loadFile(UI_HTML);
-  uiView.webContents.on('did-finish-load', sendState);
+  uiView.webContents.on('did-finish-load', () => { sendState(); if (process.env.CUE_SMOKE) { console.log('CUE_SMOKE_OK'); app.quit(); } });
   mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
@@ -861,18 +1457,29 @@ app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openTab({ url 
 app.whenReady().then(async () => {
   store = new Store(app.getPath('userData'), 'cue.json', {
     tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, collapsed: {}, permissions: {},
+    space: 'Teach', spaceSplit: {}, aiWhich: 'claude', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
     settings: {
       autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
       stageWidth: 1920, stageHeight: 1080, obs: { host: '127.0.0.1', port: 4455, password: '' },
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 30,
     },
   });
-  store.data.settings = { ...{ autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30 }, ...store.data.settings };
+  store.data.settings = { ...{ autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '' }, ...store.data.settings };
+  store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
+  store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  extDir = path.join(app.getPath('userData'), 'extensions');
+  lib = new Library(app.getPath('userData'));
+  vault = new Vault(app.getPath('userData'));
   store.data.settings.obs = { host: '127.0.0.1', port: 4455, password: '', ...(store.data.settings.obs || {}) };
   store.data.settings.identityLabels = { personal: '', school: '', agent: '', ...(store.data.settings.identityLabels || {}) };
   obs.onStatus = () => pushState();
+  session.defaultSession.setDisplayMediaRequestHandler((_req, cb) => {
+    const t = byId(recTabId);
+    if (t && t.view) cb({ video: t.view.webContents.mainFrame, audio: t.view.webContents.mainFrame }); else cb({});
+  });
   buildMenu();
   createMain();
+  checkBills(); tidyInstallers(); loadRepos();
   pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
   setupBlocker();
   startThumbs();
@@ -881,10 +1488,10 @@ app.whenReady().then(async () => {
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
   if (settings().obs.autoConnect) obs.connect(settings().obs);
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', 'in-app.js'))({ app, tabs, byId, openTab, activate, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === 'features' ? 'features.js' : 'in-app.js'))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
-app.on('before-quit', () => { if (store) { persist(); store.flush(); } });
+app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });
 app.on('window-all-closed', () => app.quit());
 app.on('web-contents-created', (_e, wc) => {
   wc.on('will-attach-webview', (ev) => ev.preventDefault());

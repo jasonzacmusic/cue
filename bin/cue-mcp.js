@@ -35,6 +35,10 @@ const TOOLS = [
   ['eval', 'Run JavaScript in a tab you may act in and return the result.', { id, script: { type: 'string' } }, ['id', 'script']],
   ['volume', 'Set a tab\'s volume (0 to 1) or mute it.', { id, value: { type: 'number' }, muted: { type: 'boolean' } }, ['id']],
   ['close', 'Close a tab you opened.', { id }, ['id']],
+  ['problems', 'List console errors, warnings and failed network requests a tab has had. Use this when testing an app to report what broke.', { id }, ['id']],
+  ['fullpage', 'Save a picture of the whole page, however long, to the Cue Captures folder.', { id }, ['id']],
+  ['alert', 'Put a message in the user\'s Cue alert tray, such as a failed deploy. It stays quiet during class.', { title: { type: 'string' }, body: { type: 'string' }, url: { type: 'string' }, source: { type: 'string' } }, ['title']],
+  ['bills', 'List the subscriptions Cue is tracking with amounts in rupees, renewal dates and status.', {}],
 ].map(([name, description, props, required = []]) => ({ name: `cue_${name}`, description, inputSchema: { type: 'object', properties: props, required } }));
 
 async function call(name, args) {
@@ -61,7 +65,7 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.1.0' },
+      serverInfo: { name: 'cue', version: '0.2.0' },
       instructions: 'Cue is the user\'s browser. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open. Never use tabs marked private or on air.',
     });
   }

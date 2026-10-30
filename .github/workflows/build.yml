@@ -1,0 +1,135 @@
+# Builds Cue for Windows and Linux in the cloud (the Mac build is done by hand, signed and notarized).
+# Runs on a version tag (v*) and on manual dispatch. Windows and Linux builds are NOT code-signed.
+name: Build Windows and Linux
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: win-x64
+            script: dist:win
+            app_dir: build/Cue-win32-x64
+            exe: build/Cue-win32-x64/Cue.exe
+          - os: ubuntu-latest
+            label: linux-x64
+            script: dist:linux
+            app_dir: build/Cue-linux-x64
+            exe: build/Cue-linux-x64/Cue
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Read version and check the tag matches it
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $REF_NAME does not match package.json version $VERSION"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run ${{ matrix.script }}
+
+      - name: Install Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          EXE: ${{ matrix.exe }}
+        run: node scripts/smoke.js "$EXE"
+
+      - name: Smoke test (Linux, virtual display)
+        if: runner.os == 'Linux'
+        env:
+          EXE: ${{ matrix.exe }}
+        run: xvfb-run -a node scripts/smoke.js "$EXE" --no-sandbox --disable-gpu
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "build/Cue-win32-x64" -DestinationPath "dist/Cue-$env:VERSION-win-x64.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -czf "dist/Cue-${VERSION}-linux-x64.tar.gz" -C build Cue-linux-x64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Cue-${{ matrix.label }}
+          path: dist/Cue-*
+          if-no-files-found: error
+
+  release:
+    name: Attach to GitHub Release
+    needs: build
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Cue-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attach files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --title "Cue ${TAG#v}" --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+          fi

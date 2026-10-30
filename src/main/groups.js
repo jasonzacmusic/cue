@@ -10,7 +10,7 @@ const GROUPS = [
       'aistudio.google.com', 'notebooklm.google.com', 'perplexity.ai', 'grok.com', 'x.ai',
       'elevenlabs.io', 'replicate.com', 'midjourney.com', 'cursor.com', 'suno.com',
       'vercel.com', 'neon.tech', 'bunny.net', 'brevo.com', 'render.com', 'name.com',
-      'paddle.com', 'stripe.com', 'vidiq.com', 'wisprflow.ai', 'canva.com',
+      'paddle.com', 'stripe.com', 'vidiq.com', 'wisprflow.ai', 'canva.com', 'finance.jasonzacmusic.com',
     ],
     paths: [['github.com', '/settings/billing'], ['console.cloud.google.com', '/billing']],
   },

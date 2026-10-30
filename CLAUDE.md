@@ -1,0 +1,66 @@
+# Cue: guide for Claude, Codex and any other AI working here
+
+Cue is Nathaniel School of Music's free, open-source browser, built on Electron (Chromium).
+Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
+`AGENTS.md` points here so Codex reads the same file.
+
+## The goal right now
+Cue replaces Helium as Jason's daily browser. Helium is removed only after Cue is proven better
+on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) has not started.
+
+## How to work
+- Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
+- Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.
+- Check before touching the screen: `pgrep -x REAPER; pgrep -f CptHost; pgrep -x obs`. If any prints
+  a number he is recording or teaching: wait. Never touch his DAW or audio settings.
+- Never force-quit, never empty the Trash. Old apps go to the Trash, which is recoverable.
+- Commit and push to `main` when a change is tested. Don't commit keys, private IDs or build output.
+- Every sound in an NSM app comes from the NSM Sample Vault. Cue plays no sounds of its own.
+
+## Where things are
+- `src/main/main.js`: windows, tabs, Spaces, split views, on air, Peek, AI panel, menus, every wire.
+- `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
+- `src/main/db.js`: history, bookmarks, Boards. `vault.js`: passwords (OS keychain). `bills.js`: bill reader.
+- `src/main/importer.js`: move in from Helium, Chrome, Brave, Edge, Arc, Safari.
+- `src/main/capture.js`, `page-tools.js`, `extensions.js`, `groups.js`, `obs.js`.
+- `src/preload/tab.js`: runs in every page (volume, music tools, logins, held notifications).
+- `src/ui/`: sidebar and toolbar. `src/ui/pages/`: Boards, Library, Bills, Thumbnail check (`cue://` pages).
+
+## Testing: always do this before saying something works
+```bash
+npm ci
+CUE_TEST=features CUE_USER_DATA=/tmp/cue-a CUE_OUT=/tmp/cue-a-out npx electron .   # every feature, real app
+CUE_TEST=1 CUE_USER_DATA=/tmp/cue-b CUE_OUT=/tmp/cue-b-out npx electron .          # real NSM sites, split views, on air
+node test/importer-test.js                                                          # move-in, with fake browser data
+```
+Use a new `CUE_USER_DATA` folder each run. Results are printed as PASS/FAIL and written to `CUE_OUT`.
+`CUE_TEST` uses a mock keychain, so tests never pop a dialog and never touch his real passwords.
+Look at the pictures in `CUE_OUT`, not just the numbers. Add a check to `test/features.js` for
+every new feature, and run a control when a test proves something by finding nothing.
+
+Testing NSM apps through Cue: open the app with `cue_open` in the agent lane, click through with
+`cue_snapshot` and `cue_click`, then report from `cue_problems`.
+
+## Releasing (Mac mini only: this needs the `nsm-notary` keychain profile)
+1. Raise `version` in `package.json` and the `serverInfo` version in `bin/cue-mcp.js`.
+2. `npm run dist:mac`
+3. `~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh build/Cue-darwin-arm64/Cue.app --no-resign --dmg`
+   Never re-sign an Electron build after packaging.
+4. `~/.claude/skills/nsm-mac-app/scripts/nsm-publish.sh cue <version> <dmg> --notes "..."`
+5. Windows and Linux build in GitHub Actions when you push a `v<version>` tag (`.github/workflows/build.yml`).
+   They are not code-signed, and their smoke test must pass before they are attached to the release.
+
+## Retiring Helium
+Prove it on the Mac mini with real measured numbers (time to first page and
+memory on the same five pages, written to `speed-vs-helium.md` in iCloud `NSM Deliverables/01 Apps/Cue Browser`).
+Then, in order: move in from Helium inside Cue (File > Move In), confirm bookmarks, history and
+sign-ins arrived, make Cue the default browser, and only then move `/Applications/Helium.app` to
+the Trash. Never delete Helium's data folder, and never empty the Trash. If Cue is slower, leave
+Helium installed and report the numbers.
+
+## Honest limits today
+- Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
+- The cache limit is per login, not per site.
+- Chrome extensions: simple ones work. Ones that need Chrome's toolbar APIs may not, until Stage 2.
+- Windows passwords and sign-ins can't be moved in, because Chrome locks them to itself there.
+- The bill reader works from each page's wording, so a redesigned billing page may need a new phrase in `bills.js`.

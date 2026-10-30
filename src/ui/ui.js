@@ -26,9 +26,17 @@ function favEl(t) {
 }
 
 // ---------------------------------------------------------------- render
+let lastSpace = null;
+const inSpace = (t) => t.space === S.space;
+
 function render() {
   if (!S) return;
   document.body.dataset.live = S.live ? '1' : '';
+  if (S.space !== lastSpace) {
+    if (lastSpace !== null) { newIdentity = S.settings.spaceLogins[S.space] || newIdentity; }
+    lastSpace = S.space;
+  }
+  renderSpaces();
   renderIdPick();
   renderPins();
   renderGroups();
@@ -36,6 +44,7 @@ function render() {
   renderContent();
   renderLive();
   renderDownloads();
+  renderExtras();
   const a = S.agent;
   const portBusy = a.last && a.last.tool === 'port';
   $('#agentline').innerHTML = portBusy ? 'AI agents: another Cue has the door'
@@ -56,9 +65,43 @@ function renderIdPick() {
   }
 }
 
+function renderSpaces() {
+  const box = $('#spaces'); box.innerHTML = '';
+  S.spaces.forEach((n, i) => {
+    const count = S.tabs.filter((t) => t.space === n).length;
+    const b = el('button', n === S.space ? 'on' : '', esc(n));
+    b.title = `${n} (⌃${i + 1}) · ${count} tab${count === 1 ? '' : 's'}`;
+    b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', n === S.space);
+    b.onclick = () => send('space', { name: n });
+    box.append(b);
+  });
+}
+
+function renderExtras() {
+  const k = S.settings.kits;
+  const bb = $('#billbadge'); const n = S.billCount + S.alertCount;
+  bb.hidden = !n; bb.textContent = n > 99 ? '99+' : n;
+  bb.classList.toggle('bad', S.billCount > 0);
+  $('#openbills').hidden = !k.business;
+  $('#openboards').hidden = !k.designer;
+  $('#musicbtn').hidden = !k.music && !k.video;
+  document.querySelector('.live').hidden = !k.teacher;
+  document.querySelectorAll('[data-m],.st-label').forEach((x) => { x.hidden = !k.music; });
+  ['m-speed', 'm-semi'].forEach((i) => { $(`#${i}`).hidden = !k.music; });
+  document.querySelectorAll('[data-t]').forEach((x) => { x.hidden = !k.video; });
+  $('#strip').hidden = !S.strip;
+  $('#musicbtn').classList.toggle('on', !!S.strip);
+  $('#aihead').hidden = !S.ai;
+  $('#aibtn').classList.toggle('on', !!S.ai);
+  document.querySelectorAll('[data-ai]').forEach((b) => b.classList.toggle('on', !!S.ai && b.dataset.ai === S.ai.which));
+  $('#peekbar').hidden = !S.peek;
+  if (S.peek) $('#peektitle').textContent = S.peek.title;
+  $('#recbtn').hidden = !S.recording;
+}
+
 function renderPins() {
   const box = $('#pins'); box.innerHTML = '';
-  for (const t of S.tabs.filter((x) => x.pinned)) {
+  for (const t of S.tabs.filter((x) => x.pinned && inSpace(x))) {
     const p = el('div', 'pin'); p.title = t.title;
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
@@ -76,7 +119,7 @@ function renderGroups() {
   box.innerHTML = '';
   const splitIds = S.split.mode !== 'single' ? S.split.ids : [];
   for (const g of S.groups) {
-    const list = S.tabs.filter((t) => !t.pinned && t.group === g.id);
+    const list = S.tabs.filter((t) => !t.pinned && t.group === g.id && inSpace(t));
     if (!list.length) continue;
     const wrap = el('section', 'group' + (S.collapsed[g.id] ? ' closed' : ''));
     const head = el('div', 'ghead', `<span class="caret">▾</span>${esc(g.name)}<span class="n">${list.length}</span>`);
@@ -113,6 +156,7 @@ function tabRow(t, splitIds) {
   row.append(title);
 
   const ctl = el('span', 'ctl');
+  if (t.badge) ctl.append(el('span', 'badge', t.badge > 99 ? '99+' : String(t.badge)));
   if (S.live && t.id === S.programId) ctl.append(el('span', 'tally on', 'ON AIR'));
   else if (S.live && t.id === S.activeId) ctl.append(el('span', 'tally cue', 'CUED'));
   else if (t.private) ctl.append(el('span', 'tally priv', 'PRIVATE'));
@@ -216,13 +260,22 @@ function renderDownloads() {
   const head = el('div', 'dl-head', 'Downloads <button>Clear</button>');
   head.querySelector('button').onclick = () => send('downloads-clear');
   box.append(head);
-  for (const d of S.downloads) {
-    const pct = d.total ? Math.round((d.received / d.total) * 100) : 0;
-    const st = d.state === 'completed' ? 'Done' : d.state === 'cancelled' ? 'Cancelled' : d.state === 'interrupted' ? 'Failed' : `${pct}%`;
-    const r = el('div', 'dl', `<span class="nm">${esc(d.name)}</span><span class="st">${st}</span>`);
-    r.title = 'Show in Finder';
-    r.onclick = () => send('download-open', { id: d.id });
-    box.append(r);
+  const kinds = [...new Set(S.downloads.map((d) => d.kind))];
+  for (const kind of kinds) {
+    if (kinds.length > 1) box.append(el('div', 'dl-kind', esc(kind)));
+    for (const d of S.downloads.filter((x) => x.kind === kind)) {
+      const pct = d.total ? Math.round((d.received / d.total) * 100) : 0;
+      const st = d.state === 'completed' ? 'Done' : d.state === 'cancelled' ? 'Cancelled' : d.state === 'interrupted' ? 'Failed' : `${pct}%`;
+      const r = el('div', 'dl', `<span class="nm">${esc(d.name)}</span><span class="st">${st}</span>`);
+      r.title = 'Show in Finder';
+      r.onclick = () => send('download-open', { id: d.id });
+      if (d.kind === 'Installers' && d.state === 'completed') {
+        const run = el('button', 'dl-run', 'Open'); run.title = 'Open the installer. It moves to the Trash a day later.';
+        run.onclick = (e) => { e.stopPropagation(); send('download-run', { id: d.id }); };
+        r.append(run);
+      }
+      box.append(r);
+    }
   }
 }
 
@@ -230,7 +283,18 @@ function renderDownloads() {
 const ENGINE_NAMES = { google: 'Google', images: 'Images', youtube: 'YouTube', pinterest: 'Pinterest', github: 'GitHub', claude: 'Claude', chatgpt: 'ChatGPT' };
 let sugItems = []; let sugSel = 0;
 
-function showSuggest() {
+const openUrl = (url) => () => send('navigate', { text: url, newTab: true });
+function libraryHits(r) {
+  return [
+    ...r.bookmarks.map((x) => ({ k: 'Bookmark', v: x.title || x.url, run: openUrl(x.url) })),
+    ...r.history.map((x) => ({ k: 'History', v: x.title || x.url, run: openUrl(x.url) })),
+    ...r.boards.map((x) => ({ k: 'Board', v: x.title || x.url, run: openUrl(x.url) })),
+    ...r.apps.map((x) => ({ k: 'NSM app', v: x.name, run: openUrl(x.url) })),
+    ...r.repos.map((x) => ({ k: 'GitHub', v: x.name, run: openUrl(x.url) })),
+  ];
+}
+
+async function showSuggest() {
   const q = $('#omnibox').value.trim();
   const box = $('#suggest');
   if (!q) { hideSuggest(); return; }
@@ -238,7 +302,9 @@ function showSuggest() {
   const tabHits = S.tabs.filter((t) => (t.title + ' ' + t.url).toLowerCase().includes(ql) && t.id !== S.activeId).slice(0, 5)
     .map((t) => ({ k: 'Switch to', v: t.title, run: () => send('activate', { id: t.id }) }));
   const engines = Object.keys(ENGINE_NAMES).map((e) => ({ k: ENGINE_NAMES[e], v: q, run: () => send('navigate', { text: q, engine: e }) }));
-  sugItems = [{ k: 'Go', v: q, run: () => send('navigate', { text: q }) }, ...tabHits, ...engines.slice(1)];
+  const lib = libraryHits(await window.cue.invoke('suggest', { q }));
+  if ($('#omnibox').value.trim() !== q) return;
+  sugItems = [{ k: 'Go', v: q, run: () => send('navigate', { text: q }) }, ...tabHits, ...lib.slice(0, 8), ...engines.slice(1)];
   sugSel = 0;
   box.innerHTML = '';
   sugItems.forEach((it, i) => {
@@ -284,6 +350,181 @@ omni.addEventListener('keydown', (e) => {
 document.querySelectorAll('#engines button').forEach((b) => {
   b.onmousedown = (e) => { e.preventDefault(); const q = omni.value.trim(); if (q) { send('navigate', { text: q, engine: b.dataset.engine }); endEdit(); } };
 });
+
+// Drop an image on the bar to find where it came from.
+omni.addEventListener('dragover', (e) => e.preventDefault());
+omni.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) { await window.cue.invoke('lens-file', { name: f.name, type: f.type, bytes: new Uint8Array(await f.arrayBuffer()) }); return; }
+  const url = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+  if (/^https?:/.test(url)) send('navigate', { text: `https://lens.google.com/uploadbyurl?url=${encodeURIComponent(url)}`, newTab: true });
+});
+
+// ---------------------------------------------------------------- Cmd+K
+const COMMANDS = [
+  ['Go live', () => send('live', { on: !S.live })], ['New Vanish tab', () => send('new-tab', { identity: 'vanish' })],
+  ['Side by side', () => send('split', { mode: 'cols2' })], ['Grid of four', () => send('split', { mode: 'grid4' })], ['One tab', () => send('split', { mode: 'single' })],
+  ['Move in from another browser', () => openImport()], ['Settings', () => openSettings()], ['Boards', () => send('tool', { name: 'boards' })],
+  ['Bookmarks, history and archived tabs', () => send('tool', { name: 'library' })], ['Bills and alerts', () => send('tool', { name: 'bills' })],
+  ['Thumbnail check', () => send('tool', { name: 'thumbcheck' })], ['AI side panel', () => send('ai')], ['Ask AI about this page', () => send('ai-ask')],
+  ['Music bar', () => send('strip')], ['Pick a colour', () => send('tool', { name: 'colour' })], ['Find a font', () => send('tool', { name: 'font' })], ['Ruler', () => send('tool', { name: 'ruler' })],
+  ['Save whole page as a picture', () => send('tool', { name: 'fullpage' })], ['Record this tab', () => send('tool', { name: 'record' })], ['Make a GIF', () => send('tool', { name: 'gif' })],
+  ['Vercel deploys', () => send('navigate', { text: 'https://vercel.com/dashboard', newTab: true })], ['Learning portal', () => send('navigate', { text: 'https://learning-portal.nathanielschool.com', newTab: true })],
+  ...['Teach', 'Create', 'Business', 'Build'].map((n) => [`Space: ${n}`, () => send('space', { name: n })]),
+];
+
+function openPalette() {
+  openModal((sh) => {
+    sh.classList.add('cmdk');
+    const box = el('input'); box.type = 'text'; box.placeholder = 'Find a tab, page, bookmark, app or command'; box.setAttribute('aria-label', 'Find anything');
+    const list = el('div', 'cmdlist');
+    let items = []; let sel = 0;
+    const paint = () => {
+      list.innerHTML = '';
+      items.forEach((it, i) => {
+        const r = el('div', 'sg' + (i === sel ? ' sel' : ''), `<span class="k">${esc(it.k)}</span><span class="v">${esc(it.v)}</span>`);
+        r.onclick = () => { closeModal(); it.run(); };
+        list.append(r);
+      });
+    };
+    const update = async () => {
+      const q = box.value.trim(); const ql = q.toLowerCase();
+      const tabs = S.tabs.filter((t) => (t.title + ' ' + t.url).toLowerCase().includes(ql)).slice(0, q ? 6 : 8)
+        .map((t) => ({ k: t.space === S.space ? 'Tab' : t.space, v: t.title, run: () => send('activate', { id: t.id }) }));
+      const cmds = COMMANDS.filter(([n]) => n.toLowerCase().includes(ql)).slice(0, q ? 5 : 3).map(([n, run]) => ({ k: 'Do', v: n, run }));
+      const lib = q ? libraryHits(await window.cue.invoke('suggest', { q })) : [];
+      if (box.value.trim() !== q) return;
+      const web = q ? [{ k: 'Search', v: q, run: () => send('navigate', { text: q, newTab: true }) }, { k: 'GitHub', v: q, run: () => send('navigate', { text: q, engine: 'github', newTab: true }) }] : [];
+      items = [...tabs, ...cmds, ...lib, ...web].slice(0, 14); sel = 0; paint();
+    };
+    box.oninput = update;
+    box.onkeydown = (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); sel = (sel + 1) % items.length; paint(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel - 1 + items.length) % items.length; paint(); }
+      else if (e.key === 'Enter' && items[sel]) { e.preventDefault(); const it = items[sel]; closeModal(); it.run(); }
+    };
+    sh.append(box, list);
+    update();
+    setTimeout(() => box.focus(), 30);
+  });
+}
+
+// ---------------------------------------------------------------- move in
+async function openImport() {
+  const found = await window.cue.invoke('import-find');
+  openModal((sh) => {
+    sh.append(el('h2', '', 'Move in to Cue'));
+    if (!found.length) sh.append(el('div', 'note', 'No other browser was found on this computer.'));
+    sh.append(el('div', 'note', 'Copies your things into Cue. The other browser is not changed. Your computer may ask to unlock its keychain once for passwords and sign-ins.'));
+    found.sort((a, b) => (b.id === 'helium') - (a.id === 'helium'));
+    for (const b of found) {
+      for (const p of b.profiles) {
+        const card = el('div', 'impcard');
+        const c = p.counts || {};
+        card.append(el('b', '', esc(`${b.name}${b.profiles.length > 1 ? ` · ${p.name}` : ''}`)));
+        if (p.email) card.append(el('span', 'note', esc(p.email)));
+        const what = { bookmarks: true, history: true, tabs: true, passwords: b.id !== 'safari', cookies: b.id !== 'safari' };
+        const opts = el('div', 'impopts');
+        [['bookmarks', `Bookmarks${c.bookmarks != null ? ` (${c.bookmarks})` : ''}`], ['history', `History${c.history != null ? ` (${c.history})` : ''}`], ['tabs', 'Open tabs'], ['passwords', 'Passwords'], ['cookies', 'Sign-ins']].forEach(([k, label]) => {
+          if (b.id === 'safari' && k !== 'bookmarks') { what[k] = false; return; }
+          const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.checked = what[k]; i.onchange = () => { what[k] = i.checked; };
+          l.append(i, document.createTextNode(` ${label}`)); opts.append(l);
+        });
+        card.append(opts);
+        const row = el('div', 'row'); const who = el('select');
+        ['personal', 'school'].forEach((k) => { const o = el('option', '', `Into ${S.identities[k].name}`); o.value = k; o.selected = k === p.identity; who.append(o); });
+        const go = el('button', 'btn', 'Move in'); const out = el('span', 'note');
+        go.onclick = async () => {
+          go.disabled = true; out.textContent = 'Moving in…';
+          const r = await window.cue.invoke('import-run', { browser: b.id, profile: p.dir, identity: who.value, what });
+          go.disabled = false;
+          out.textContent = r.error || [r.bookmarks != null && `${r.bookmarks} bookmarks`, r.history != null && `${r.history} history`, r.tabs != null && `${r.tabs} tabs`, r.passwords != null && `${r.passwords} passwords`, r.cookies != null && `${r.cookies} sign-ins`, r.note].filter(Boolean).join(' · ');
+        };
+        row.append(who, out, go); card.append(row); sh.append(card);
+      }
+    }
+    const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);
+  });
+}
+
+// ---------------------------------------------------------------- colours
+function showPalette(colors) {
+  openModal((sh) => {
+    sh.append(el('h2', '', colors.length > 1 ? 'Palette' : 'Colour'));
+    const row = el('div', 'swatches');
+    colors.forEach((c) => {
+      const b = el('button', 'swatch', `<i style="background:${esc(c)}"></i><span>${esc(c)}</span>`);
+      b.title = 'Copy'; b.onclick = () => { navigator.clipboard.writeText(c); toast(`Copied ${c}`); };
+      row.append(b);
+    });
+    sh.append(row, el('div', 'note', colors.length > 1 ? 'Click a colour to copy it.' : 'Copied. Click to copy again.'));
+    const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);
+  });
+}
+
+// ---------------------------------------------------------------- tab recording
+let recorder = null;
+async function startRecording() {
+  const info = await window.cue.invoke('rec-start');
+  if (!info) { toast('Open a tab first.'); return; }
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 60 }, audio: true });
+    const type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find((x) => MediaRecorder.isTypeSupported(x));
+    const chunks = [];
+    recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12000000, audioBitsPerSecond: 256000 });
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((x) => x.stop());
+      const buffer = new Uint8Array(await new Blob(chunks).arrayBuffer());
+      recorder = null;
+      await window.cue.invoke('rec-save', { title: info.title, buffer, ext: type.startsWith('video/mp4') ? 'mp4' : 'webm' });
+    };
+    recorder.start(1000);
+    toast('Recording this tab with its sound.');
+  } catch { window.cue.invoke('rec-cancel'); toast('Recording could not start.'); }
+}
+function stopRecording() { if (recorder && recorder.state !== 'inactive') recorder.stop(); }
+
+// ---------------------------------------------------------------- music bar
+const M = { speed: 100, semi: 0, loop: false };
+function music(op, value) { send('music', { op, value }); }
+document.querySelectorAll('[data-m]').forEach((b) => {
+  b.onclick = () => {
+    const m = b.dataset.m;
+    if (m === 'speed-' || m === 'speed+') { M.speed = Math.max(25, Math.min(200, M.speed + (m === 'speed+' ? 5 : -5))); $('#m-speed').textContent = `${M.speed}%`; music('speed', M.speed / 100); }
+    else if (m === 'semi-' || m === 'semi+') { M.semi = Math.max(-12, Math.min(12, M.semi + (m === 'semi+' ? 1 : -1))); $('#m-semi').textContent = M.semi > 0 ? `+${M.semi}` : String(M.semi); music('transpose', M.semi); }
+    else if (m === 'loop') music('loop', !M.loop);
+    else music(m);
+  };
+});
+document.querySelectorAll('[data-t]').forEach((b) => { b.onclick = () => send('tool', { name: b.dataset.t }); });
+$('#musicbtn').onclick = () => send('strip');
+$('#aibtn').onclick = () => send('ai');
+$('#aiclose').onclick = () => send('ai');
+$('#aiask').onclick = () => send('ai-ask');
+document.querySelectorAll('[data-ai]').forEach((b) => { b.onclick = () => send('ai', { which: b.dataset.ai }); });
+$('#peekclose').onclick = () => send('peek-close');
+$('#peekkeep').onclick = () => send('peek-keep');
+$('#recbtn').onclick = stopRecording;
+$('#findany').onclick = openPalette;
+$('#openboards').onclick = () => send('tool', { name: 'boards' });
+$('#openlibrary').onclick = () => send('tool', { name: 'library' });
+$('#openbills').onclick = () => send('tool', { name: 'bills' });
+
+// ---------------------------------------------------------------- save password
+function credBar(d) {
+  const box = $('#credbar'); box.innerHTML = ''; box.hidden = false;
+  box.append(el('div', '', `Save password for <b>${esc(hostOf(d.origin))}</b>?`));
+  if (d.username) box.append(el('div', 'note', esc(d.username)));
+  const row = el('div', 'credrow');
+  const close = () => { box.hidden = true; };
+  const yes = el('button', 'btn', 'Save'); yes.onclick = () => { send('cred-save', {}); close(); };
+  const auto = el('button', 'btn', 'Save, auto sign-in'); auto.title = 'Cue signs you in on this site by itself'; auto.onclick = () => { send('cred-save', { auto: true }); close(); };
+  const no = el('button', 'btn', 'Never'); no.onclick = () => { send('cred-never'); close(); };
+  const later = el('button', 'icon', '×'); later.setAttribute('aria-label', 'Not now'); later.onclick = () => { send('cred-dismiss'); close(); };
+  row.append(yes, auto, no, later); box.append(row);
+}
 
 // ---------------------------------------------------------------- find
 const find = $('#findinput');
@@ -340,12 +581,48 @@ function openSettings() {
     const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
     def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
     sh.append(settingRow('Usual login (no colour ring)', def));
+    const mv = el('div', 'row'); const mvb = el('button', 'btn', 'Move in from another browser'); mvb.onclick = () => { closeModal(); openImport(); };
+    const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.onclick = () => send('make-default'); mv.append(mvb, dfb); sh.append(mv);
+    sh.append(el('h3', '', 'Spaces'));
+    sh.append(el('div', 'note', 'Each Space keeps its own tabs and split layout. New tabs in a Space open with its usual login.'));
+    S.spaces.forEach((n) => {
+      const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
+      pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
+      sh.append(settingRow(`${n} usual login`, pick));
+    });
+    sh.append(el('h3', '', 'Kits'));
+    sh.append(el('div', 'note', 'Switch off what you don\'t use and it stays out of your way.'));
+    Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
+    sh.append(el('h3', '', 'Passwords'));
+    const pwBox = el('div', 'pwlist'); sh.append(pwBox);
+    window.cue.invoke('passwords').then((list) => {
+      if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
+      list.forEach((x) => {
+        const r = el('div', 'row'); const a2 = check('', x.auto); a2.title = 'Sign in by itself on this site'; a2.onchange = () => send('pw-auto', { pw: x.id, on: a2.checked });
+        const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { send('pw-remove', { pw: x.id }); r.remove(); };
+        const auto = el('label', 'note', ' auto'); auto.prepend(a2);
+        r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${S.identities[x.identity].name}`)), auto, rm); pwBox.append(r);
+      });
+    });
+    sh.append(el('h3', '', 'Chrome extensions'));
+    const exBox = el('div', 'pwlist'); sh.append(exBox);
+    sh.append(el('div', 'note', 'Copied from your other browsers, so they keep working here. Simple extensions work best; ones that need Chrome\'s full toolbar may not.'));
+    window.cue.invoke('ext-find').then(({ available, installed }) => {
+      installed.forEach((x) => { const r = el('div', 'row'); const b = el('button', 'btn', 'Remove'); b.onclick = () => { window.cue.invoke('ext-remove', { id: x.id }); r.remove(); }; r.append(el('span', '', esc(`${x.name} · on`)), b); exBox.append(r); });
+      available.slice(0, 30).forEach((x) => { const r = el('div', 'row'); const b = el('button', 'btn', 'Add'); const st = el('span', 'note', esc(x.from)); b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; }; r.append(el('span', '', esc(x.name)), st, b); exBox.append(r); });
+      if (!installed.length && !available.length) exBox.append(el('div', 'note', 'None found.'));
+    });
     sh.append(el('h3', '', 'Tabs and sound'));
     sh.append(settingRow('Group tabs automatically (Google, AI & Subscriptions…)', check('autoGroup', s.autoGroup)));
     sh.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. The on-air tab is never paused.'));
     sh.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
     sh.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
     sh.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
+    sh.append(settingRow('Archive unused tabs after (days, 0 = never)', text('archiveDays', s.archiveDays, '7', 'number'), 'Pinned tabs never archive. Find archived tabs in Library.'));
+    sh.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '1024', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
+    sh.append(settingRow('Warn before downloading when free space falls under (GB)', text('lowDiskGB', s.lowDiskGB, '5', 'number')));
+    sh.append(settingRow('Move opened installers to the Trash after a day', check('tidyInstallers', s.tidyInstallers)));
+    sh.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'jasonzacmusic')));
     sh.append(el('h3', '', 'Live class'));
     sh.append(settingRow('Safe-share (blur emails, phone numbers, money, keys on air)', check('safeShare', s.safeShare)));
     const size = el('select'); [['1920x1080', '1920 × 1080'], ['1280x720', '1280 × 720']].forEach(([v, n]) => { const o = el('option', '', n); o.value = v; if (v === `${s.stageWidth}x${s.stageHeight}`) o.selected = true; size.append(o); });
@@ -398,5 +675,17 @@ window.cue.onEvent((name, data) => {
   else if (name === 'find-result') $('#findcount').textContent = data.total ? `${data.active}/${data.total}` : 'No matches';
   else if (name === 'program-thumb') $('#lb-thumb').src = data;
   else if (name === 'share-picker') sharePicker(data);
+  else if (name === 'palette-open') openPalette();
+  else if (name === 'palette') showPalette(data.colors);
+  else if (name === 'import') openImport();
+  else if (name === 'save-password') credBar(data);
+  else if (name === 'rec-start') startRecording();
+  else if (name === 'rec-stop') stopRecording();
+  else if (name === 'music-state' && data) {
+    if (data.none) { toast('No video or audio on this page yet.'); return; }
+    M.loop = !!data.loop; M.speed = Math.round(data.speed * 100); $('#m-speed').textContent = `${M.speed}%`;
+    $('#m-loop').textContent = data.loop ? 'On' : (data.a != null ? 'Set' : 'Off');
+    $('#m-loop').classList.toggle('on', !!data.loop);
+  }
 });
 window.addEventListener('resize', () => { if (!$('#suggest').hidden) showSuggest(); });

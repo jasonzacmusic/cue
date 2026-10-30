@@ -28,7 +28,21 @@ On top of that it adds the things creators reach for every day.
 - **Built for AI agents.** A local, token-protected door (port 8813) and an MCP server let Claude
   Code, Codex and other AI tools open tabs, read, click and type, using your logins, without
   touching your private tabs or the tab that is on air. Every call is logged.
-- **Ad and tracker blocking** built in. Idle tabs sleep after 30 minutes to save memory.
+- **Ad and tracker blocking** built in, except on YouTube, which is left exactly as it is in Chrome. Idle tabs sleep after 30 minutes and unused ones archive after a week.
+- **Spaces.** Teach, Create, Business and Build each keep their own tabs, usual login and layout.
+- **Move in.** Bookmarks, history, open tabs, passwords and sign-ins from Helium, Chrome, Brave, Edge and Arc (bookmarks from Safari). The old browser is left untouched.
+- **Passwords** kept with your computer's keychain, per login, with optional auto sign-in per site. Never for Vanish tabs or AI agents.
+- **⌘K finds anything.** Tabs in every Space, history, bookmarks, Boards, NSM apps, GitHub repos and commands.
+- **Peek.** Alt-click a link to read it in a side panel without leaving your page.
+- **Claude and ChatGPT side panel** with your own accounts. Ask about the page you are on.
+- **Bills radar and alert tray.** Reads billing pages for due dates and failed cards, warns before you are charged, and gathers notifications in one place. During a live class they are held back.
+- **Music kit.** Speed without changing pitch, A-B loop and transpose on any video.
+- **Video kit.** Whole-page pictures, tab recording with clean tab sound, GIFs, timestamp links and frame grabs.
+- **Designer kit.** Colour picker, palette from any image, font finder, ruler and Boards that keep every image's source.
+- **Creator kit.** Thumbnail check, shown the way viewers see it, plus YouTube Studio shortcuts.
+- **Downloads shelf** sorted by type, with a warning before a big download on a nearly full disk.
+- **Vanish tabs** keep nothing on disk and ask before saving a download. The test suite scans the disk to prove it.
+- **Kits you can switch off.** Chrome extensions can be copied in from your other browsers.
 
 ## Use Cue with Claude Code or Codex
 
@@ -48,6 +62,10 @@ npm start            # run it
 npm test             # in-app test against real sites
 npm run dist:mac     # signed Cue.app in build/
 ```
+
+Windows and Linux builds come from GitHub Actions and are not code-signed yet. The Linux build may
+need `--no-sandbox`. Limits today: no passkeys, the cache cap is per login rather than per site, and
+Chrome extensions that rely on Chrome's own toolbar may not work.
 
 ## Licence
 
