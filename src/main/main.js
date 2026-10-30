@@ -1658,6 +1658,7 @@ function buildMenu() {
       label: 'File', submenu: [
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: cmd('new-tab') },
         { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Shift+N', click: cmd('new-tab', { identity: 'vanish' }) },
+        { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Alt+N', visible: false, acceleratorWorksWhenHidden: true, click: cmd('new-tab', { identity: 'vanish' }) }, // for Macs where another app owns Cmd+Shift+N
         { label: 'New Tab As', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: cmd('new-tab', { identity: i }) })) },
         { label: 'Move In From Another Browser…', click: () => sendEvent('import') },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: () => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } } },

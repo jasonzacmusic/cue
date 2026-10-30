@@ -93,6 +93,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       return { action: 'deny' };
     });
     wc.on('did-create-window', (popup) => popup.setContentProtection(true));
+    if (!url) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
     wc.loadURL(t.url).catch(() => {});
     activate(t.id);
     if (!url) focusBar();
