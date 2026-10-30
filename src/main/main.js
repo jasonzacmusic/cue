@@ -1014,6 +1014,7 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'suggest') { const r = suggestions(a.q); warmUp(r); return r; }
   if (cmd === 'import-find') return findImports();
   if (cmd === 'import-run') return runImport(a);
+  if (cmd === 'open-disk-access') return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
   if (cmd === 'passwords') return vault.list();
   if (cmd === 'storage') return storageReport();
   if (cmd === 'team-vault') return loadTeamVault();

@@ -281,6 +281,23 @@ try {
   fs.mkdirSync(path.join(fakeRoot, 'Profile 2', 'Sessions'), { recursive: true });
   fs.writeFileSync(path.join(fakeRoot, 'Profile 2', 'Sessions', 'Session_9'), big);
   eq('readOpenTabs capped at 200', imp.readOpenTabs(browser, P2).length, 200);
+  // A real session file replays to the tabs that are open, on the page each one is showing.
+  const cmd = (id, body) => { const h = Buffer.alloc(3); h.writeUInt16LE(body.length + 1, 0); h[2] = id; return Buffer.concat([h, body]); };
+  const ints = (...n) => { const b = Buffer.alloc(n.length * 4); n.forEach((v, i) => b.writeInt32LE(v, i * 4)); return b; };
+  const nav = (tab, index, url, title) => {
+    const u = Buffer.from(url, 'latin1'); const pad = Buffer.alloc((4 - (u.length % 4)) % 4);
+    return cmd(6, Buffer.concat([ints(0, tab, index, u.length), u, pad, ints(title.length), Buffer.from(title, 'utf16le')]));
+  };
+  const session = Buffer.concat([Buffer.from('SNSS\x03\x00\x00\x00', 'latin1'),
+    cmd(0, ints(1, 10)), nav(10, 0, 'https://back.example/', 'Old page'), nav(10, 1, 'https://here.example/', 'Showing'), cmd(7, ints(10, 1)),
+    cmd(0, ints(1, 11)), nav(11, 0, 'https://closed.example/', 'Closed'), cmd(16, ints(11, 0, 0)),
+    cmd(0, ints(2, 12)), nav(12, 0, 'https://gone.example/', 'Window closed'), cmd(17, ints(2, 0, 0)),
+    cmd(0, ints(1, 13)), nav(13, 0, 'chrome://newtab/', 'New Tab')]);
+  fs.mkdirSync(path.join(fakeRoot, 'Profile 3', 'Sessions'), { recursive: true });
+  fs.writeFileSync(path.join(fakeRoot, 'Profile 3', 'Sessions', 'Session_1'), session);
+  eq('readOpenTabs keeps only tabs really open, on their current page', imp.readOpenTabs(browser, { dir: 'Profile 3' }), [
+    { url: 'https://here.example/', title: 'Showing' },
+  ]);
   // Arc
   const arcDir = path.join(tmp, 'Arc');
   fs.mkdirSync(path.join(arcDir, 'User Data', 'Default'), { recursive: true });

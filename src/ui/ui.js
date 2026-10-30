@@ -39,10 +39,19 @@ function favEl(t) {
   const showRing = t.identity !== S.settings.defaultIdentity || t.agent;
   if (showRing) { f.classList.add('ringed'); f.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); }
   const letter = () => { f.textContent = (t.title || hostOf(t.url) || '?').slice(0, 1).toUpperCase(); };
-  // A site that names no icon usually still has one at the usual address.
-  let src = t.favicon;
-  if (!src && /^https?:/.test(t.url)) { try { src = `${new URL(t.url).origin}/favicon.ico`; } catch {} }
-  if (src) { const i = new Image(); i.src = src; i.alt = ''; i.onerror = letter; f.append(i); } else letter();
+  // A tab that has not woken up yet has no icon from its page, so Cue's own pages draw theirs
+  // and a site is tried at the usual address, then through Google's icon service.
+  const page = /^cue:\/\/(\w+)/.exec(t.url || '');
+  const http = /^https?:/.test(t.url || '');
+  const tries = [t.favicon];
+  if (http && t.identity !== 'vanish') { try { const u = new URL(t.url); tries.push(`${u.origin}/favicon.ico`, `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`); } catch {} }
+  const srcs = tries.filter(Boolean);
+  if (page && ICONS[page[1]]) f.innerHTML = ICONS[page[1]];
+  else if (srcs.length) {
+    const i = new Image(); i.alt = '';
+    i.onerror = () => { srcs.shift(); if (srcs.length) i.src = srcs[0]; else { i.remove(); letter(); } };
+    i.src = srcs[0]; f.append(i);
+  } else letter();
   if (t.audible || t.muted) f.append(el('b', 'favsound' + (t.muted ? ' off' : '')));
   return f;
 }
@@ -499,12 +508,18 @@ async function openImport() {
     sh.append(el('h2', '', 'Move in to Cue'));
     if (!found.length) sh.append(el('div', 'note', 'No other browser was found on this computer.'));
     sh.append(el('div', 'note', 'Copies your things into Cue. The other browser is not changed. Your computer may ask to unlock its keychain once for passwords and sign-ins.'));
-    found.sort((a, b) => (b.id === 'helium') - (a.id === 'helium'));
+    const rank = (b) => { const i = ['chrome', 'safari'].indexOf(b.id); return i < 0 ? 9 : i; };
+    found.sort((a, b) => rank(a) - rank(b));
     for (const b of found) {
       for (const p of b.profiles) {
         const card = el('div', 'impcard');
         const c = p.counts || {};
         card.append(el('b', '', esc(`${b.name}${b.profiles.length > 1 ? ` · ${p.name}` : ''}`)));
+        if (b.id === 'safari' && !c.bookmarks) {
+          const allow = el('button', 'btn', 'Let Cue read Safari');
+          allow.onclick = () => window.cue.invoke('open-disk-access');
+          card.append(el('div', 'note', 'Your Mac keeps Safari private. Switch Cue on under Full Disk Access, reopen Cue, then come back here.'), allow);
+        }
         if (p.email) card.append(el('span', 'note', esc(p.email)));
         const what = { bookmarks: true, history: true, tabs: true, passwords: b.id !== 'safari', cookies: b.id !== 'safari' };
         const opts = el('div', 'impopts');

@@ -1,6 +1,6 @@
 'use strict';
 // Cue importer: moves bookmarks, history, passwords, cookies and open tabs in from
-// other browsers (Helium first, then Chrome, Brave, Edge, Arc, Safari).
+// other browsers (Chrome, Safari, Helium, Brave, Edge, Arc).
 // Every function is defensive: a missing or locked file gives an empty result, never a throw.
 // Plain Node only (node:sqlite, crypto, fs, child_process) so it also runs outside Electron.
 
@@ -491,6 +491,47 @@ function scanSession(buf, out, seen) {
   }
 }
 
+// Chromium's session file is a log of commands: size, command number, then its data. Replaying
+// it gives the tabs that are really open, each on the page it is showing. A plain scan for
+// addresses also finds every page in each tab's back-and-forward list, so it is only the fallback.
+function parseSession(buf) {
+  if (buf.length < 8 || buf.toString('latin1', 0, 4) !== 'SNSS') return null;
+  const SET_WINDOW = 0; const NAVIGATION = 6; const SELECTED = 7; const TAB_CLOSED = 16; const WINDOW_CLOSED = 17;
+  const tabs = new Map();
+  const tabFor = (id) => { if (!tabs.has(id)) tabs.set(id, { win: 0, sel: -1, navs: new Map() }); return tabs.get(id); };
+  let p = 8;
+  while (p + 3 <= buf.length) {
+    const size = buf.readUInt16LE(p); p += 2;
+    if (size < 1 || p + size > buf.length) break;
+    const cmd = buf[p]; const b = p + 1; const end = p + size; p = end;
+    try {
+      if (cmd === SET_WINDOW && b + 8 <= end) tabFor(buf.readInt32LE(b + 4)).win = buf.readInt32LE(b);
+      else if (cmd === SELECTED && b + 8 <= end) tabFor(buf.readInt32LE(b)).sel = buf.readInt32LE(b + 4);
+      else if (cmd === TAB_CLOSED && b + 4 <= end) tabs.delete(buf.readInt32LE(b));
+      else if (cmd === WINDOW_CLOSED && b + 4 <= end) {
+        const win = buf.readInt32LE(b);
+        for (const [id, t] of tabs) if (t.win === win) tabs.delete(id);
+      } else if (cmd === NAVIGATION && b + 16 <= end) {
+        const index = buf.readInt32LE(b + 8); const len = buf.readInt32LE(b + 12); const u = b + 16;
+        if (len < 0 || len > 8192 || u + len > end) continue;
+        const url = buf.subarray(u, u + len).toString('latin1');
+        let title = ''; const t = u + ((len + 3) & ~3);
+        if (t + 4 <= end) {
+          const tl = buf.readInt32LE(t);
+          if (tl > 0 && tl <= 1024 && t + 4 + tl * 2 <= end) title = buf.subarray(t + 4, t + 4 + tl * 2).toString('utf16le');
+        }
+        tabFor(buf.readInt32LE(b + 4)).navs.set(index, { url, title });
+      }
+    } catch { /* a damaged command: keep the rest */ }
+  }
+  const out = [];
+  for (const t of tabs.values()) {
+    const nav = t.navs.get(t.sel) || t.navs.get(Math.max(...t.navs.keys()));
+    if (nav && /^https?:\/\//i.test(nav.url)) out.push(nav);
+  }
+  return out;
+}
+
 function newestSessionFile(dir) {
   const sdir = path.join(dir, 'Sessions');
   let best = null;
@@ -525,7 +566,10 @@ function readOpenTabs(browser, profile) {
     if (!file) return out;
     const st = fs.statSync(file);
     if (st.size > 128 * 1024 * 1024) return out;
-    scanSession(fs.readFileSync(file), out, seen);
+    const buf = fs.readFileSync(file);
+    const open = parseSession(buf);
+    if (open && open.length) open.forEach((n) => dedupePush(out, seen, n.url, n.title));
+    else scanSession(buf, out, seen);
     return out;
   } catch { return out; }
 }
