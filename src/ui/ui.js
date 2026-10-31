@@ -465,6 +465,47 @@ function renderBar() {
   $('#syncplay').classList.toggle('on', !!S.settings.syncPlay);
   $('#livetoggle').checked = S.live;
   $('#take').hidden = !S.live;
+  renderShield(a);
+}
+
+// The shield in the address bar. It is the only place you ever find out that
+// any of the blocking is happening, so it carries the real number for the page
+// in front of you and goes grey, not invisible, when nothing was blocked.
+function renderShield(a) {
+  const btn = $('#shield');
+  const on = S.settings.blockAds !== false;
+  const show = !!(a && a.url && /^https?:/.test(a.url));
+  btn.hidden = !show;
+  if (!show) { $('#shieldpop').hidden = true; return; }
+  const n = a.blocked || 0;
+  btn.classList.toggle('quiet', !n);
+  btn.classList.toggle('off', !on || a.adsOk);
+  $('#shieldn').textContent = on && !a.adsOk && n ? String(n) : '';
+  const site = hostOf(a.url);
+  tip(btn, !on ? 'The shield is off' : a.adsOk ? `Ads are allowed on ${site}` : n ? `${n} ad${n === 1 ? '' : 's'} and tracker${n === 1 ? '' : 's'} blocked here` : 'Nothing to block on this page',
+    'Click for this site');
+}
+
+function openShieldPop() {
+  const pop = $('#shieldpop');
+  if (!pop.hidden) { pop.hidden = true; return; }
+  const a = S.tabs.find((t) => t.id === S.activeId);
+  if (!a || !a.url) return;
+  const site = hostOf(a.url);
+  const on = S.settings.blockAds !== false;
+  pop.replaceChildren();
+  pop.append(el('div', 'sp-n', on && !a.adsOk ? String(a.blocked || 0) : '—'));
+  pop.append(el('div', 'sp-what', on && !a.adsOk ? `ads and trackers blocked on this page` : a.adsOk ? `ads are allowed on ${site}` : 'the shield is off'));
+  const row = el('label', 'sp-row');
+  const box = el('input'); box.type = 'checkbox'; box.checked = !a.adsOk;
+  box.onchange = () => { send('ads-here', { block: box.checked, id: a.id }); pop.hidden = true; };
+  row.append(box, el('span', '', `Block ads on ${site}`));
+  pop.append(row);
+  pop.append(el('div', 'note', 'Switch this off if the site breaks. Every other site stays protected.'));
+  const more = el('button', 'btn small', 'Shield settings');
+  more.onclick = () => { pop.hidden = true; openSettings(); };
+  pop.append(more);
+  pop.hidden = false;
 }
 
 function renderContent() {
@@ -838,6 +879,11 @@ $('#newtab').onclick = () => send('new-tab', { identity: newIdentity });
 $('#back').onclick = () => send('back');
 $('#fwd').onclick = () => send('forward');
 $('#reload').onclick = () => send('reload');
+$('#shield').onclick = (e) => { e.stopPropagation(); hideTip(); openShieldPop(); };
+document.addEventListener('click', (e) => {
+  const pop = $('#shieldpop');
+  if (!pop.hidden && !pop.contains(e.target) && e.target.closest('#shield') === null) pop.hidden = true;
+});
 document.querySelectorAll('[data-split]').forEach((b) => { b.onclick = () => send('split', { mode: b.dataset.split }); });
 $('#syncscroll').onclick = () => send('setting', { key: 'syncScroll', value: !S.settings.syncScroll });
 $('#syncplay').onclick = () => send('setting', { key: 'syncPlay', value: !S.settings.syncPlay });
@@ -872,6 +918,26 @@ function openSettings() {
   const s = S.settings;
   openModal((sh) => {
     sh.append(el('h2', '', 'Cue settings'));
+    sh.append(el('h3', '', 'Shield'));
+    sh.append(settingRow('Block ads and trackers', check('blockAds', s.blockAds !== false), 'The same filter lists Brave and uBlock use. Ads, tracking scripts and cookie banners never load, so pages are lighter as well as quieter.'));
+    sh.append(settingRow('Warn me about dangerous sites', check('warnDangerous', s.warnDangerous !== false), 'A page reported for handing out viruses, or for copying a real sign-in page to collect your password, is stopped with an explanation instead of opening.'));
+    sh.append(settingRow('Try the secure address first', check('httpsFirst', s.httpsFirst !== false), 'Cue asks for https:// even when a link says http://, and tells you when a site has no secure address.'));
+    sh.append(settingRow('Keep my real address hidden on a VPN', check('hideRealIP', s.hideRealIP !== false), 'Video calling normally hands a page every network address this Mac has, which is how a site reads your home address while NordVPN is on. Cue offers the public one only. Takes effect on the next page load.'));
+    const shieldLine = el('div', 'note', 'Checking…'); sh.append(shieldLine);
+    const shieldRow = el('div', 'row'); const refresh = el('button', 'btn small', 'Check for new threats now');
+    refresh.onclick = async () => { refresh.disabled = true; refresh.textContent = 'Checking…'; await window.cue.invoke('shield.refresh'); refresh.textContent = 'Up to date'; showShield(); };
+    shieldRow.append(el('span', 'note', ''), refresh); sh.append(shieldRow);
+    const ago = (at) => {
+      if (!at) return 'never';
+      const d = Math.round((Date.now() - at) / 86400000);
+      return d <= 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} ago`;
+    };
+    const showShield = () => window.cue.invoke('shield.status').then((st) => {
+      if (!st.on) { shieldLine.textContent = 'The shield is off. Nothing is being blocked.'; return; }
+      const allowed = st.allowed.length ? ` Ads are allowed by hand on ${st.allowed.join(', ')}.` : '';
+      shieldLine.textContent = `${st.listsMB} MB of ad and tracker rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
+    });
+    showShield();
     sh.append(el('h3', '', 'Logins'));
     sh.append(el('div', 'note', 'Each login keeps its own Google, Instagram and other sign-ins, so two Gmails stay signed in side by side. Name the account each one holds; AI agents read these names and use the right login without asking you.'));
     sh.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
@@ -917,10 +983,39 @@ function openSettings() {
     });
     sh.append(el('h3', '', 'Chrome extensions'));
     const exBox = el('div', 'pwlist'); sh.append(exBox);
-    sh.append(el('div', 'note', 'Copied from your other browsers, so they keep working here. Simple extensions work best; ones that need Chrome\'s full toolbar may not.'));
+    sh.append(el('div', 'note', 'An extension can read the pages you are signed in to, so each one says what it can do before you add it. Copied from your other browsers, so they keep working here. Removing one puts it in the Trash.'));
+    // Each extension gets its sentence under its name, because "manifest
+    // permissions: cookies, webRequest, <all_urls>" is not a warning anybody
+    // can act on.
+    const extRow = (x, right) => {
+      const r = el('div', 'rowtall');
+      const left = el('div', 'rowtext');
+      left.append(el('div', '', esc(x.version ? `${x.name} · ${x.version}` : x.name)));
+      if (x.can) left.append(el('div', 'note', esc(x.can)));
+      r.append(left, right);
+      return r;
+    };
     window.cue.invoke('ext-find').then(({ available, installed }) => {
-      installed.forEach((x) => { const r = el('div', 'row'); const b = el('button', 'btn', 'Remove'); b.onclick = () => { window.cue.invoke('ext-remove', { id: x.id }); r.remove(); }; r.append(el('span', '', esc(`${x.name} · on`)), b); exBox.append(r); });
-      available.slice(0, 30).forEach((x) => { const r = el('div', 'row'); const b = el('button', 'btn', 'Add'); const st = el('span', 'note', esc(x.from)); b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; }; r.append(el('span', '', esc(x.name)), st, b); exBox.append(r); });
+      if (installed.length) exBox.append(el('div', 'note', `In Cue now (${installed.length})`));
+      installed.forEach((x) => {
+        const b = el('button', 'btn danger', 'Remove');
+        let sure = false;
+        b.onclick = () => {
+          if (!sure) { sure = true; b.textContent = 'Remove it?'; b.classList.add('sure'); setTimeout(() => { if (sure) { sure = false; b.textContent = 'Remove'; b.classList.remove('sure'); } }, 4000); return; }
+          window.cue.invoke('ext-remove', { id: x.id });
+          r.replaceChildren(el('span', 'note', esc(`${x.name} removed. It is in the Trash.`)));
+        };
+        const r = extRow({ ...x, name: x.on === false ? `${x.name} · off` : x.name }, b);
+        exBox.append(r);
+      });
+      if (available.length) exBox.append(el('div', 'note', `Found in your other browsers (${available.length})`));
+      available.slice(0, 30).forEach((x) => {
+        const b = el('button', 'btn', 'Add'); const wrap = el('div', 'rowbtns');
+        const st = el('span', 'note', esc(x.from));
+        b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; };
+        wrap.append(st, b);
+        exBox.append(extRow(x, wrap));
+      });
       if (!installed.length && !available.length) exBox.append(el('div', 'note', 'None found.'));
     });
     sh.append(el('h3', '', 'Tabs and sound'));
@@ -986,6 +1081,12 @@ function sharePicker(d) {
 window.cue.onState((s) => { S = s; render(); });
 window.cue.onEvent((name, data) => {
   if (name === 'toast') toast(data);
+  // The count climbs while the page loads, so it is nudged straight onto the
+  // button rather than waiting for the next full state push.
+  else if (name === 'blocked') {
+    const t = S.tabs.find((x) => x.id === data.id);
+    if (t) { t.blocked = data.n; if (data.id === S.activeId) renderShield(t); }
+  }
   else if (name === 'focus-omnibox') { omni.focus(); omni.select(); }
   else if (name === 'focus-find') openFind();
   else if (name === 'find-result') $('#findcount').textContent = data.total ? `${data.active}/${data.total}` : 'No matches';

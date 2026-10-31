@@ -23,6 +23,7 @@ const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
 const { whereToOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
+const { createShield } = require('./shield');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
@@ -102,7 +103,7 @@ let mainWin = null;
 let uiView = null;
 let stageWin = null;
 let stageStandby = null;
-let blocker = null;
+let shield = null;
 const obs = new OBS();
 const tabs = [];
 let activeId = null;
@@ -114,6 +115,7 @@ const closedStack = [];
 const downloads = [];
 const agentLog = [];
 const sessionsReady = new Set();
+const dangerOk = new Set();   // hosts you chose to open anyway, until Cue is closed
 let pendingShare = null;
 let lib = null;
 let vault = null;
@@ -320,12 +322,8 @@ function servePages(ses) {
   });
 }
 
-// The ad blocker registers one shared message handler; clear it before adding each new login's session.
 function enableBlocker(ses) {
-  if (!blocker || blocker.isBlockingEnabled(ses)) return;
-  ipcMain.removeHandler('@ghostery/adblocker/inject-cosmetic-filters');
-  ipcMain.removeHandler('@ghostery/adblocker/is-mutation-observer-enabled');
-  try { blocker.enableBlockingInSession(ses); } catch (e) { console.error('blocker', e.message); }
+  if (shield && settings().blockAds !== false) shield.enable(ses);
 }
 
 function safeOrigin(url) { try { return new URL(url).origin; } catch { return url; } }
@@ -365,14 +363,80 @@ function ensureView(t) {
   view.setVisible(false);
   view.setBounds(contentRect());
   if (overlay) mainWin.contentView.addChildView(uiView);
-  view.webContents.loadURL(t.url).catch(() => {});
+  view.webContents.loadURL(guardUrl(t.url)).catch(() => {});
   if (t.zoom) view.webContents.setZoomLevel(t.zoom);
   return view;
+}
+
+// A plain name with no scheme already becomes https in resolveInput. This is
+// for the other way in: a link, or an address you typed with http:// in front
+// of it. Cue tries the secure one first and says so if the site has none.
+// Addresses on this machine and bare numbers are left alone - there is no
+// certificate to be had for localhost:3000.
+const NO_HTTPS = new Set();
+function secureVersion(url) {
+  if (!/^http:\/\//i.test(url)) return null;
+  let u; try { u = new URL(url); } catch { return null; }
+  const h = u.hostname;
+  if (/^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/i.test(h) || /\.(local|test|localhost)$/i.test(h)) return null;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || !h.includes('.')) return null;
+  if (NO_HTTPS.has(h)) return null;
+  u.protocol = 'https:';
+  return u.href;
+}
+// Failures that mean "there is nothing listening on 443". A name that does not
+// resolve, or a page that answers with an error, is not one of these: those
+// fail the same way over http, so dropping the padlock would gain nothing.
+const NO_SECURE_DOOR = new Set([-100, -101, -102, -107, -113, -118, -200, -201, -202, -207, -324]);
+
+// Every way a page can be asked for - typed, clicked, restored at launch, woken
+// from sleep - goes through here, so a site on today's list is stopped whichever
+// way you arrived at it.
+function guardUrl(url) {
+  if (!shield || settings().warnDangerous === false || !/^https?:/i.test(String(url || ''))) return url;
+  if (dangerOk.has(shield.hostOf(url))) return url;
+  const bad = shield.verdict(url);
+  return bad ? `cue://danger?kind=${bad}&site=${encodeURIComponent(url)}` : url;
 }
 
 function wireTab(t) {
   const wc = t.view.webContents;
   wc.setAudioMuted(t.muted);
+  // On a VPN, this is the one thing a browser does that gives your real address
+  // away. Video calling asks the operating system for every network address
+  // this Mac has and hands the lot to the page, which is how a site reads your
+  // home IP while NordVPN is on. Cue offers the public one only. Calls still
+  // work; what stops working is being found.
+  try { wc.setWebRTCIPHandlingPolicy(settings().hideRealIP === false ? 'default' : 'default_public_interface_only'); } catch {}
+  // ---- known-dangerous sites, and trying the secure address first
+  const guard = (e, url, isMain) => {
+    if (!isMain) return;
+    const warn = guardUrl(url);
+    if (warn !== url) {
+      e.preventDefault();
+      wc.loadURL(warn).catch(() => {});
+      logTab(t, 'blocked', `dangerous site ${url}`);
+      return;
+    }
+    const safe = settings().httpsFirst !== false ? secureVersion(url) : null;
+    if (safe) {
+      e.preventDefault();
+      t.httpsFrom = url;
+      wc.loadURL(safe).catch(() => {});
+    }
+  };
+  wc.on('will-navigate', (e, url) => guard(e, url, true));
+  wc.on('will-frame-navigate', (e) => guard(e, e.url, e.isMainFrame));
+  wc.on('will-redirect', (e, url) => guard(e, url, true));
+  wc.on('did-fail-load', (_e, code, _desc, url, isMain) => {
+    if (!isMain || !t.httpsFrom) return;
+    const back = t.httpsFrom; t.httpsFrom = null;
+    if (!NO_SECURE_DOOR.has(Number(code)) || !/^https:/.test(url)) return;
+    try { NO_HTTPS.add(new URL(back).hostname); } catch {}
+    sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
+    wc.loadURL(back).catch(() => {});
+  });
+  wc.on('did-finish-load', () => { t.httpsFrom = null; });
   wc.on('page-title-updated', (_e, title) => {
     t.title = title; if (t.popout) t.popout.setTitle(`Cue · ${title}`);
     if (remembers(t)) lib.title(wc.getURL(), title);
@@ -380,7 +444,7 @@ function wireTab(t) {
     pushState(); persist();
   });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
-  wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; });
+  wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; if (shield) shield.reset(wc.id); });
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
@@ -459,7 +523,9 @@ function hostOf(u) {
 
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
-  const t = makeTab({ url: url || START_URL, identity, agent, pinned });
+  const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
+  const t = makeTab({ url: safe || url || START_URL, identity, agent, pinned });
+  if (safe) t.httpsFrom = url;
   if (after) {
     const i = tabs.indexOf(after);
     t.order = after.order + 0.001;
@@ -505,6 +571,7 @@ function closeTab(id) {
 function destroyView(t) {
   if (!t.view) return;
   const v = t.view; t.view = null;
+  if (shield) { try { shield.forget(v.webContents.id); } catch {} }
   for (const w of [mainWin, stageWin, t.popout]) { try { if (w) w.contentView.removeChildView(v); } catch {} }
   try { v.webContents.close(); } catch {}
 }
@@ -779,12 +846,14 @@ function resolveInput(text, engine) {
 }
 
 function navigate({ text, engine, newTab, identity }) {
-  const url = resolveInput(text, engine);
+  const typed = resolveInput(text, engine);
+  const url = (settings().httpsFirst !== false && secureVersion(typed)) || typed;
   const t = byId(activeId);
   if (newTab || !t) return openTab({ url, identity: identity || (t ? t.identity : undefined) });
   ensureView(t);
   t.url = url;
-  t.view.webContents.loadURL(url).catch(() => {});
+  if (url !== typed) t.httpsFrom = typed;
+  t.view.webContents.loadURL(guardUrl(url)).catch(() => {});
   t.view.webContents.focus();
   pushState();
 }
@@ -915,6 +984,8 @@ function sendState() {
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
       aiAllowed: t.aiAllowed, playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
+      blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
+      adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
     space: store.data.space, spaces: SPACES, kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
     ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
@@ -969,13 +1040,30 @@ ipcMain.on('cue:note', (e, n) => {
   addAlert({ source: hostName(t.url), title: n.title, body: n.body, url: t.url, held: live });
 });
 const sharesPasswords = (identity, origin) => (identity === 'personal' || identity === 'school') && !hasTwoAccounts(hostName(origin));
-ipcMain.handle('cue:cred-get', (e) => {
+// Which saved login applies here, found the same way for both handlers below so
+// the answer to "is there one" can never differ from the one that is handed out.
+function credFor(e) {
   const t = byWC(e.sender);
   if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t)) return null;
   const origin = safeOrigin(e.senderFrame.url);
   if (!securePage(origin)) return null;
   const c = vault.find(t.identity, origin) || (sharesPasswords(t.identity, origin) ? vault.find(t.identity === 'school' ? 'personal' : 'school', origin) : null);
-  if (!c) return null;
+  return c ? { c, origin } : null;
+}
+
+// Asked the moment a password box appears. It says whether Cue holds a login
+// and whether that site fills itself - never the password. The password is
+// handed over by cue:cred-get, and on every site but our own that only happens
+// after you have clicked the box yourself.
+ipcMain.handle('cue:cred-ready', (e) => {
+  const hit = credFor(e);
+  if (!hit) return null;
+  return { handsFree: !!hit.c.auto || Vault.ownSite(hit.origin) };
+});
+ipcMain.handle('cue:cred-get', (e) => {
+  const hit = credFor(e);
+  if (!hit) return null;
+  const { c, origin } = hit;
   vault.used(c.id);
   let submit = false;
   if (c.auto && Date.now() - (autoTried[origin] || 0) > 120000) { autoTried[origin] = Date.now(); submit = true; }
@@ -991,7 +1079,7 @@ ipcMain.on('cue:cred-offer', (e, c) => {
 });
 ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   if (!e.senderFrame.url.startsWith('cue://') || !internal[cmd]) throw new Error('Not allowed');
-  return internal[cmd](a);
+  return internal[cmd](a, byWC(e.sender));
 });
 
 ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
@@ -1047,6 +1135,23 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'ai-width': settings().aiWidth = a.w; store.save(); layout(); pushState(); break;
     case 'split-size': resizeSplit(a); break;
     case 'clear-cache': clearCaches(); break;
+    // Some sites genuinely break when their ads are blocked. This lets that one
+    // site through and leaves every other site alone.
+    case 'ads-here': {
+      if (!shield || !t) break;
+      const host = shield.hostOf(t.url);
+      if (!host) break;
+      const list = new Set(settings().adsAllowed || []);
+      const block = a.block === undefined ? list.has(host) : !!a.block;
+      if (block) list.delete(host); else list.add(host);
+      settings().adsAllowed = [...list];
+      shield.setAllowed(settings().adsAllowed);
+      store.save();
+      sendEvent('toast', block ? `Ads are blocked on ${host} again. Reloading.` : `Ads are allowed on ${host}. Reloading.`);
+      if (wc) wc.reload();
+      pushState();
+      break;
+    }
     case 'space': switchSpace(a.name); break;
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
@@ -1148,6 +1253,14 @@ function setSetting(key, value) {
   if (key === 'githubUser') loadRepos();
   store.save();
   if (key === 'originalSound') tabs.forEach((x) => x.view && x.view.webContents.send('cue:original-sound', value));
+  // Switching the shield off has to take effect without restarting Cue, so the
+  // blocking is pulled out of every login's session there and then.
+  if (key === 'blockAds' && shield) {
+    for (const ses of sessionsReady) {
+      if (value) shield.enable(ses); else shield.disable(ses);
+    }
+    sendEvent('toast', value ? 'Ads and trackers are blocked again.' : 'Ads are allowed everywhere now.');
+  }
   if (key === 'safeShare') { const p = byId(programId); if (p && p.view) p.view.webContents.send('cue:safe', !!value); }
   pushState();
 }
@@ -1422,6 +1535,19 @@ const internal = {
   },
   'library.pages': ({ host }) => lib.pages(host, 500),
   'library.forget': ({ host }) => { lib.forgetSite(host); return true; },
+  'shield.status': () => (shield ? { ...shield.status(), on: shield.status().on && settings().blockAds !== false } : { on: false, lists: 0, dangerous: 0, listsAt: 0, dangerAt: 0, allowed: [] }),
+  'shield.refresh': async () => { if (shield) await shield.refreshDanger(); return shield ? shield.status() : null; },
+  // "Open it anyway" on the warning page. One host, until Cue is closed.
+  'shield.close': (_a, from) => { if (from) closeTab(from.id); return true; },
+  'shield.proceed': ({ site }, from) => {
+    if (!shield || !/^https?:\/\//i.test(String(site || ''))) return false;
+    const host = shield.hostOf(site);
+    if (!host) return false;
+    dangerOk.add(host);
+    const t = from || byId(activeId);
+    if (t && t.view) t.view.webContents.loadURL(site).catch(() => {});
+    return true;
+  },
   'library.archived': () => store.data.archived,
   'library.restore': ({ id }) => {
     const a = store.data.archived.find((x) => x.id === id); if (!a) return;
@@ -1538,7 +1664,7 @@ function findExtensions() {
       }
     }
   }
-  return { available: out, installed: extensions.installed(extDir).map((e) => ({ id: e.id, name: e.name, version: e.version })) };
+  return { available: out, installed: extensions.installed(extDir).map((e) => ({ id: e.id, name: e.name, version: e.version, can: e.can, on: extsLoaded.has(e.id) })) };
 }
 async function addExtension({ id, dir, name }) {
   const to = extensions.adopt(extDir, { id, dir });
@@ -1547,12 +1673,18 @@ async function addExtension({ id, dir, name }) {
   }
   return { ok: true, name };
 }
+// Switched off in every login, then moved to the Trash rather than deleted, so
+// an extension removed by mistake can be put back.
 function removeExtension(id) {
+  if (!/^[a-p]{32}$/.test(String(id || ''))) return false;
   for (const k of ['personal', 'school', 'agent']) {
     const ses = sessionFor(k); const ext = ses.extensions.getAllExtensions().find((e) => path.basename(e.path) === id);
     if (ext) ses.extensions.removeExtension(ext.id);
   }
-  fs.rmSync(path.join(extDir, id), { recursive: true, force: true });
+  extsLoaded.delete(id);
+  const from = path.join(extDir, id);
+  if (!fs.existsSync(from)) return true;
+  shell.trashItem(from).catch((e) => logProblem('extension', e));
   return true;
 }
 
@@ -1848,18 +1980,18 @@ setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(
 
 // ---------------------------------------------------------------- start
 async function setupBlocker() {
-  try {
-    const { ElectronBlocker } = require('@ghostery/adblocker-electron');
-    const cache = path.join(app.getPath('userData'), 'blocker.bin');
-    blocker = await ElectronBlocker.fromPrebuiltAdsAndTracking(fetch, {
-      path: cache, read: fs.promises.readFile, write: fs.promises.writeFile,
-    });
-    // Blocker scripts clash with YouTube's player pages, and YouTube Studio must behave exactly as in Chrome.
-    blocker.updateFromDiff({ added: ['@@||youtube.com^$document', '@@||youtube-nocookie.com^$document', '@@||ytimg.com^', '@@||googlevideo.com^'] });
-    const inject = blocker.onInjectCosmeticFilters;
-    blocker.onInjectCosmeticFilters = async (e, url, msg) => (/^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com)\//.test(url) ? undefined : inject(e, url, msg));
-    for (const ses of sessionsReady) enableBlocker(ses);
-  } catch (e) { console.error('blocker', e.message); }
+  shield = createShield({ dir: app.getPath('userData'), log: (e) => logAgent(e) });
+  await shield.start({
+    sessions: settings().blockAds === false ? [] : [...sessionsReady],
+    allowSites: settings().adsAllowed || [],
+    // The number on the shield is the only proof you ever get that any of this
+    // is running, so it reaches the window as the requests are stopped.
+    onCount: (wcId, n) => {
+      const t = tabs.find((x) => x.view && !x.view.webContents.isDestroyed() && x.view.webContents.id === wcId);
+      if (t) sendEvent('blocked', { id: t.id, n });
+    },
+  });
+  pushState();
 }
 
 // One bad page or a failed background job must never bring the whole browser down.
@@ -1930,7 +2062,8 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 30,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '' }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, adsAllowed: [] }, ...store.data.settings };
+  if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
   if (store.data.settings.cacheCapMB === 1024) store.data.settings.cacheCapMB = CACHE_MB;
@@ -1978,7 +2111,7 @@ app.whenReady().then(async () => {
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

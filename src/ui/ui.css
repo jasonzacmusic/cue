@@ -350,3 +350,26 @@ body.rail .updatebar { display: none; }
   border: 1px solid var(--accent); background: var(--raised); color: var(--ink);
   font: 600 13px/1 -apple-system, system-ui, sans-serif; }
 .rename:focus { outline: none; }
+
+/* ---- the shield in the address bar, and what it says when you click it */
+.shield { flex: none; display: flex; align-items: center; gap: 3px; height: 24px; padding: 0 6px 0 5px; border: 0; border-radius: 7px;
+  background: var(--cued-wash); color: var(--cued-ink); cursor: pointer; font: 600 11.5px/1 inherit; }
+.shield:hover { background: var(--cued); color: #fff; }
+.shield svg { width: 13px; height: 13px; fill: currentColor; }
+.shield.quiet { background: transparent; color: var(--muted); }
+.shield.quiet:hover { background: var(--hover); color: var(--ink); }
+.shield.off { background: transparent; color: var(--muted); opacity: .5; }
+.shieldpop { position: absolute; top: 40px; right: 0; z-index: 40; width: 268px; padding: 16px; border-radius: 12px;
+  background: var(--raised); border: 1px solid var(--line); box-shadow: 0 14px 40px var(--shadow); display: flex; flex-direction: column; gap: 10px; }
+.shieldpop .sp-n { font: 600 30px/1 ui-serif, Georgia, serif; font-style: italic; color: var(--cued-ink); }
+.shieldpop .sp-what { font-size: 12.5px; color: var(--muted); margin-top: -6px; }
+.shieldpop .sp-row { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.shieldpop .sp-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+.shieldpop .btn { align-self: flex-start; }
+
+/* ---- a settings row with a sentence under its name (extensions) */
+.rowtall { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); }
+.rowtall:first-child { border-top: 0; }
+.rowtall .rowtext { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rowtall .rowbtns { display: flex; align-items: center; gap: 8px; flex: none; }
+.rowtall .btn { flex: none; }

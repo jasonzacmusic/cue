@@ -184,16 +184,26 @@ module.exports = async function run(c) {
   c.vault.save({ identity: 'personal', origin, username: TEST_USER, password: TEST_PASS, auto: false });
   const raw = fs.readFileSync(path.join(ud, 'passwords.json'), 'utf8');
   check('passwords: encrypted on disk', !raw.includes(TEST_PASS));
+  // Since 0.4.0 a password goes in only once you touch the box, so the test
+  // touches it the way you would. The hands-free case is covered in test/shield.js.
+  const clickPw = (t) => t.view.webContents.executeJavaScript(`(() => {
+    const pw = document.getElementById('pw');
+    pw.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); pw.focus(); return true;
+  })()`).catch(() => false);
   const lg = c.openTab({ url: `${base}/login`, identity: 'personal' }); await loaded(lg);
+  await sleep(500);
+  check('passwords: nothing goes in before you touch the box', (await lg.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
+  await clickPw(lg);
   const val = await until(() => lg.view.webContents.executeJavaScript('document.getElementById("pw").value'));
   check('passwords: fills the form', val === TEST_PASS && (await lg.view.webContents.executeJavaScript('document.getElementById("u").value')) === TEST_USER);
   const sc = c.openTab({ url: `${base}/login`, identity: 'school' }); await loaded(sc); await sleep(500);
+  await clickPw(sc);
   check('passwords: the other Spaces get it too', (await until(() => sc.view.webContents.executeJavaScript('document.getElementById("pw").value'))) === TEST_PASS);
   check('passwords: two-account sites stay separate', ['www.instagram.com', 'accounts.google.com', 'facebook.com'].every(require('../src/main/shared-logins').hasTwoAccounts) && !require('../src/main/shared-logins').hasTwoAccounts('team.nathanielschool.com'));
-  const vs = c.openTab({ url: `${base}/login`, identity: 'vanish' }); await loaded(vs); await sleep(500);
+  const vs = c.openTab({ url: `${base}/login`, identity: 'vanish' }); await loaded(vs); await clickPw(vs); await sleep(800);
   check('passwords: Vanish does not get it', (await vs.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
   c.vanish.closeTab(vs.id); await sleep(300);
-  const ag = c.openTab({ url: `${base}/login`, identity: 'personal', agent: true }); await loaded(ag); await sleep(500);
+  const ag = c.openTab({ url: `${base}/login`, identity: 'personal', agent: true }); await loaded(ag); await clickPw(ag); await sleep(800);
   check('passwords: AI agent tab does not get it', (await ag.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');
   c.closeTab(ag.id);
   c.vault.setAuto(c.vault.list()[0].id, true);

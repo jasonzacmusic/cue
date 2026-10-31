@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cue stopped this page</title>
+<link rel="stylesheet" href="pages.css">
+<style>
+  body { display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  .wrap { max-width: 540px; padding: 40px 28px; text-align: left; }
+  .mark { width: 46px; height: 46px; border-radius: 14px; background: var(--onair); display: grid; place-items: center; margin-bottom: 22px; }
+  .mark svg { width: 26px; height: 26px; fill: #fff; }
+  h1 { font: italic 500 29px/1.2 ui-serif, Georgia, serif; margin: 0 0 14px; letter-spacing: -0.01em; }
+  p { font-size: 15px; line-height: 1.55; margin: 0 0 14px; max-width: 46ch; }
+  .site { font: 500 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; padding: 10px 12px; border-radius: 10px; background: var(--field); border: 1px solid var(--line); margin: 0 0 20px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 26px; }
+  .quiet { font-size: 13px; color: var(--muted); margin-top: 26px; }
+  .anyway { background: none; border: 0; padding: 0; font: inherit; font-size: 13px; color: var(--onair-ink); text-decoration: underline; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2zm0 6 1 7h-2l1-7zm0 9.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5z"/></svg>
+    </div>
+    <h1 id="head">Cue stopped this page</h1>
+    <p id="why"></p>
+    <div class="site" id="site"></div>
+    <p id="advice"></p>
+    <div class="row">
+      <button class="btn primary" id="back">Go back</button>
+      <button class="btn" id="home">Close this tab</button>
+    </div>
+    <div class="quiet">
+      <span id="when"></span>
+      <button class="anyway" id="anyway">I know this site. Open it anyway.</button>
+    </div>
+  </div>
+<script src="danger.js"></script>
+</body>
+</html>

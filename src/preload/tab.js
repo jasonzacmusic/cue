@@ -287,11 +287,8 @@ if (window === window.top && /^https?:$/.test(location.protocol)) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
-  const tryFill = async () => {
-    if (filled || tried) return;
-    const pw = pwField();
-    if (!pw) return;
-    tried = true;
+  const fill = async (pw) => {
+    if (filled) return;
     const c = await ipcRenderer.invoke('cue:cred-get');
     if (!c) return;
     filled = true;
@@ -303,6 +300,31 @@ if (window === window.top && /^https?:$/.test(location.protocol)) {
       const btn = (form || document).querySelector('button[type=submit],input[type=submit],button:not([type])');
       setTimeout(() => { if (btn) btn.click(); else if (form) form.requestSubmit(); }, 250);
     }
+  };
+  // A saved password is typed into the box only after you touch it. A page that
+  // loads a hidden login form - which is how passwords get read off a browser
+  // that fills them unasked - gets nothing. The school's own sites are the
+  // exception: those fill themselves, because signing in to them twenty times
+  // a day is the job, not a risk.
+  const tryFill = async () => {
+    if (filled || tried) return;
+    const pw = pwField();
+    if (!pw) return;
+    tried = true;
+    const ready = await ipcRenderer.invoke('cue:cred-ready');
+    if (!ready) return;
+    if (ready.handsFree) { fill(pw); return; }
+    const wake = (e) => {
+      const box = e.target;
+      if (!box || box.tagName !== 'INPUT') return;
+      const now = pwField();
+      if (!now || (box !== now && box !== userField(now))) return;
+      document.removeEventListener('pointerdown', wake, true);
+      document.removeEventListener('focusin', wake, true);
+      fill(now);
+    };
+    document.addEventListener('pointerdown', wake, true);
+    document.addEventListener('focusin', wake, true);
   };
   const offer = () => {
     const pw = pwField();
