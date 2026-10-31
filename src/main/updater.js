@@ -75,16 +75,41 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
   let state = { state: 'idle', version: app.getVersion(), latest: null, notes: '', percent: 0, error: '' };
   let timer = null;
   let staged = null; // the unpacked .app waiting to be swapped in
+  let refreshing = false;
 
   const push = (patch) => { state = { ...state, ...patch }; onState(state); };
 
+  const dropCopy = (copy) => { if (copy) { try { fs.rmSync(path.dirname(copy), { recursive: true, force: true }); } catch {} } };
+
+  // A copy that is waiting does not stop Cue asking. Left open for days, Cue could
+  // otherwise sit on whatever it fetched first and put that in place at quit, even
+  // though something newer had come out since. The waiting copy stays in place until
+  // the newer one has passed every check, so a failed fetch costs nothing.
+  async function refreshWaiting(body) {
+    if (refreshing || !autoOn() || !newer(body.version, state.latest)) return;
+    refreshing = true;
+    try {
+      const copy = await fetchCopy(body, state.latest);
+      const old = staged;
+      if (!old) { dropCopy(copy.dest); return; } // swapped in while this was fetching
+      staged = copy.dest;
+      dropCopy(old);
+      push({ latest: copy.version, notes: String(body.notes || ''), feed: body });
+    } catch (e) {
+      log && log({ tool: 'update', error: e.message });
+    } finally { refreshing = false; }
+  }
+
   async function check({ quiet = true } = {}) {
-    if (state.state === 'downloading' || state.state === 'ready') return state;
-    push({ state: 'checking', error: '' });
+    if (state.state === 'downloading') return state;
+    const waiting = state.state === 'ready';
+    if (!waiting) push({ state: 'checking', error: '' });
     try {
       const body = JSON.parse(String(await get(`${FEED_URL}?t=${Date.now()}`)));
       if (!body.version || !body.url) throw new Error('the update file is incomplete');
-      if (newer(body.version, app.getVersion())) {
+      if (waiting) {
+        await refreshWaiting(body);
+      } else if (newer(body.version, app.getVersion())) {
         push({ state: 'available', latest: body.version, notes: String(body.notes || ''), feed: body });
         // Fetch it now, in the background, so that by the time you close Cue
         // there is nothing left to wait for.
@@ -94,25 +119,22 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
       }
     } catch (e) {
       log && log({ tool: 'update', error: e.message });
-      push({ state: quiet ? 'idle' : 'error', error: e.message });
+      if (!waiting) push({ state: quiet ? 'idle' : 'error', error: e.message });
     }
     return state;
   }
 
   // Download, check the file really is the one the feed describes, and unpack it
-  // beside the old app. Nothing is swapped until you ask for it.
-  async function download() {
-    if (state.state !== 'available' || !state.feed) return state;
-    const feed = state.feed;
+  // beside the old app. It must be newer than `than`. Nothing is swapped here.
+  async function fetchCopy(feed, than, progress = () => {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cue-update-'));
     const dmg = path.join(dir, 'Cue.dmg');
-    push({ state: 'downloading', percent: 0 });
     try {
       const bytes = await get(feed.url);
       fs.writeFileSync(dmg, bytes);
       const got = crypto.createHash('sha256').update(bytes).digest('hex');
       if (got !== feed.sha256) throw new Error('the download did not match its checksum, so it was thrown away');
-      push({ percent: 60 });
+      progress(60);
       const out = await run('/usr/bin/hdiutil', ['attach', '-nobrowse', '-readonly', dmg]);
       const vol = (out.match(/\/Volumes\/[^\n]*/) || [])[0];
       if (!vol) throw new Error('the disk image would not open');
@@ -128,15 +150,26 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
           throw new Error('the downloaded copy is not signed properly, so it was thrown away');
         });
         const inside = versionAt(dest); // what the app itself says, not what the update file claimed
-        if (!inside || !newer(inside, app.getVersion())) throw new Error('the download is not newer than this Cue, so it was thrown away');
-        push({ latest: inside });
-        staged = dest;
+        if (!inside || !newer(inside, than)) throw new Error('the download is not newer than this Cue, so it was thrown away');
+        fs.rmSync(dmg, { force: true });
+        return { dest, version: inside };
       } finally {
         await run('/usr/bin/hdiutil', ['detach', vol.trim()]).catch(() => {});
       }
-      push({ state: 'ready', percent: 100 });
     } catch (e) {
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      throw e;
+    }
+  }
+
+  async function download() {
+    if (state.state !== 'available' || !state.feed) return state;
+    push({ state: 'downloading', percent: 0 });
+    try {
+      const copy = await fetchCopy(state.feed, app.getVersion(), (percent) => push({ percent }));
+      staged = copy.dest;
+      push({ state: 'ready', latest: copy.version, percent: 100 });
+    } catch (e) {
       staged = null;
       log && log({ tool: 'update', error: e.message });
       push({ state: 'error', error: e.message, percent: 0 });
@@ -195,7 +228,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
     const live = path.join(APPS, 'Cue.app');
     const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
     if (!fs.existsSync(live)) return false;            // running from somewhere else; leave it alone
-    if (wouldDowngrade(live) || !stillOurs()) { staged = null; return false; }
+    if (wouldDowngrade(live) || !stillOurs()) { dropCopy(staged); staged = null; return false; }
     try {
       fs.renameSync(live, keep);                        // recoverable, never deleted
     } catch (e) { log && log({ tool: 'update', error: `step aside: ${e.message}` }); return false; }
@@ -206,6 +239,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
       log && log({ tool: 'update', error: `put in place: ${e.message}` });
       return false;
     }
+    dropCopy(staged);
     staged = null;
     return true;
   }

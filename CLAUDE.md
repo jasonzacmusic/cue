@@ -39,6 +39,7 @@ CUE_QUIET=1 CUE_TEST=features CUE_USER_DATA=/tmp/cue-a CUE_OUT=/tmp/cue-a-out np
 CUE_TEST=restart CUE_PHASE=1 CUE_USER_DATA=/tmp/cue-r npx electron . && CUE_TEST=restart CUE_PHASE=2 CUE_USER_DATA=/tmp/cue-r npx electron .   # split views survive a restart
 CUE_TEST=1 CUE_USER_DATA=/tmp/cue-b CUE_OUT=/tmp/cue-b-out npx electron .          # real NSM sites, split views, on air
 node test/importer-test.js                                                          # move-in, with fake browser data
+CUE_OLDER_DMG=<a signed older Cue.dmg> node test/update.js                           # updating itself, on the notarized build
 ```
 `CUE_QUIET=1` keeps tests silent and independent of whatever headphones are connected: a sleeping pair of AirPods stalls every video.
 The screen must be awake and unlocked, or picture and click checks fail.

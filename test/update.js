@@ -15,6 +15,8 @@
 //      Trash, recoverable.
 //   5. It will NOT put an older Cue over a newer one. Three machines ship this
 //      app now, so the copy in Applications can get newer while Cue is open.
+//   6. A copy already waiting is replaced when a newer one comes out, and is kept
+//      if that newer one fails. Needs a signed older release: CUE_OLDER_DMG=<path>.
 //
 // Every check prints PASS or FAIL. There is no deliberate failure in here: a
 // failing line means something is genuinely wrong with updating.
@@ -71,7 +73,7 @@ require.cache[electronPath] = {
 const { createUpdater, newer, versionAt } = require(path.join(ROOT, 'src', 'main', 'updater.js'));
 
 // ---------------------------------------------------------------- the local feed
-function serve(dmgPath, feed) {
+function serve(dmgFor, feed) {
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
       const url = req.url.split('?')[0];
@@ -81,7 +83,7 @@ function serve(dmgPath, feed) {
         return;
       }
       if (url === '/Cue.dmg') {
-        const body = fs.readFileSync(dmgPath);
+        const body = fs.readFileSync(dmgFor());
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': body.length });
         res.end(body);
         return;
@@ -137,10 +139,15 @@ function fakeApp(dir, version) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cue-update-test-'));
   const apps = path.join(work, 'Applications');
   fs.mkdirSync(apps, { recursive: true });
+  // The real Trash can't be listed without Full Disk Access, and a test shouldn't fill it.
+  const trash = path.join(work, '.Trash');
+  fs.mkdirSync(trash);
+  os.homedir = () => work;
 
   let feedVersion = '99.0.0';
   let feedSha = sha;
-  const srv = await serve(DMG, () => ({
+  let served = DMG;
+  const srv = await serve(() => served, () => ({
     app: 'Cue', version: feedVersion, date: '2026-10-31', notes: 'test',
     sha256: feedSha, size: bytes.length, url: `http://127.0.0.1:${srv.address().port}/Cue.dmg`,
   }));
@@ -194,7 +201,7 @@ function fakeApp(dir, version) {
   const after = versionAt(path.join(apps, 'Cue.app'));
   check('at quit the new version is put in place', swapped === true && after === dmgVersion, { returned: swapped, nowInstalled: after, expected: dmgVersion });
   check('the replaced copy is kept in the Trash, not deleted',
-    fs.readdirSync(path.join(os.homedir(), '.Trash')).some((n) => /^Cue-0\.0\.1-test-replaced-/.test(n)));
+    fs.readdirSync(trash).some((n) => /^Cue-0\.0\.1-test-replaced-/.test(n)));
 
   // ------------------------------------------- 2b. a wrong checksum is thrown away
   feedVersion = '99.0.1';
@@ -204,6 +211,37 @@ function fakeApp(dir, version) {
   st = await ready(bad);
   check('a download that does not match its checksum is thrown away', st.state === 'error' && /checksum/.test(st.error || ''), { state: st.state, error: st.error });
   check('and nothing is put in place after a bad download', bad.installOnQuit() === false);
+
+  // ----------------------------------- 6. a waiting copy does not get stuck on old
+  const older = process.env.CUE_OLDER_DMG;
+  if (older && fs.existsSync(older)) {
+    const shaOf = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+    served = older; feedSha = shaOf(older); feedVersion = '99.0.2';
+    const long = make();
+    await long.check({ quiet: false });
+    st = await ready(long);
+    const first = st.latest;
+    check('an older release is fetched and left waiting', st.state === 'ready' && newer(dmgVersion, first), { state: st.state, waiting: first, error: st.error });
+
+    feedSha = 'deadbeef'.repeat(8); feedVersion = '99.0.3';
+    await long.check();
+    check('a newer one that fails its checks costs nothing: the waiting copy stays', long.state().state === 'ready' && long.state().latest === first, long.state().latest);
+
+    served = DMG; feedSha = sha; feedVersion = '99.0.4';
+    await long.check();
+    st = long.state();
+    check('a newer release replaces the waiting copy', st.state === 'ready' && st.latest === dmgVersion, { state: st.state, latest: st.latest });
+
+    await long.check();
+    check('asking again with nothing newer changes nothing', long.state().state === 'ready' && long.state().latest === dmgVersion, long.state().latest);
+
+    fs.rmSync(path.join(apps, 'Cue.app'), { recursive: true, force: true });
+    fakeApp(path.join(apps, 'Cue.app'), first);
+    const landed = long.installOnQuit();
+    check('at quit the newest version lands, not the first one fetched', landed === true && versionAt(path.join(apps, 'Cue.app')) === dmgVersion, versionAt(path.join(apps, 'Cue.app')));
+  } else {
+    console.log('[cue-update] SKIP a waiting copy being replaced: no CUE_OLDER_DMG given');
+  }
 
   srv.close();
   fs.rmSync(work, { recursive: true, force: true });
