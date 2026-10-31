@@ -1,5 +1,6 @@
 // Cue — the browser for people who make things.
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
+if (process.env.CUE_TEST) require('../../test/hidden-windows');
 const {
   app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents,
 } = require('electron');

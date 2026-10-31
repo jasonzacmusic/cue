@@ -29,7 +29,10 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 - `src/preload/tab.js`: runs in every page (volume, music tools, logins, held notifications).
 - `src/ui/`: sidebar and toolbar. `src/ui/pages/`: Boards, Library, Bills, Thumbnail check (`cue://` pages).
 
-## Testing: always do this before saying something works
+## Testing
+Tests never take over Jason's screen: every `CUE_TEST` run is hidden (`test/hidden-windows.js`: no Dock icon, no focus, invisible windows, full screen acted out).
+For a small fix, run only the check for that change. Run the full suite once, just before a release. Never rerun after a failure until the cause is fixed.
+Real macOS full screen can't run hidden: check it by hand on the installed app when he's away, or on the Mac mini.
 ```bash
 npm ci
 CUE_QUIET=1 CUE_TEST=features CUE_USER_DATA=/tmp/cue-a CUE_OUT=/tmp/cue-a-out npx electron .   # every feature, real app

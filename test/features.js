@@ -137,6 +137,14 @@ module.exports = async function run(c) {
   check('vanish: tabs are wide enough to read', wide > 150, wide);
   check('vanish: the X closes just that tab', c.vanish.tabs.length === 2 && names.length === 2, names);
   fs.writeFileSync(path.join(OUT, 'vanish-strip.png'), (await c.vanish.ui().webContents.capturePage()).toPNG());
+  const vPlay = c.openTab({ url: `${base}/note?full`, identity: 'vanish' }); await loaded(vPlay); await sleep(300);
+  vPlay.view.webContents.focus();
+  await vPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1800);
+  const vb1 = vPlay.view.getBounds(); const [vfw, vfh] = vw.getContentSize();
+  check('vanish: a video fills the whole screen', c.vanish.isFull() && vw.isFullScreen() && vb1.y === 0 && vb1.height === vfh && vb1.width === vfw, [vb1, vfw, vfh]);
+  vPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
+  check('vanish: leaving full screen brings the tabs back', !c.vanish.isFull() && !vw.isFullScreen() && vPlay.view.getBounds().y > 0);
+  c.vanish.closeTab(vPlay.id); await sleep(300);
   c.vanish.closeTab(v2.id); await sleep(300);
   const pSes = c.sessionFor('personal'); const sSes = c.sessionFor('school');
   await pSes.cookies.set({ url: 'https://portal.example.com/', name: 'shared', value: 'one', expirationDate: Date.now() / 1000 + 9999 });
@@ -149,6 +157,14 @@ module.exports = async function run(c) {
   await pSes.cookies.remove('https://later.example.com/', 'later'); await sleep(300);
   await sSes.cookies.set({ url: 'https://portal2.example.com/', name: 'p2', value: 'one', expirationDate: Date.now() / 1000 + 9999 }); await sleep(300);
   check('logins: the AI agent gets none of them', (await c.sessionFor('agent').cookies.get({ name: 'p2' })).length === 0);
+  const nPlay = c.openTab({ url: `${base}/note?nfull`, identity: 'personal' }); await loaded(nPlay); await sleep(300);
+  nPlay.view.webContents.focus();
+  await nPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1800);
+  const nb = nPlay.view.getBounds(); const [nw, nh] = c.win().getContentSize();
+  check('full screen: a normal tab fills the screen', c.win().isFullScreen() && nb.x === 0 && nb.y === 0 && nb.width === nw && nb.height === nh, [nb, nw, nh]);
+  nPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
+  check('full screen: leaving restores the window', !c.win().isFullScreen() && nPlay.view.getBounds().x > 0, nPlay.view.getBounds());
+  c.closeTab(nPlay.id); await sleep(200);
   const { whereToOpen } = require('../src/main/signin');
   const FRONT = 'https://workspace.google.com/intl/en-US/gmail/';
   const CHOOSER = 'https://accounts.google.com/AccountChooser/signinchooser?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F&flowName=GlifWebSignIn';
@@ -401,7 +417,8 @@ module.exports = async function run(c) {
     const t0 = await ytTime(); await sleep(1500); const t1 = await ytTime();
     check('YouTube: lesson plays', t1 > t0, { t0, t1 });
     c.setVolume(ch, 0.4); await sleep(300);
-    const eff = await yw.executeJavaScript('window.__cue ? window.__cue.effective() : null', true).catch(() => null);
+    // A blank frame still has the browser's own volume reading, which pages in Cue never see.
+    const eff = await yw.executeJavaScript(`(()=>{const f=document.createElement('iframe');document.documentElement.append(f);const get=Object.getOwnPropertyDescriptor(f.contentWindow.HTMLMediaElement.prototype,'volume').get;const r=[...document.querySelectorAll('video')].map((v)=>get.call(v));f.remove();return r})()`, true).catch(() => null);
     const pv = await yw.executeJavaScript(`document.querySelector('video').volume`, true);
     check('YouTube: per-tab volume scales it', eff && Math.abs(eff[0] - pv * 0.4) < 0.01, { eff, pv });
     c.setVolume(ch, 1);

@@ -7,7 +7,7 @@ const { whereToOpen } = require('./signin');
 const BAR = 86; // tab strip + address bar
 
 function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, onClosed }) {
-  let win = null; let ui = null; let activeId = null; let nextId = -1;
+  let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
   const tabs = [];
   const byId = (id) => tabs.find((t) => t.id === id);
 
@@ -25,7 +25,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const [w, h] = win.getContentSize();
     ui.setBounds({ x: 0, y: 0, width: w, height: h });
     for (const t of tabs) {
-      t.view.setBounds({ x: 0, y: BAR, width: w, height: Math.max(0, h - BAR) });
+      t.view.setBounds(full ? { x: 0, y: 0, width: w, height: h } : { x: 0, y: BAR, width: w, height: Math.max(0, h - BAR) });
       t.view.setVisible(t.id === activeId);
     }
   }
@@ -81,6 +81,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     wc.on('did-navigate', () => { t.favicon = null; sync(); }); wc.on('did-navigate-in-page', sync);
     wc.on('did-start-loading', () => { t.loading = true; state(); });
     wc.on('did-stop-loading', () => { t.loading = false; sync(); });
+    wc.on('enter-html-full-screen', () => { full = true; win.setFullScreen(true); layout(); });
+    wc.on('leave-html-full-screen', () => { full = false; win.setFullScreen(false); layout(); });
     wc.on('render-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') setTimeout(() => { if (!wc.isDestroyed()) wc.reload(); }, 500); });
     wc.on('before-input-event', keys);
     wc.on('context-menu', (_e, p) => {
@@ -110,6 +112,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   function closeTab(id) {
     const t = byId(id); if (!t) return;
     const i = tabs.indexOf(t);
+    if (full && id === activeId) { full = false; win.setFullScreen(false); }
     tabs.splice(i, 1);
     try { win.contentView.removeChildView(t.view); t.view.webContents.close(); } catch {}
     if (!tabs.length) { win.close(); return; }
@@ -131,8 +134,14 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     ui.webContents.on('did-finish-load', () => { state(); const a = byId(activeId); if (a && a.url === startFile) focusBar(); });
     ui.webContents.on('before-input-event', keys);
     win.on('resize', layout);
+    win.on('leave-full-screen', () => { // the green button or a Mac gesture left full screen
+      if (!full) return;
+      full = false; layout();
+      const a = byId(activeId);
+      if (a) a.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+    });
     win.on('closed', () => {
-      win = null; ui = null; activeId = null;
+      win = null; ui = null; activeId = null; full = false;
       tabs.splice(0).forEach((t) => { try { t.view.webContents.close(); } catch {} });
       wipe();
       if (onClosed) onClosed();
@@ -169,7 +178,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'move') move(a.id, a.to);
   }
 
-  return { add, closeTab, command, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };
