@@ -81,6 +81,11 @@ Helium installed and report the numbers.
   generations of the same session, which is what made Google answer "we've detected a problem with
   your cookie settings". It also takes the Chrome profile that actually holds cookies for that
   site; the first profile and the email on the identity are both wrong on this Mac.
+- Never open `accounts.google.com/Logout` in a jar that was carried from Chrome. The carried
+  cookies ARE Chrome's session, so signing out there revokes it everywhere it was copied - it
+  signed Chrome itself out of both Google accounts on 31-Oct-2026, and only a fresh sign-in with
+  the password brings it back. To put a different Google account in an identity, sign in to that
+  account; never sign the carried one out.
 - WhatsApp Web keeps its link in IndexedDB, not cookies, so it cannot be carried from any browser.
   Each identity has to scan the code once with the phone; after that it stays. That is also how
   Personal and School end up as two separate WhatsApps.
