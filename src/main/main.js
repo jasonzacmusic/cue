@@ -53,7 +53,11 @@ const AGENT_PORT = 8813;
 const AI_MIN = 320; const AI_MAX = 720; const AI_GRIP = 8;
 const AI_HEAD = 38;
 const STRIP = 44;
-const SPACES = ['Teach', 'Create', 'Business', 'Build'];
+// The four Spaces ship with these names and you can call them anything you
+// like. Renaming one has to carry every tab, login and layout filed under the
+// old name with it, which is why it happens in one place.
+const SPACES_DEFAULT = ['Teach', 'Create', 'Business', 'Build'];
+const spaces = () => (store && Array.isArray(store.data.spaces) && store.data.spaces.length === 4 ? store.data.spaces : SPACES_DEFAULT);
 const KITS = {
   teacher: { name: 'Teacher', what: 'On air, OBS and Safe-share' },
   music: { name: 'Music', what: 'Loop, transpose and speed for any video' },
@@ -335,7 +339,7 @@ function makeTab(opts) {
     identity: IDENTITIES[opts.identity] ? opts.identity : (settings().spaceLogins[opts.space || store.data.space] || settings().defaultIdentity),
     pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
-    order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: SPACES.includes(opts.space) ? opts.space : store.data.space,
+    order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: spaces().includes(opts.space) ? opts.space : store.data.space,
     view: null, host: 'main', popout: null, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
     badge: 0, marks: [], log: [],
   };
@@ -730,7 +734,7 @@ function spaceOrder() { return sidebarOrder().filter((t) => t.space === store.da
 // ---------------------------------------------------------------- spaces
 // Each Space keeps its own tabs, its own usual login and its own split layout.
 function enterSpace(name) {
-  if (!SPACES.includes(name) || name === store.data.space) return;
+  if (!spaces().includes(name) || name === store.data.space) return;
   store.data.spaceSplit[store.data.space] = store.data.split;
   store.data.space = name;
   const saved = store.data.spaceSplit[name] || { mode: 'single', ids: [] };
@@ -915,7 +919,7 @@ function tabMenu(t) {
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     { label: 'Open as…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
-    { label: 'Move to Space', submenu: SPACES.map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
+    { label: 'Move to Space', submenu: spaces().map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
     { label: 'Private: never goes on air', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
@@ -987,7 +991,7 @@ function sendState() {
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
-    space: store.data.space, spaces: SPACES, kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
+    space: store.data.space, spaces: spaces(), kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
     ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
     activeId, programId, live, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
     split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
@@ -1137,6 +1141,25 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'clear-cache': clearCaches(); break;
     // Some sites genuinely break when their ads are blocked. This lets that one
     // site through and leaves every other site alone.
+    // Renaming a Space moves everything filed under the old name across with
+    // it - the tabs, which login it opens, the layout it was left in - so the
+    // only thing that changes is the word.
+    case 'space-rename': {
+      const list = [...spaces()];
+      const i = list.indexOf(a.from);
+      const to = String(a.name || '').trim().slice(0, 18);
+      if (i < 0 || !to || list.includes(to)) break;
+      list[i] = to;
+      store.data.spaces = list;
+      for (const x of tabs) if (x.space === a.from) x.space = to;
+      for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, settings().spaceLogins, store.data.collapsed]) {
+        if (box && Object.prototype.hasOwnProperty.call(box, a.from)) { box[to] = box[a.from]; delete box[a.from]; }
+      }
+      if (store.data.space === a.from) store.data.space = to;
+      buildMenu(); store.save(); persist(); pushState();
+      sendEvent('toast', `That Space is called ${to} now.`);
+      break;
+    }
     case 'ads-here': {
       if (!shield || !t) break;
       const host = shield.hostOf(t.url);
@@ -1914,7 +1937,7 @@ function buildMenu() {
     { label: 'Tools', submenu: toolMenu(cmd) },
     {
       label: 'Tab', submenu: [
-        ...SPACES.map((n, i) => ({ label: `Space: ${n}`, accelerator: `${MAC ? 'Ctrl' : 'Alt'}+${i + 1}`, click: () => switchSpace(n) })),
+        ...spaces().map((n, i) => ({ label: `Space: ${n}`, accelerator: `${MAC ? 'Ctrl' : 'Alt'}+${i + 1}`, click: () => switchSpace(n) })),
         { type: 'separator' },
         { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: () => cycle(1) },
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
@@ -2023,7 +2046,15 @@ function createMain() {
   uiView.setBackgroundColor('#00000000');
   mainWin.contentView.addChildView(uiView);
   uiView.webContents.loadFile(UI_HTML);
-  uiView.webContents.on('did-finish-load', () => { sendState(); if (process.env.CUE_SMOKE) { console.log('CUE_SMOKE_OK'); app.quit(); } });
+  uiView.webContents.on('did-finish-load', () => {
+    sendState();
+    // You were never asked and never waited, so this is the only time the
+    // update is mentioned at all: once, after it has already happened.
+    const was = store.data.lastVersion;
+    if (was && was !== app.getVersion()) sendEvent('toast', `Cue updated itself to ${app.getVersion()}.`);
+    store.data.lastVersion = app.getVersion(); store.save();
+    if (process.env.CUE_SMOKE) { console.log('CUE_SMOKE_OK'); app.quit(); }
+  });
   mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
@@ -2062,7 +2093,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 30,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, adsAllowed: [] }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [] }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -2105,9 +2136,17 @@ app.whenReady().then(async () => {
       if (tabs.some((t) => t.holdAwake)) return 'A page is using your camera or microphone. The update will wait.';
       return '';
     },
+    auto: () => settings().autoUpdate,
     log: logAgent,
   });
   updater.start();
+  // The new version goes in as Cue closes, when there is no window to disturb
+  // and nothing to lose. Open Cue again and it is simply the new one.
+  app.on('will-quit', () => {
+    if (!updater || !updater.ready()) return;
+    const v = updater.state().latest;
+    if (updater.installOnQuit()) logAgent({ tool: 'update', note: `installed ${v} on quit` });
+  });
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick

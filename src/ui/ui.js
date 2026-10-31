@@ -44,7 +44,10 @@ function tip(node, text, sub) {
   node.removeAttribute('title');
   node.dataset.tip = text || '';
   if (sub) node.dataset.tipsub = sub; else delete node.dataset.tipsub;
-  if (!node.getAttribute('aria-label')) node.setAttribute('aria-label', text || '');
+  // The label is the tooltip, so it has to follow it. Leaving the first one in
+  // place made the shield announce "nothing to block" over a page where it had
+  // just stopped fifteen things.
+  if (text) node.setAttribute('aria-label', text);
   return node;
 }
 function showTip(node) {
@@ -137,6 +140,38 @@ function favEl(t) {
 let lastSpace = null;
 const inSpace = (t) => t.space === S.space;
 
+// Typing a name into the sidebar is the one thing in this window that must not
+// be interrupted. The sidebar is rebuilt from scratch on every state push - a
+// page loading, a tab waking, an ad being blocked - and that was quietly
+// throwing away whatever had been typed. While a name is being edited, the
+// parts that would destroy the box are left alone.
+let editingName = 0;
+function inlineEdit({ hide, value, place, save, cls = 'rename', max = 60 }) {
+  hideTip();
+  const inp = el('input', cls);
+  inp.value = value; inp.maxLength = max;
+  let done = false;
+  const finish = (keep) => {
+    if (done) return;
+    done = true; editingName = Math.max(0, editingName - 1);
+    inp.remove(); hide.hidden = false;
+    if (keep) save(inp.value.trim());
+    render();
+  };
+  inp.onclick = (ev) => ev.stopPropagation();
+  inp.ondblclick = (ev) => ev.stopPropagation();
+  inp.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === 'Enter') finish(true);
+    if (ev.key === 'Escape') finish(false);
+  };
+  inp.onblur = () => finish(true);
+  editingName += 1;
+  hide.hidden = true;
+  place(inp);
+  inp.focus(); inp.select();
+}
+
 function render() {
   if (!S) return;
   document.body.dataset.live = S.live ? '1' : '';
@@ -146,11 +181,8 @@ function render() {
     if (lastSpace !== null) { newIdentity = S.settings.spaceLogins[S.space] || newIdentity; }
     lastSpace = S.space;
   }
-  renderSpaces();
+  if (!editingName) { renderSpaces(); renderIdPick(); renderPins(); renderGroups(); }
   renderUpdate();
-  renderIdPick();
-  renderPins();
-  renderGroups();
   renderBar();
   renderContent();
   renderGutters();
@@ -226,12 +258,15 @@ function renderIdPick() {
     };
     box.append(b);
   }
-  // A row of initials means nothing on its own. Say whose account new tabs open in.
+  // A row of initials means nothing on its own, and naming the one that is
+  // picked is not much better: it reads like a label for the whole row. Saying
+  // what the row decides is the only version anybody understands at a glance.
   const who = S.identities[newIdentity];
   const cap = el('span', 'idwho');
+  cap.append(el('i', '', 'New tabs:'));
   cap.append(el('b', '', esc(who ? who.name : '')));
   if (S.labels[newIdentity]) cap.append(el('span', '', esc(S.labels[newIdentity])));
-  tip(cap, `New tabs open as ${who ? who.name : ''}`, 'Each account keeps its own sign-ins — one Google in each.');
+  tip(cap, `New tabs open as ${who ? who.name : ''}`, 'Each account keeps its own sign-ins — one Google signed in to each, side by side.');
   box.append(cap);
 }
 
@@ -247,19 +282,32 @@ function renderSpaces() {
     const b = el('button', here ? 'on' : '', '');
     b.append(el('span', 'nm', esc(n)));
     if (count) b.append(el('span', 'ct', String(count)));
-    b.title = `${n} (⌃${i + 1}) · ${count} tab${count === 1 ? '' : 's'}`;
+    tip(b, `${n} · ${count} tab${count === 1 ? '' : 's'}`, `⌃${i + 1} · double-click to rename`);
     b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', here);
     b.onclick = () => send('space', { name: n });
+    // Call them what you actually do. Double-click, type, Enter.
+    b.ondblclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const nm = b.querySelector('.nm');
+      inlineEdit({
+        hide: nm, value: n, cls: 'spacename', max: 18,
+        place: (inp) => b.prepend(inp),
+        save: (to) => { if (to && to !== n) send('space-rename', { from: n, name: to }); },
+      });
+    };
     (here ? box : rest).append(b);
   });
   box.append(rest);
 }
 
 function renderUpdate() {
-  // Quiet by design: a line, not a dialog. Cue never installs or restarts by
-  // itself, so this only ever waits for you to click it.
+  // With updating left to itself there is nothing to show: the new version is
+  // fetched in the background and goes in when you close Cue. Only a failure
+  // is worth a line. Switch it off and the old bar comes back, where nothing
+  // happens until you click it.
   const u = S.update; const bar = $('#updatebar');
   if (!u || u.state === 'idle' || u.state === 'checking') { bar.hidden = true; return; }
+  if (S.settings.autoUpdate !== false && u.state !== 'error') { bar.hidden = true; return; }
   bar.hidden = false; bar.innerHTML = '';
   const say = el('span', 'u-say', '');
   const act = el('div', 'u-act', '');
@@ -366,18 +414,12 @@ function tabRow(t, splitIds) {
   const title = el('span', 'title', esc(shortName(t)));
   tip(title, t.title || shortName(t), t.name ? 'Your name for this tab · double-click to change it' : 'Double-click to rename');
   title.ondblclick = (e) => {
-    e.stopPropagation(); hideTip();
-    const inp = el('input', 'rename');
-    inp.value = t.name || shortName(t);
-    inp.onclick = (ev) => ev.stopPropagation();
-    inp.ondblclick = (ev) => ev.stopPropagation();
-    inp.onkeydown = (ev) => {
-      ev.stopPropagation();
-      if (ev.key === 'Enter') { send('rename', { id: t.id, name: inp.value }); inp.blur(); }
-      if (ev.key === 'Escape') { inp.dataset.cancel = '1'; inp.blur(); }
-    };
-    inp.onblur = () => { inp.remove(); title.hidden = false; };
-    title.hidden = true; title.after(inp); inp.focus(); inp.select();
+    e.stopPropagation();
+    inlineEdit({
+      hide: title, value: t.name || shortName(t),
+      place: (inp) => title.after(inp),
+      save: (name) => send('rename', { id: t.id, name }),
+    });
   };
   row.append(title);
 
@@ -476,7 +518,7 @@ function renderShield(a) {
   const on = S.settings.blockAds !== false;
   const show = !!(a && a.url && /^https?:/.test(a.url));
   btn.hidden = !show;
-  if (!show) { $('#shieldpop').hidden = true; return; }
+  if (!show) { closeShieldPop(); return; }
   const n = a.blocked || 0;
   btn.classList.toggle('quiet', !n);
   btn.classList.toggle('off', !on || a.adsOk);
@@ -486,9 +528,16 @@ function renderShield(a) {
     'Click for this site');
 }
 
+function closeShieldPop() {
+  const pop = $('#shieldpop');
+  if (pop.hidden) return;
+  pop.hidden = true;
+  overlay(false);   // the page is a view of its own, stacked over this one
+}
+
 function openShieldPop() {
   const pop = $('#shieldpop');
-  if (!pop.hidden) { pop.hidden = true; return; }
+  if (!pop.hidden) { closeShieldPop(); return; }
   const a = S.tabs.find((t) => t.id === S.activeId);
   if (!a || !a.url) return;
   const site = hostOf(a.url);
@@ -498,14 +547,15 @@ function openShieldPop() {
   pop.append(el('div', 'sp-what', on && !a.adsOk ? `ads and trackers blocked on this page` : a.adsOk ? `ads are allowed on ${site}` : 'the shield is off'));
   const row = el('label', 'sp-row');
   const box = el('input'); box.type = 'checkbox'; box.checked = !a.adsOk;
-  box.onchange = () => { send('ads-here', { block: box.checked, id: a.id }); pop.hidden = true; };
+  box.onchange = () => { send('ads-here', { block: box.checked, id: a.id }); closeShieldPop(); };
   row.append(box, el('span', '', `Block ads on ${site}`));
   pop.append(row);
   pop.append(el('div', 'note', 'Switch this off if the site breaks. Every other site stays protected.'));
   const more = el('button', 'btn small', 'Shield settings');
-  more.onclick = () => { pop.hidden = true; openSettings(); };
+  more.onclick = () => { closeShieldPop(); openSettings(); };
   pop.append(more);
   pop.hidden = false;
+  overlay(true);
 }
 
 function renderContent() {
@@ -882,7 +932,7 @@ $('#reload').onclick = () => send('reload');
 $('#shield').onclick = (e) => { e.stopPropagation(); hideTip(); openShieldPop(); };
 document.addEventListener('click', (e) => {
   const pop = $('#shieldpop');
-  if (!pop.hidden && !pop.contains(e.target) && e.target.closest('#shield') === null) pop.hidden = true;
+  if (!pop.hidden && !pop.contains(e.target) && e.target.closest('#shield') === null) closeShieldPop();
 });
 document.querySelectorAll('[data-split]').forEach((b) => { b.onclick = () => send('split', { mode: b.dataset.split }); });
 $('#syncscroll').onclick = () => send('setting', { key: 'syncScroll', value: !S.settings.syncScroll });
@@ -938,8 +988,12 @@ function openSettings() {
       shieldLine.textContent = `${st.listsMB} MB of ad and tracker rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
     });
     showShield();
+    sh.append(el('h3', '', 'Updates'));
+    sh.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
+    sh.append(el('h3', '', 'Spaces'));
+    sh.append(el('div', 'note', 'Double-click a Space in the sidebar to call it whatever you like. Its tabs, its layout and the login it opens with all come across with the name.'));
     sh.append(el('h3', '', 'Logins'));
-    sh.append(el('div', 'note', 'Each login keeps its own Google, Instagram and other sign-ins, so two Gmails stay signed in side by side. Name the account each one holds; AI agents read these names and use the right login without asking you.'));
+    sh.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram and other sign-ins, so two Gmails stay signed in side by side and never see each other. The P / S / A row above the tabs chooses which one a NEW tab opens in; a tab keeps the one it was born with, and you can move it with a right-click. Name the account each one holds; AI agents read these names and use the right login without asking you.'));
     sh.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
     sh.append(settingRow('School account', text('label.school', S.labels.school, 'music@nathanielschool.com')));
     const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
