@@ -1,5 +1,6 @@
 // The AI port: a local, token-protected door that lets Claude Code, Codex and other AI tools
-// drive Cue. Agents read any normal tab, but may only click, type or run scripts in tabs they
+// drive Cue. The door starts shut at every launch and is opened by hand, for one run of Cue:
+// the token file can be read by anything running as you, so the token is not the permission. Agents read any normal tab, but may only click, type or run scripts in tabs they
 // opened themselves or tabs you marked "Let AI agents use this tab". Private tabs, Vanish tabs
 // and the tab that is on air are always off limits. Every call is logged.
 const http = require('http');
@@ -148,6 +149,13 @@ async function startAgentPort({ port, tokenFile, api }) {
     if (!['127.0.0.1', 'localhost'].includes(host) || req.headers.origin) return send(403, { error: 'Local AI tools only.' });
     if (req.url === '/health') return send(200, { app: 'cue', ready: true });
     if (req.headers.authorization !== `Bearer ${token}`) return send(401, { error: 'Missing or wrong token.' });
+    // The key alone is not permission. Anything running as you can read this
+    // file, so the door itself has to be opened by hand, and only for as long
+    // as Cue is open.
+    if (!api.doorOpen()) {
+      api.knock(String(req.headers['x-agent'] || 'An AI tool').slice(0, 40));
+      return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays open until you close Cue.' });
+    }
     const m = req.url.match(/^\/tool\/(\w+)$/);
     if (!m || req.method !== 'POST' || !tools[m[1]]) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
     let body = '';

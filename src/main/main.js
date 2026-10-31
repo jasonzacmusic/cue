@@ -209,6 +209,13 @@ let nextId = 1;
 const closedStack = [];
 const downloads = [];
 const agentLog = [];
+// The AI door starts shut at every launch and is opened for one run of Cue, by
+// hand. The key sits in a file in his account, so anything running as him could
+// otherwise drive the browser; this way nothing drives it unless he said so
+// today. Opening it is never written back to disk.
+let doorOpen = false;
+let lastKnock = 0;
+const agentSeen = new Set();
 const sessionsReady = new Set();
 const dangerOk = new Set();   // hosts you chose to open anyway, until Cue is closed
 let pendingShare = null;
@@ -254,15 +261,16 @@ function sessionFor(identity) {
     const t = byWC(d.webContents); if (t) logTab(t, 'failed-request', `${d.error} ${d.url}`);
   });
 
-  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management']);
+  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management']);
   ses.setPermissionCheckHandler((wc, permission, origin) => {
     if (QUIET_OK.has(permission)) return true;
+    if (permission === 'midi' || permission === 'midiSysex') return midiOk(identity, safeOrigin(origin));
     if (permission === 'notifications') return !live && identity !== 'vanish';
     return store.data.permissions[`${identity}|${safeOrigin(origin)}|${permission}`] === true;
   });
 
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
-    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management'];
+    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management'];
     if (always.includes(permission)) return cb(true);
     if (permission === 'notifications') return cb(!live && identity !== 'vanish');
     if (permission === 'openExternal') {
@@ -285,6 +293,28 @@ function sessionFor(identity) {
         if (!locationTold.has(origin)) { locationTold.add(origin); sendEvent('toast', `${origin} asked where you are. Blocked.`); }
       }
       return cb(allowed);
+    }
+    // Web MIDI reaches the instruments themselves, and a system message can
+    // change settings on a keyboard or a module. Chrome asks; Cue used to hand
+    // it over without a word. Our own apps are the exception, because teaching
+    // with them is the job. One answer covers plain MIDI and system messages.
+    if (permission === 'midi' || permission === 'midiSysex') {
+      const origin = safeOrigin(details.requestingUrl || wc.getURL());
+      if (Vault.ownSite(origin)) return cb(true);
+      const key = `${identity}|${origin}|midi`;
+      const remembered = store.data.permissions[key];
+      if (remembered !== undefined) return cb(remembered);
+      if (process.env.CUE_TEST) return cb(false);   // a test never waits on a dialog
+      const r = await dialog.showMessageBox(mainWin, {
+        type: 'question', buttons: ['Allow', 'Block'], defaultId: 1, cancelId: 1,
+        message: `${origin} wants to send and receive MIDI with your instruments.`,
+        detail: 'It can also change settings on them. Allow this only for a site you trust with your gear.',
+        ...(identity === 'vanish' ? {} : { checkboxLabel: 'Remember for this site', checkboxChecked: true }),
+      });
+      const ok = r.response === 0;
+      if (r.checkboxChecked && identity !== 'vanish') { store.data.permissions[key] = ok; store.save(); }
+      const x = byWC(wc); if (x && !ok) logTab(x, 'blocked', 'MIDI');
+      return cb(ok);
     }
     if (permission === 'media') {
       const origin = safeOrigin(details.requestingUrl || wc.getURL());
@@ -433,6 +463,13 @@ function enableBlocker(ses) {
 }
 
 function safeOrigin(url) { try { return new URL(url).origin; } catch { return url; } }
+// Our own apps may talk to his instruments without asking. Everything else is
+// off until he says yes for that one site, and one answer covers plain MIDI and
+// the system messages that can change settings on the gear.
+function midiOk(identity, origin) {
+  if (Vault.ownSite(origin)) return true;
+  return store.data.permissions[`${identity}|${origin}|midi`] === true;
+}
 
 // ---------------------------------------------------------------- folders
 // The folder you have open. A new tab is born in it, and the sidebar shows the
@@ -1142,7 +1179,7 @@ function sendState() {
     folder: openFolder(), folders: FOLDERS, whose: store.data.whose || {},
     split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
-    agent: { port: AGENT_PORT, on: s.agentPort, last: agentLog[agentLog.length - 1] || null },
+    agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: agentLog[agentLog.length - 1] || null },
     update: updater ? updater.state() : null,
   });
 }
@@ -1323,6 +1360,15 @@ function uiCommand(cmd, a = {}) {
       store.save();
       sendEvent('toast', block ? `Ads are blocked on ${host} again. Reloading.` : `Ads are allowed on ${host}. Reloading.`);
       if (wc) wc.reload();
+      pushState();
+      break;
+    }
+    case 'ai-door': {
+      doorOpen = !!a.on;
+      if (!doorOpen) agentSeen.clear();
+      sendEvent('toast', doorOpen
+        ? 'AI agents can drive Cue until you close it.'
+        : 'The AI door is closed. Nothing can drive Cue but you.');
       pushState();
       break;
     }
@@ -1994,11 +2040,29 @@ function agentTokenFile() { return path.join(app.getPath('userData'), 'agent-por
 function logAgent(entry) {
   const e = { at: new Date().toISOString(), ...entry };
   agentLog.push(e); if (agentLog.length > 200) agentLog.shift();
+  // An agent reading its own tab is the normal thing and says nothing. An agent
+  // reaching into a tab he opened himself is worth a line on screen, once.
+  if (e.ok && e.tab) {
+    const t = byId(Number(e.tab));
+    const seen = `${e.agent}|${e.tab}`;
+    if (t && !t.agent && !agentSeen.has(seen)) {
+      agentSeen.add(seen);
+      sendEvent('toast', `${e.agent} used “${(t.title || t.url || 'a tab').slice(0, 40)}” — a tab you did not hand it.`);
+    }
+  }
   fs.appendFile(path.join(app.getPath('userData'), 'agent-log.jsonl'), JSON.stringify(e) + '\n', () => {});
   pushState();
 }
 
 const agentApi = {
+  doorOpen: () => doorOpen,
+  // Somebody tried while the door was shut. Say it once a minute, no more.
+  knock: (who) => {
+    const now = Date.now();
+    if (now - lastKnock < 60000) return;
+    lastKnock = now;
+    sendEvent('toast', `${who} asked to use Cue. The AI door is closed - open it in Settings.`);
+  },
   identities: () => Object.entries(IDENTITIES).filter(([k]) => k !== 'vanish').map(([k, v]) => ({ id: k, name: v.name, account: settings().identityLabels[k] || '' })),
   list: () => sidebarOrder().filter((t) => t.identity !== 'vanish').map((t) => ({
     id: t.id, title: hiddenFromAI(t) ? 'Private' : t.title, url: isStart(t.url) || hiddenFromAI(t) ? '' : t.url, identity: t.identity, group: groupOf(t),
@@ -2325,7 +2389,10 @@ app.whenReady().then(async () => {
   pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
   setupBlocker();
   startThumbs();
-  if (settings().agentPort) {
+  // The door is shut, but the port still answers, so that an AI tool that tries
+  // is told why in words and Cue can say so on screen - better than a silence
+  // nobody can explain.
+  if (settings().agentPort !== false) {
     startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
@@ -2353,7 +2420,7 @@ app.whenReady().then(async () => {
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

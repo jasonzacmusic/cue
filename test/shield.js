@@ -19,6 +19,7 @@ const until = async (fn, ms = 30000) => { const end = Date.now() + ms; while (Da
 
 const PAGES = {
   '/plain': '<title>Plain page</title><p id=p>served over http</p>',
+  '/midi': '<title>MIDI</title><script>window.midiOk = null; navigator.requestMIDIAccess({ sysex: true }).then(() => { window.midiOk = true; }, () => { window.midiOk = false; });</script>',
   '/login': '<title>Sign in</title><form><input id=u type=email><input id=pw type=password><button>Sign in</button></form>',
 };
 
@@ -233,6 +234,56 @@ module.exports = async function run(c) {
   check('Vanish: clicking a tab shows that tab', c.vanish.activeId() === vbad.id, { active: c.vanish.activeId(), first: vbad.id });
   c.vanish.closeTab(v2.id); await sleep(300);
   c.vanish.closeTab(vbad.id); await sleep(300);
+
+  // ------------------------------------------------------------- the AI door
+  // The key for the AI door sits in a file in his account, so anything running
+  // as him can read it. The door itself has to be opened by hand, and only for
+  // as long as Cue is open.
+  const { startAgentPort } = require('../src/main/agent-port');
+  const doorDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cue-door-'));
+  const doorTokenFile = path.join(doorDir, 'agent-port.json');
+  const doorPort = 8900 + Math.floor(Math.random() * 90);
+  const doorSrv = await startAgentPort({ port: doorPort, tokenFile: doorTokenFile, api: c.agentApi });
+  const doorToken = JSON.parse(fs.readFileSync(doorTokenFile, 'utf8')).token;
+  const knock = (tool = 'tabs') => new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: doorPort, path: `/tool/${tool}`, method: 'POST',
+      headers: { authorization: `Bearer ${doorToken}`, 'content-type': 'application/json', 'x-agent': 'Test agent' } }, (res) => {
+      let body = ''; res.on('data', (x) => { body += x; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', (e) => resolve({ status: 0, body: e.message }));
+    req.end('{}');
+  });
+
+  check('AI door: it starts shut', c.agentApi.doorOpen() === false);
+  const shutKnock = await knock();
+  check('AI door: an AI tool is refused while it is shut', shutKnock.status === 403, { status: shutKnock.status });
+  check('AI door: the refusal says what to do, in words', /open Settings/i.test(shutKnock.body), { said: shutKnock.body.slice(0, 120) });
+  c.command('ai-door', { on: true });
+  const openKnock = await knock();
+  check('AI door: once you open it, agents work again', openKnock.status === 200, { status: openKnock.status, said: openKnock.body.slice(0, 80) });
+  check('AI door: opening it is never written to disk', c.store.data.settings.agentDoor === undefined && c.store.data.settings.doorOpen === undefined);
+  c.command('ai-door', { on: false });
+  const shutAgain = await knock();
+  check('AI door: closing it stops them again', shutAgain.status === 403, { status: shutAgain.status });
+  doorSrv.close();
+
+  // -------------------------------------------------------------- MIDI gear
+  // Web MIDI reaches the instruments themselves, and a system message can
+  // change settings on them. Chrome asks. Cue used to hand it over silently.
+  const midiOrigin = `http://localhost:${port}`;
+  check('MIDI: a site gets nothing until you say yes', c.midiOk('personal', midiOrigin) === false);
+  check('MIDI: our own apps never have to ask', c.midiOk('personal', 'https://learning-portal.nathanielschool.com') === true);
+  c.store.data.permissions[`personal|${midiOrigin}|midi`] = true;
+  check('MIDI: the answer you gave is remembered, for that one site', c.midiOk('personal', midiOrigin) === true && c.midiOk('personal', 'https://example.test') === false);
+  delete c.store.data.permissions[`personal|${midiOrigin}|midi`];
+  const mt = c.openTab({ url: `${midiOrigin}/midi`, identity: 'personal' });
+  await until(() => url(mt).includes('/midi'), 15000);
+  const midiGot = await until(async () => {
+    const v = await mt.view.webContents.executeJavaScript('window.midiOk').catch(() => null);
+    return v === null || v === undefined ? null : { v };
+  }, 8000);
+  check('MIDI: a real page asking for the gear is refused', !!midiGot && midiGot.v === false, { answered: midiGot && midiGot.v });
+  c.closeTab(mt.id);
 
   // ---- a deliberate control, so a silent pass can never be mistaken for a run
   check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
