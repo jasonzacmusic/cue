@@ -1,7 +1,7 @@
 {
   "name": "cue-browser",
   "productName": "Cue",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "main": "src/main/main.js",
   "author": "Jason Zac, Nathaniel School of Music",
   "license": "GPL-3.0-or-later",

@@ -96,7 +96,7 @@ module.exports = async (c) => {
 
   // ---- which account is live, where a site can be two people
   c.command('folder', { name: 'school' }); await sleep(300);
-  const flive = (k) => js(`(() => { const b = document.querySelector('#folders .folder[data-who="${k}"] .flive'); return b ? b.textContent : ''; })()`);
+  const flive = (k) => js(`(() => { const b = document.querySelector('#folders .folder[data-who="${k}"] .fwho'); return b ? [...b.children].map((c) => c.title).join(' ') : ''; })()`);
   check('folder: it can say which account is live in it', typeof (await flive('school')) === 'string');
 
   // A name, or nothing at all. Gmail sends a signed-OUT visitor to its own

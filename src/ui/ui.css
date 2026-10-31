@@ -253,12 +253,14 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 /* The whole address, wrapped. Half an email address is no use to anyone. */
 .facct { font-size: 9.5px; line-height: 1.25; color: var(--muted); overflow-wrap: anywhere; }
 .fwho { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
-.fchip { flex: none; height: 14px; min-width: 14px; padding: 0 3px; border-radius: 4px; color: #fff;
-  font: 700 8px/14px -apple-system, system-ui, sans-serif; font-style: normal; text-align: center; letter-spacing: .2px; }
-.fchip.google { background: #c5392c; }
-.fchip.instagram { background: #c2286a; }
-.fchip.facebook { background: #1877f2; }
-.fchip.whatsapp { background: #1f8f4d; }
+.fchip { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; padding: 1px 5px 1px 4px; border-radius: 999px;
+  background: var(--raised); color: var(--ink); font: 600 9px/1.5 -apple-system, system-ui, sans-serif; font-style: normal;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fdot { width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--muted); }
+.fchip.google .fdot { background: #d4453a; }
+.fchip.instagram .fdot { background: #d82e78; }
+.fchip.facebook .fdot { background: #1877f2; }
+.fchip.whatsapp .fdot { background: #25a05a; }
 .fct { margin-left: auto; flex: none; font: 600 10px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: var(--muted); background: var(--raised); border-radius: 999px; padding: 3px 6px; }
 .folder.on .fct { color: #fff; background: var(--c); }

@@ -249,10 +249,6 @@ function renderGutters() {
 // Clicking a folder opens it: the sidebar below shows that folder's tabs, the
 // next new tab is born in it, and it is signed in to its own Gmail, Instagram,
 // YouTube and WhatsApp — all three at once, nothing to toggle.
-// One letter per account a folder is holding, so four of them fit where one
-// truncated line used to sit.
-const MARK = { google: 'G', instagram: 'ig', facebook: 'f', whatsapp: 'w' };
-
 function renderFolders() {
   const box = $('#folders'); box.innerHTML = '';
   for (const id of S.folders) {
@@ -286,7 +282,12 @@ function renderFolders() {
     if (live.length) {
       const row = el('span', 'fwho');
       for (const [key, x] of live) {
-        const chip = el('i', `fchip ${key}`, esc(MARK[key] || x.label[0]));
+        // The handle itself, not just a mark: knowing it is Instagram is no use,
+        // knowing it is @jasonzac is the whole point. An address loses its
+        // domain, which is already on the line above.
+        const short = /^[^@]+@/.test(x.who) ? x.who.replace(/@.*$/, '') : x.who;
+        const chip = el('i', `fchip ${key}`);
+        chip.append(el('u', 'fdot'), document.createTextNode(short));
         chip.title = `${x.label} \u00b7 ${x.who}`;
         row.append(chip);
       }
