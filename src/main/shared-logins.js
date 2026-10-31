@@ -1,7 +1,11 @@
-// One sign-in reaches every Space. Spaces pick the Personal or School login, so a site signed in
-// on one is copied to the other. Sites where Jason keeps two accounts stay separate on purpose.
+// One sign-in reaches every folder. A site signed in inside Personal is copied
+// into School and back, so a site you only have one account for never has to be
+// signed into twice. Sites where Jason keeps TWO accounts are the exception and
+// stay apart on purpose — that separation is the whole point of the folders:
+// Personal's Gmail, Instagram, YouTube and WhatsApp are his, School's are the
+// school's, and both are signed in at the same time with nothing to toggle.
 // The AI agent and Vanish logins never take part.
-const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.net|facebook\.com)$/i;
+const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.net|facebook\.com|whatsapp\.com)$/i;
 
 const hostOf = (c) => c.domain.replace(/^\./, '');
 const keyOf = (c) => [c.domain, c.path, c.name, c.value].join('|');
