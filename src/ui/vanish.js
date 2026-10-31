@@ -4,6 +4,7 @@ const send = (cmd, a) => window.vanish.send(cmd, a);
 const url = $('#url');
 const CLOSE = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m2 2 6 6M8 2 2 8"/></svg>';
 let lastTabs = '';
+let dragging = null;
 
 function tabEl(t) {
   const el = document.createElement('div');
@@ -23,6 +24,18 @@ function tabEl(t) {
   x.onclick = () => send('close', { id: t.id });
   el.onmousedown = (e) => { if (e.button === 0) send('activate', { id: t.id }); };
   el.onauxclick = (e) => { if (e.button === 1) send('close', { id: t.id }); };
+  // Drag to reorder. The strip rebuilds itself whenever state arrives, so the
+  // drag is held in a variable up here rather than on the element being moved.
+  el.draggable = true;
+  el.ondragstart = (e) => { dragging = t.id; e.dataTransfer.effectAllowed = 'move'; };
+  el.ondragend = () => { dragging = null; };
+  el.ondragover = (e) => {
+    if (dragging === null || dragging === t.id) return;
+    e.preventDefault();
+    const strip = [...$('#tabs').children];
+    const to = strip.indexOf(el);
+    if (to >= 0) send('move', { id: dragging, to });
+  };
   el.append(name, x);
   return el;
 }

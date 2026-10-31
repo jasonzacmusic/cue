@@ -205,10 +205,18 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .icon svg { width: 16px; height: 16px; }
 .icon:hover { background: var(--hover); color: var(--ink); }
 .icon:disabled { opacity: .35; cursor: default; background: transparent; }
-.spaces { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; flex: none; position: relative; min-height: 46px; }
-.spaces button { border: 0; background: none; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; transition: color .15s; order: 2; }
-.spaces button:hover { color: var(--ink); }
-.spaces button.on { order: 1; flex-basis: 100%; text-align: left; font: italic 500 32px/1.1 var(--serif); letter-spacing: -.01em; color: var(--tone); }
+/* The Space you are in reads as the heading of the sidebar; the other three sit
+   under it as a quiet row. The old single wrapped row mixed a 32px title and
+   12px labels on the same baseline, which is what made this corner look busy. */
+.spaces { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; flex: none; position: relative; }
+.spaces button { border: 0; background: none; padding: 0; cursor: pointer; display: inline-flex; align-items: baseline; gap: 5px; font: inherit; color: var(--muted); }
+.spaces button.on { font: italic 500 31px/1.05 var(--serif); letter-spacing: -.015em; color: var(--tone); padding-bottom: 1px; }
+.spaces button.on .ct { font: 600 10.5px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: .02em; color: var(--tone); opacity: .55; transform: translateY(-11px); }
+.spacerow { display: flex; flex-wrap: wrap; gap: 4px; }
+.spacerow button { font: 500 11.5px/1 -apple-system, system-ui, sans-serif; letter-spacing: .015em; padding: 5px 9px; border-radius: 999px; background: var(--hover); transition: background .14s, color .14s; }
+.spacerow button:hover { background: color-mix(in srgb, var(--tone) 13%, transparent); color: var(--ink); }
+.spacerow button:focus-visible { outline: 2px solid var(--tone); outline-offset: 1px; }
+.spacerow .ct { font-variant-numeric: tabular-nums; font-size: 10px; font-weight: 600; opacity: .6; }
 .newrow { display: flex; align-items: center; gap: 6px; flex: none; }
 .newtab { width: 32px; height: 32px; flex: none; border: 0; border-radius: 50%; background: var(--tone); color: var(--side); display: grid; place-items: center; cursor: pointer; box-shadow: 0 3px 8px -3px var(--shadow); transition: transform .15s; }
 .newtab svg { width: 15px; height: 15px; stroke-width: 1.8; }
@@ -281,7 +289,9 @@ body.sidehidden .grip { display: none; }
 body.rail #side { padding: 0 8px 10px; align-items: center; }
 body.rail .side-top { justify-content: center; }
 body.rail .spaces { flex-direction: column; flex-wrap: nowrap; align-items: center; gap: 6px; min-height: 0; }
-body.rail .spaces button { order: 0; flex: none; width: 22px; height: 22px; border-radius: 50%; overflow: hidden; font: 600 10px/22px -apple-system, system-ui, sans-serif; text-align: center; color: var(--muted); letter-spacing: 12px; text-indent: 6px; background: var(--hover); }
+body.rail .spacerow { flex-direction: column; align-items: center; gap: 6px; }
+body.rail .spaces button { flex: none; width: 22px; height: 22px; padding: 0; border-radius: 50%; overflow: hidden; font: 600 10px/22px -apple-system, system-ui, sans-serif; text-align: center; color: var(--muted); letter-spacing: 12px; text-indent: 6px; background: var(--hover); display: block; }
+body.rail .spaces .ct { display: none; }
 body.rail .spaces button.on { background: var(--tone); color: var(--side); }
 body.rail #sidehide { position: absolute; top: 30px; left: 50%; transform: translateX(-50%); }
 body.rail .spaces { margin-top: 30px; }
@@ -300,3 +310,14 @@ body.rail .agentline { display: none; }
 body.rail .downloads, body.rail .credbar { display: none; }
 body.rail .livebox { width: 44px; padding: 4px; }
 body.rail .livebox .lb-title, body.rail .livebox .lb-thumb, body.rail .livebox .lb-head { display: none; }
+
+/* Update line. Deliberately small and calm: Cue never installs on its own, and
+   a class must never be interrupted by its browser asking for attention. */
+.updatebar { display: flex; flex-direction: column; gap: 5px; padding: 8px 9px; margin-top: 6px; border-radius: 9px; background: color-mix(in srgb, var(--tone) 10%, transparent); font: 500 11.5px/1.35 -apple-system, system-ui, sans-serif; color: var(--ink); }
+.updatebar .u-say { color: var(--ink); }
+.updatebar .u-wait { color: var(--muted); font-size: 10.5px; }
+.updatebar .u-act { display: flex; gap: 5px; }
+.updatebar button { border: 0; border-radius: 999px; padding: 4px 10px; background: var(--tone); color: var(--side); font: 600 11px/1 -apple-system, system-ui, sans-serif; cursor: pointer; }
+.updatebar button.ghost { background: transparent; color: var(--muted); padding: 4px 6px; }
+.updatebar button.ghost:hover { color: var(--ink); }
+body.rail .updatebar { display: none; }

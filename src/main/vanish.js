@@ -44,6 +44,11 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (input.type !== 'keyDown' || !(input.meta || input.control)) return;
     const k = input.key.toLowerCase(); const a = byId(activeId); const wc = a && a.view.webContents;
     if (k === 'tab') { e.preventDefault(); step(input.shift ? -1 : 1); return; }
+    if (input.alt && (input.key === 'ArrowLeft' || input.key === 'ArrowRight')) {
+      e.preventDefault();
+      if (a) move(a.id, tabs.indexOf(a) + (input.key === 'ArrowLeft' ? -1 : 1));
+      return;
+    }
     if (/^[1-9]$/.test(k)) { // Cmd+9 is always the last tab
       const t = k === '9' ? tabs[tabs.length - 1] : tabs[Number(k) - 1];
       e.preventDefault(); if (t) activate(t.id); return;
@@ -141,6 +146,17 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     await ses.clearHostResolverCache().catch(() => {});
   }
 
+  // Vanish tabs live only in this array, so reordering IS the move: there is no
+  // saved order to keep in step, which is why this never touches disk.
+  function move(id, to) {
+    const i = tabs.indexOf(byId(id));
+    if (i < 0) return;
+    const at = Math.max(0, Math.min(tabs.length - 1, to));
+    if (at === i) return;
+    tabs.splice(at, 0, tabs.splice(i, 1)[0]);
+    state();
+  }
+
   function command(cmd, a = {}) {
     const t = byId(activeId); const wc = t && t.view.webContents;
     if (cmd === 'navigate' && wc) { const u = resolveInput(a.text); t.url = u; wc.loadURL(u).catch(() => {}); wc.focus(); }
@@ -150,9 +166,10 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'new') add();
     if (cmd === 'activate') activate(a.id);
     if (cmd === 'close') closeTab(a.id);
+    if (cmd === 'move') move(a.id, a.to);
   }
 
-  return { add, closeTab, command, wipe, tabs, activate, step, window: () => win, ui: () => ui, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };

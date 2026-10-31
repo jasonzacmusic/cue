@@ -10,6 +10,7 @@ const { Store } = require('./store');
 const { groupFor, GROUP_LIST } = require('./groups');
 const { OBS } = require('./obs');
 const { startAgentPort } = require('./agent-port');
+const { createUpdater } = require('./updater');
 const { Library } = require('./db');
 const { Vault } = require('./vault');
 const bills = require('./bills');
@@ -120,8 +121,10 @@ let peek = null;
 let aiView = null;
 let stripOpen = false;
 let recTabId = null;
+let updater = null;
 let sideReveal = false;
 let vanish = null;
+const locationTold = new Set();
 let sharedLogins = null;
 let heldCount = 0;
 let repos = [];
@@ -152,6 +155,13 @@ function sessionFor(identity) {
     const t = byWC(d.webContents); if (t) logTab(t, 'failed-request', `${d.error} ${d.url}`);
   });
 
+  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management']);
+  ses.setPermissionCheckHandler((wc, permission, origin) => {
+    if (QUIET_OK.has(permission)) return true;
+    if (permission === 'notifications') return !live && identity !== 'vanish';
+    return store.data.permissions[`${identity}|${safeOrigin(origin)}|${permission}`] === true;
+  });
+
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
     const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'midi', 'midiSysex', 'window-management'];
     if (always.includes(permission)) return cb(true);
@@ -164,13 +174,26 @@ function sessionFor(identity) {
       const r = await dialog.showMessageBox(mainWin, { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Open this link in another app?', detail: link.slice(0, 200) });
       return cb(r.response === 0);
     }
-    if (permission === 'media' || permission === 'geolocation') {
+    // Location is never handed out by a prompt. Google asks on almost every
+    // search and a dialog mid-class is worse than useless, so where you are
+    // simply does not leave this machine. A site that genuinely needs it is
+    // allowed by hand on the Privacy page, and that is the only way in.
+    if (permission === 'geolocation') {
+      const origin = safeOrigin(details.requestingUrl || wc.getURL());
+      const allowed = store.data.permissions[`${identity}|${origin}|geolocation`] === true;
+      if (!allowed) {
+        const x = byWC(wc); if (x) logTab(x, 'blocked', 'location');
+        if (!locationTold.has(origin)) { locationTold.add(origin); sendEvent('toast', `${origin} asked where you are. Blocked.`); }
+      }
+      return cb(allowed);
+    }
+    if (permission === 'media') {
       const origin = safeOrigin(details.requestingUrl || wc.getURL());
       const key = `${identity}|${origin}|${permission}`;
       const remembered = store.data.permissions[key];
       const keepAwake = (ok) => { const x = byWC(wc); if (x && ok && permission === 'media') x.holdAwake = true; return ok; };
       if (remembered !== undefined) return cb(keepAwake(remembered));
-      const what = permission === 'media' ? (details.mediaTypes || []).map((m) => (m === 'video' ? 'camera' : 'microphone')).join(' and ') || 'microphone' : 'location';
+      const what = (details.mediaTypes || []).map((m) => (m === 'video' ? 'camera' : 'microphone')).join(' and ') || 'microphone';
       const r = await dialog.showMessageBox(mainWin, {
         type: 'question', buttons: ['Allow', 'Block'], defaultId: 0, cancelId: 1,
         message: `${origin} wants to use your ${what}.`, ...(identity === 'vanish' ? {} : { checkboxLabel: 'Remember for this site', checkboxChecked: true }),
@@ -868,6 +891,7 @@ function sendState() {
     split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
     agent: { port: AGENT_PORT, on: s.agentPort, last: agentLog[agentLog.length - 1] || null },
+    update: updater ? updater.state() : null,
   });
 }
 
@@ -1012,6 +1036,10 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     }
     case 'make-default': app.setAsDefaultProtocolClient('http'); app.setAsDefaultProtocolClient('https'); break;
     case 'set-scene': if (t) { t.obsScene = a.scene || ''; pushState(); persist(); } break;
+    case 'update-check': if (updater) updater.check({ quiet: false }); break;
+    case 'update-get': if (updater) updater.download(); break;
+    case 'update-install': if (updater) updater.install(); break;
+    case 'update-notes': if (updater) updater.openPage(); break;
     case 'agent-copy': clipboard.writeText(agentSetupText()); sendEvent('toast', 'AI setup copied.'); break;
     default: break;
   }
@@ -1887,6 +1915,19 @@ app.whenReady().then(async () => {
     startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
       .catch((e) => logAgent({ tool: 'port', error: e.message }));
   }
+  updater = createUpdater({
+    onState: () => pushState(),
+    // A browser must never end a class. While a tab is on air, being recorded,
+    // or a page is holding the camera, the update waits and says why.
+    canInterrupt: () => {
+      if (live || programId) return 'A tab is on air. The update will wait.';
+      if (recTabId) return 'A tab is being recorded. The update will wait.';
+      if (tabs.some((t) => t.holdAwake)) return 'A page is using your camera or microphone. The update will wait.';
+      return '';
+    },
+    log: logAgent,
+  });
+  updater.start();
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick

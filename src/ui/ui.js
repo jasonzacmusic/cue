@@ -70,6 +70,7 @@ function render() {
     lastSpace = S.space;
   }
   renderSpaces();
+  renderUpdate();
   renderIdPick();
   renderPins();
   renderGroups();
@@ -148,15 +149,51 @@ function renderIdPick() {
 }
 
 function renderSpaces() {
+  // Two levels, not one wrapped row: the Space you are in is the heading, the
+  // others are a quiet row underneath you can tab across.
   const box = $('#spaces'); box.innerHTML = '';
+  const rest = el('div', 'spacerow', '');
+  rest.setAttribute('role', 'tablist');
   S.spaces.forEach((n, i) => {
     const count = S.tabs.filter((t) => t.space === n).length;
-    const b = el('button', n === S.space ? 'on' : '', esc(n));
+    const here = n === S.space;
+    const b = el('button', here ? 'on' : '', '');
+    b.append(el('span', 'nm', esc(n)));
+    if (count) b.append(el('span', 'ct', String(count)));
     b.title = `${n} (⌃${i + 1}) · ${count} tab${count === 1 ? '' : 's'}`;
-    b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', n === S.space);
+    b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', here);
     b.onclick = () => send('space', { name: n });
-    box.append(b);
+    (here ? box : rest).append(b);
   });
+  box.append(rest);
+}
+
+function renderUpdate() {
+  // Quiet by design: a line, not a dialog. Cue never installs or restarts by
+  // itself, so this only ever waits for you to click it.
+  const u = S.update; const bar = $('#updatebar');
+  if (!u || u.state === 'idle' || u.state === 'checking') { bar.hidden = true; return; }
+  bar.hidden = false; bar.innerHTML = '';
+  const say = el('span', 'u-say', '');
+  const act = el('div', 'u-act', '');
+  if (u.state === 'available') {
+    say.textContent = `Cue ${u.latest} is ready.`;
+    const get = el('button', '', 'Update'); get.onclick = () => send('update-get');
+    const what = el('button', 'ghost', "What's new"); what.onclick = () => send('update-notes');
+    act.append(get, what);
+  } else if (u.state === 'downloading') {
+    say.textContent = `Getting Cue ${u.latest}… ${u.percent}%`;
+  } else if (u.state === 'ready') {
+    say.textContent = `Cue ${u.latest} is ready to install.`;
+    const go = el('button', '', 'Install and reopen'); go.onclick = () => send('update-install');
+    act.append(go);
+  } else if (u.state === 'error') {
+    say.textContent = u.error || 'The update could not be checked.';
+    const again = el('button', 'ghost', 'Try again'); again.onclick = () => send('update-check');
+    act.append(again);
+  }
+  bar.append(say, act);
+  if (u.state === 'ready' && u.error) bar.append(el('span', 'u-wait', u.error));
 }
 
 function renderExtras() {
