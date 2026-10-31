@@ -223,17 +223,43 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .newtab svg { width: 15px; height: 15px; stroke-width: 1.8; }
 .newtab:hover { transform: scale(1.06); }
 .newtab:active { transform: scale(.96); }
-.idpick { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-.idwho { display: flex; flex-direction: column; justify-content: center; margin-left: 4px; line-height: 1.15; min-width: 0; }
-.idwho i { font: 400 9px/1.15 -apple-system, system-ui, sans-serif; font-style: normal; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
-.idwho b { font: 600 11px/1.15 -apple-system, system-ui, sans-serif; color: var(--ink); white-space: nowrap; }
-.idwho span { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-body.rail .idwho { display: none; }
-.idpick button { width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid transparent; background: color-mix(in srgb, var(--c) 18%, transparent); color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer; display: grid; place-items: center; padding: 0; }
-.idpick button:hover { border-color: color-mix(in srgb, var(--c) 60%, transparent); }
-.idpick button.on { background: var(--c); border-color: var(--c); color: #fff; }
-.idpick button.vanish { background: none; border: 1.5px dashed var(--muted); }
-.idpick button.vanish:hover { border-color: var(--ink); }
+/* ---- The three logins, as folders.
+   A folder is a place you open, so it is drawn as one: a raised lip on top, a
+   picture that says whose it is without reading, the account underneath in
+   words, and the number of tabs living in it. The open one is lifted and
+   edged in its own colour. */
+.folders { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.folder { position: relative; border: 0; padding: 0; background: none; cursor: pointer; text-align: left; display: block; padding-top: 6px; }
+.folder .ftab { position: absolute; top: 0; left: 0; width: 42%; height: 9px; border-radius: 6px 6px 0 0;
+  background: color-mix(in srgb, var(--c) 30%, var(--hover)); transition: background .14s; }
+.folder .fface { position: relative; display: flex; align-items: center; gap: 9px; padding: 7px 9px 7px 7px; border-radius: 0 10px 10px 10px;
+  background: var(--hover); border: 1.5px solid transparent; transition: background .14s, border-color .14s, transform .12s; }
+.folder:hover .fface { background: color-mix(in srgb, var(--c) 12%, var(--hover)); }
+.folder:hover .ftab { background: color-mix(in srgb, var(--c) 45%, var(--hover)); }
+.folder.on .fface { background: color-mix(in srgb, var(--c) 15%, var(--raised)); border-color: var(--c); }
+.folder.on .ftab { background: var(--c); }
+.folder:focus-visible { outline: none; }
+.folder:focus-visible .fface { outline: 2px solid var(--c); outline-offset: 1px; }
+.fpic { width: 34px; height: 34px; flex: none; border-radius: 8px; object-fit: cover; background: var(--raised); box-shadow: 0 1px 3px -1px var(--shadow); }
+.fltr { width: 34px; height: 34px; flex: none; border-radius: 8px; background: var(--c); color: #fff; font: 700 15px/34px -apple-system, system-ui, sans-serif; font-style: normal; text-align: center; }
+.ftext { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; gap: 1px; }
+.ftext b { font: 600 12.5px/1.2 -apple-system, system-ui, sans-serif; color: var(--ink); white-space: nowrap; }
+.facct { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flive { font-size: 9.5px; font-weight: 600; color: color-mix(in srgb, var(--c) 70%, var(--ink)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fct { margin-left: auto; flex: none; font: 600 10px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: var(--muted); background: var(--raised); border-radius: 999px; padding: 3px 6px; }
+.folder.on .fct { color: #fff; background: var(--c); }
+.folders .vanish { align-self: flex-start; margin-top: 1px; width: 26px; height: 26px; border-radius: 50%; border: 1.5px dashed var(--muted); background: none; cursor: pointer; padding: 0; }
+.folders .vanish:hover { border-color: var(--ink); }
+
+/* The folder filters the list, so this line is what keeps a tab from ever
+   looking lost: it names the folders holding the rest of this Space. */
+.elsewhere { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; flex: none; padding-top: 2px; }
+.elsewhere i { font: 400 9.5px/1 -apple-system, system-ui, sans-serif; font-style: normal; letter-spacing: .03em; color: var(--muted); }
+.elsewhere button { border: 0; cursor: pointer; font: 600 10px/1 -apple-system, system-ui, sans-serif; padding: 4px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--c) 16%, transparent); color: color-mix(in srgb, var(--c) 72%, var(--ink)); }
+.elsewhere button:hover { background: color-mix(in srgb, var(--c) 28%, transparent); }
+
 .pins { display: flex; flex-wrap: wrap; gap: 8px; flex: none; }
 .pins:empty { display: none; }
 .pin { width: 44px; height: 44px; border-radius: 13px; background: var(--raised); box-shadow: 0 1px 4px -1px var(--shadow); display: grid; place-items: center;
@@ -311,7 +337,12 @@ body.rail .spaces button.on { background: var(--tone); color: var(--side); }
 body.rail #sidehide { position: absolute; top: 30px; left: 50%; transform: translateX(-50%); }
 body.rail .spaces { margin-top: 30px; }
 body.rail .newrow { flex-direction: column; }
-body.rail .idpick { flex-direction: column; }
+body.rail .folders { align-items: center; }
+body.rail .folder { padding-top: 4px; }
+body.rail .folder .ftab { width: 18px; height: 5px; left: 2px; }
+body.rail .folder .fface { padding: 3px; border-radius: 0 9px 9px 9px; }
+body.rail .ftext, body.rail .fct { display: none; }
+body.rail .elsewhere { display: none; }
 body.rail .pins { justify-content: center; }
 body.rail .groups { width: 100%; margin: 0; padding: 2px 0; }
 body.rail .ghead { padding: 2px 0 6px; justify-content: center; }

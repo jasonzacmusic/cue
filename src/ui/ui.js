@@ -2,7 +2,6 @@
 const $ = (s) => document.querySelector(s);
 const send = (cmd, args) => window.cue.send(cmd, args);
 let S = null;
-let newIdentity = localStorage.getItem('cue.newIdentity') || 'personal';
 let editingOmni = false;
 let openVolId = null;
 
@@ -110,11 +109,10 @@ function iconImg(srcs, onGiveUp) {
   i.src = list[0];
   return i;
 }
-// A tab is marked only when it is signed in somewhere other than the login this
-// Space uses — otherwise every row in the Space carried the same mark.
+// A tab is marked only when it is signed in somewhere other than the folder you
+// have open — otherwise every row in the folder carried the same mark.
 function offLogin(t) {
-  const here = (S.settings.spaceLogins && S.settings.spaceLogins[t.space]) || S.settings.defaultIdentity;
-  return t.agent || t.identity !== here;
+  return t.agent || t.identity !== S.folder;
 }
 
 function favEl(t) {
@@ -139,6 +137,10 @@ function favEl(t) {
 // ---------------------------------------------------------------- render
 let lastSpace = null;
 const inSpace = (t) => t.space === S.space;
+// The two axes, kept apart on purpose: WHOSE account (the folder) and WHICH
+// job (the Space). A tab shows in the sidebar when it is in both.
+const inFolder = (t) => t.identity === S.folder;
+const here = (t) => inSpace(t) && inFolder(t);
 
 // Typing a name into the sidebar is the one thing in this window that must not
 // be interrupted. The sidebar is rebuilt from scratch on every state push - a
@@ -177,11 +179,8 @@ function render() {
   document.body.dataset.live = S.live ? '1' : '';
   document.body.dataset.space = S.space;
   applySide();
-  if (S.space !== lastSpace) {
-    if (lastSpace !== null) { newIdentity = S.settings.spaceLogins[S.space] || newIdentity; }
-    lastSpace = S.space;
-  }
-  if (!editingName) { renderSpaces(); renderIdPick(); renderPins(); renderGroups(); }
+  lastSpace = S.space;
+  if (!editingName) { renderSpaces(); renderFolders(); renderPins(); renderGroups(); renderElsewhere(); }
   renderUpdate();
   renderBar();
   renderContent();
@@ -240,34 +239,83 @@ function renderGutters() {
   $('#aigrip').hidden = !S.ai;
 }
 
-function renderIdPick() {
-  const box = $('#idpick'); box.innerHTML = '';
-  for (const [id, v] of Object.entries(S.identities)) {
-    const b = el('button', id === 'vanish' ? 'vanish' : '', id === 'vanish' ? '' : esc(v.name[0]));
+// The three logins, drawn as folders with a picture on them.
+//
+// This replaces the old "+ P S A" row of initials. A letter is a thing you have
+// to decode; a face, the school's N and a plain spark are things you recognise
+// without reading. And each folder says in words whose it is, so there is never
+// a moment of "which one is S again".
+//
+// Clicking a folder opens it: the sidebar below shows that folder's tabs, the
+// next new tab is born in it, and it is signed in to its own Gmail, Instagram,
+// YouTube and WhatsApp — all three at once, nothing to toggle.
+function renderFolders() {
+  const box = $('#folders'); box.innerHTML = '';
+  for (const id of S.folders) {
+    const v = S.identities[id]; if (!v) continue;
+    const mine = id === S.folder;
+    const all = S.tabs.filter((t) => t.identity === id).length;
+    const b = el('button', `folder${mine ? ' on' : ''}`);
     b.style.setProperty('--c', v.color);
-    const what = { personal: 'Your own account', school: 'The school account', agent: 'The account AI agents use' }[id] || '';
-    tip(b, id === 'vanish' ? 'Vanish window' : `${v.name}${S.labels[id] ? ` · ${S.labels[id]}` : ''}`,
-      id === 'vanish' ? 'A window that saves nothing — no history, no cookies, no files' : `${what}. New tabs open here, with its own sign-ins.`);
-    b.setAttribute('aria-label', id === 'vanish' ? 'Open a Vanish window' : `New tabs open as ${v.name}`);
-    if (id !== 'vanish') { b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === newIdentity); }
-    if (id === newIdentity) b.classList.add('on');
     b.dataset.who = id;
-    b.onclick = () => {
-      if (id === 'vanish') { send('new-tab', { identity: 'vanish' }); return; }
-      newIdentity = id; try { localStorage.setItem('cue.newIdentity', id); } catch {} renderIdPick();
-    };
+    b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', mine);
+
+    const tab = el('i', 'ftab');                       // the little raised lip of a folder
+    const face = el('span', 'fface');
+    const img = el('img', 'fpic'); img.src = `../../assets/logos/${v.picture}`; img.alt = '';
+    img.onerror = () => { img.remove(); face.prepend(el('i', 'fltr', esc(v.name[0]))); };
+    face.append(img);
+    const txt = el('span', 'ftext');
+    txt.append(el('b', '', esc(v.name)));
+    // Whose it is, in words, under the name. No one should have to remember
+    // that "School" means music@nathanielschool.com.
+    const acct = S.labels[id] || v.about || '';
+    if (acct) txt.append(el('span', 'facct', esc(acct)));
+    // And, where a site can be two people at once, who is live in there right
+    // now — read off the page itself, so you can see which Instagram you are
+    // about to post from before you click anything.
+    const who = (S.whose || {})[id] || {};
+    const live = Object.values(who).filter((x) => x && x.who).map((x) => `${x.label}: ${x.who}`);
+    if (live.length) txt.append(el('span', 'flive', esc(live.join(' · '))));
+    face.append(txt);
+    if (all) face.append(el('span', 'fct', String(all)));
+    b.append(tab, face);
+
+    tip(b, `${v.name}${acct ? ` · ${acct}` : ''}`,
+      mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
+        : `${all} tab${all === 1 ? '' : 's'} in here. Click to open this folder — new tabs go in it and it stays signed in as ${acct || v.name}.`);
+    b.onclick = () => send('folder', { name: id });
     box.append(b);
   }
-  // A row of initials means nothing on its own, and naming the one that is
-  // picked is not much better: it reads like a label for the whole row. Saying
-  // what the row decides is the only version anybody understands at a glance.
-  const who = S.identities[newIdentity];
-  const cap = el('span', 'idwho');
-  cap.append(el('i', '', 'New tabs:'));
-  cap.append(el('b', '', esc(who ? who.name : '')));
-  if (S.labels[newIdentity]) cap.append(el('span', '', esc(S.labels[newIdentity])));
-  tip(cap, `New tabs open as ${who ? who.name : ''}`, 'Each account keeps its own sign-ins — one Google signed in to each, side by side.');
-  box.append(cap);
+  // Vanish is not a folder: it keeps nothing, so it holds no tabs and stays
+  // signed in to nothing. It is a window you open, so it stays a button.
+  const van = el('button', 'vanish');
+  van.style.setProperty('--c', (S.identities.vanish || {}).color || 'var(--muted)');
+  tip(van, 'Vanish window', 'A window that saves nothing — no history, no cookies, no files');
+  van.setAttribute('aria-label', 'Open a Vanish window');
+  van.onclick = () => send('new-tab', { identity: 'vanish' });
+  box.append(van);
+}
+
+// Tabs in this Space that are sitting in one of the other folders. The folder
+// filters the list, so this line is what stops a tab ever looking lost: it
+// names where the rest are and takes you there in one click.
+function renderElsewhere() {
+  const box = $('#elsewhere'); box.innerHTML = '';
+  const others = S.folders
+    .filter((id) => id !== S.folder)
+    .map((id) => ({ id, n: S.tabs.filter((t) => t.space === S.space && t.identity === id).length }))
+    .filter((x) => x.n);
+  box.hidden = !others.length;
+  if (!others.length) return;
+  box.append(el('i', '', 'Also in this Space:'));
+  for (const o of others) {
+    const b = el('button', '', `${esc(S.identities[o.id].name)} ${o.n}`);
+    b.style.setProperty('--c', S.identities[o.id].color);
+    tip(b, `${o.n} tab${o.n === 1 ? '' : 's'} in ${S.identities[o.id].name}`, 'Click to open that folder');
+    b.onclick = () => send('folder', { name: o.id });
+    box.append(b);
+  }
 }
 
 function renderSpaces() {
@@ -355,7 +403,7 @@ function renderExtras() {
 
 function renderPins() {
   const box = $('#pins'); box.innerHTML = '';
-  for (const t of S.tabs.filter((x) => x.pinned && inSpace(x))) {
+  for (const t of S.tabs.filter((x) => x.pinned && here(x))) {
     const p = el('div', 'pin');
     tip(p, shortName(t), hostOf(t.url) || '');
     if (t.id === S.activeId) p.classList.add('active');
@@ -379,7 +427,7 @@ function renderGroups() {
   box.innerHTML = '';
   const splitIds = S.split.mode !== 'single' ? S.split.ids : [];
   for (const g of S.groups) {
-    const list = S.tabs.filter((t) => !t.pinned && t.group === g.id && inSpace(t));
+    const list = S.tabs.filter((t) => !t.pinned && t.group === g.id && here(t));
     if (!list.length) continue;
     const wrap = el('section', 'group' + (S.collapsed[g.id] ? ' closed' : ''));
     const head = el('div', 'ghead', `<span class="caret">▾</span>${esc(g.name)}<span class="n">${list.length}</span>`);
@@ -674,7 +722,7 @@ omni.addEventListener('keydown', (e) => {
     e.preventDefault();
     const q = omni.value.trim();
     if (!$('#suggest').hidden && sugItems[sugSel]) sugItems[sugSel].run();
-    else if (q) send('navigate', { text: q, newTab: e.metaKey, identity: e.metaKey ? newIdentity : undefined });
+    else if (q) send('navigate', { text: q, newTab: e.metaKey });
     endEdit();
   }
 });
@@ -925,7 +973,7 @@ find.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------- buttons
-$('#newtab').onclick = () => send('new-tab', { identity: newIdentity });
+$('#newtab').onclick = () => send('new-tab');
 $('#back').onclick = () => send('back');
 $('#fwd').onclick = () => send('forward');
 $('#reload').onclick = () => send('reload');
@@ -992,21 +1040,24 @@ function openSettings() {
     sh.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
     sh.append(el('h3', '', 'Spaces'));
     sh.append(el('div', 'note', 'Double-click a Space in the sidebar to call it whatever you like. Its tabs, its layout and the login it opens with all come across with the name.'));
-    sh.append(el('h3', '', 'Logins'));
-    sh.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram and other sign-ins, so two Gmails stay signed in side by side and never see each other. The P / S / A row above the tabs chooses which one a NEW tab opens in; a tab keeps the one it was born with, and you can move it with a right-click. Name the account each one holds; AI agents read these names and use the right login without asking you.'));
+    sh.append(el('h3', '', 'Folders'));
+    sh.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram, YouTube and WhatsApp sign-ins, so two Gmails stay signed in side by side and never see each other. Click a folder at the top of the sidebar to open it: you see the tabs that live in it, and new tabs are born in it. A tab keeps the folder it was born in until you right-click it and move it. Name the account each folder holds — it shows on the folder, and AI agents read it and use the right login without asking you.'));
     sh.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
     sh.append(settingRow('School account', text('label.school', S.labels.school, 'music@nathanielschool.com')));
+    // Jason asked this one out loud, so the answer lives where he will meet it,
+    // not only in a message he has to go back and find.
+    sh.append(el('div', 'note', 'Instagram has its own account switcher inside the app, which keeps several accounts in one place. With a folder for each Google account you never need it: Instagram in Personal is your own account, Instagram in School is the school\'s, and both stay signed in at once. Each folder shows the Instagram account that is live in it, so you can see which one you are about to post from before you touch anything.'));
     const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
     def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
-    sh.append(settingRow('Usual login (no colour ring)', def));
+    sh.append(settingRow('Folder a new, empty Space opens in', def));
     const mv = el('div', 'row'); const mvb = el('button', 'btn', 'Move in from another browser'); mvb.onclick = () => { closeModal(); openImport(); };
     const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.onclick = () => send('make-default'); mv.append(mvb, dfb); sh.append(mv);
     sh.append(el('h3', '', 'Spaces'));
-    sh.append(el('div', 'note', 'Each Space keeps its own tabs and split layout. New tabs in a Space open with its usual login.'));
+    sh.append(el('div', 'note', 'A Space is the job you are doing; a folder is whose account you are in. They are separate. Going to an empty Space opens the folder it usually uses; going to a Space that has tabs opens the folder of the tab you land on.'));
     S.spaces.forEach((n) => {
       const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
       pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
-      sh.append(settingRow(`${n} usual login`, pick));
+      sh.append(settingRow(`${n} usually opens in`, pick));
     });
     sh.append(el('h3', '', 'Kits'));
     sh.append(el('div', 'note', 'Switch off what you don\'t use and it stays out of your way.'));
