@@ -5,6 +5,8 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { Store } = require('./store');
 const { groupFor, GROUP_LIST } = require('./groups');
@@ -235,6 +237,7 @@ function sessionFor(identity) {
       d.state = state; d.received = item.getReceivedBytes();
       if (state === 'completed') d.total = d.received;
       if (item.getSavePath()) { d.file = item.getSavePath(); d.name = path.basename(d.file); }
+      if (state === 'completed') markDownloaded(d.file, item.getURL());
       pushState();
     });
     pushState();
@@ -251,6 +254,21 @@ const KINDS = {
   Documents: ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.md', '.musicxml', '.mscz'],
   Archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
 };
+// macOS only lets Gatekeeper check a file that is marked as downloaded. Chrome and
+// Safari write that mark; without it an installer from the web would open with no
+// check at all, so Cue writes it on every finished download.
+function markDownloaded(file, from) {
+  if (process.platform !== 'darwin' || !file) return;
+  const stamp = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
+  const value = `0001;${stamp};Cue;${crypto.randomUUID()}`;
+  execFile('/usr/bin/xattr', ['-w', 'com.apple.quarantine', value, file], () => {});
+  if (from) {
+    // "Where from" in Finder's Get Info, the same as any other browser.
+    const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><array><string>${String(from).replace(/[<&]/g, '')}</string></array></plist>`;
+    execFile('/usr/bin/xattr', ['-w', 'com.apple.metadata:kMDItemWhereFroms', plist, file], () => {});
+  }
+}
+
 function fileKind(file) {
   const ext = path.extname(file).toLowerCase();
   return Object.keys(KINDS).find((k) => KINDS[k].includes(ext)) || 'Other';
@@ -291,6 +309,9 @@ function tidyInstallers() {
 function servePages(ses) {
   if (ses.protocol.isProtocolHandled('cue')) return;
   ses.protocol.handle('cue', (req) => {
+    // Cue's own pages are never a frame inside somebody else's page.
+    const dest = req.headers.get('sec-fetch-dest') || '';
+    if (['iframe', 'frame', 'object', 'embed'].includes(dest)) return new Response('Not allowed', { status: 403 });
     const u = new URL(req.url);
     const rel = u.pathname.replace(/^\/+/, '') || `${u.hostname}.html`;
     const file = path.normalize(path.join(PAGES, rel));
@@ -314,7 +335,7 @@ function makeTab(opts) {
   const t = {
     id: nextId++, uid: opts.uid || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
     identity: IDENTITIES[opts.identity] ? opts.identity : (settings().spaceLogins[opts.space || store.data.space] || settings().defaultIdentity),
-    pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted,
+    pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
     order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: SPACES.includes(opts.space) ? opts.space : store.data.space,
     view: null, host: 'main', popout: null, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
@@ -364,11 +385,21 @@ function wireTab(t) {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
   };
-  const visit = () => { if (remembers(t) && /^https?:/.test(wc.getURL())) lib.visit(wc.getURL(), wc.getTitle()); };
-  wc.on('did-navigate', () => { nav(); visit(); });
+  // History is written when the page has settled, not the moment it is asked for,
+  // so Cue knows whether it actually worked. A blocked page, a 404 or a "Just a
+  // moment…" screen is not somewhere you went, and keeping it only filled the
+  // list with links that lead nowhere.
+  let lastCode = 200;
+  const visit = () => {
+    const url = wc.getURL();
+    if (!remembers(t) || !/^https?:/.test(url)) return;
+    if (lastCode >= 400 || BROKEN_PAGE.test((wc.getTitle() || '').trim())) return;
+    lib.visit(url, wc.getTitle());
+  };
+  wc.on('did-navigate', (_e, _u, code) => { lastCode = Number(code) || 200; nav(); });
   wc.on('did-navigate-in-page', (_e, _u, main) => { nav(); if (main) visit(); });
   wc.on('did-start-loading', () => { t.loading = true; pushState(); });
-  wc.on('did-stop-loading', () => { t.loading = false; nav(); readBillPage(t); });
+  wc.on('did-stop-loading', () => { t.loading = false; nav(); visit(); readBillPage(t); });
   wc.on('console-message', (e) => { if (e.level === 'error' || e.level === 'warning') logTab(t, e.level, `${e.message} (${e.sourceId}:${e.lineNumber})`); });
   wc.on('audio-state-changed', (e) => { t.audible = e.audible; pushState(); });
   wc.on('media-started-playing', () => {
@@ -479,8 +510,8 @@ function destroyView(t) {
 }
 
 function serialize(t) {
-  const { uid, url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent } = t;
-  return { uid, url, title, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent };
+  const { uid, url, title, name, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent } = t;
+  return { uid, url, title, name, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent };
 }
 
 function persist() {
@@ -880,7 +911,7 @@ function sendState() {
   const s = settings();
   uiView.webContents.send('ui:state', {
     tabs: sidebarOrder().map((t) => ({
-      id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
+      id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, name: t.name || null, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
       aiAllowed: t.aiAllowed, playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
@@ -980,6 +1011,7 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'mute': if (t) setMuted(t, !t.muted); break;
     case 'volume': if (t) setVolume(t, a.value); break;
     case 'media': if (t) { if (!t.view) ensureView(t); t.view.webContents.send('cue:media', a.cmd || 'toggle'); } break;
+    case 'rename': if (t) { const n = String(a.name || '').trim().slice(0, 60); t.name = n || null; pushState(); persist(); } break;
     case 'tab-menu': tabMenu(t); break;
     case 'reorder': reorder(a); break;
     case 'move-tab': moveTab(a); break;
@@ -1123,6 +1155,7 @@ function setSetting(key, value) {
 // ---------------------------------------------------------------- helpers for the features below
 const kit = (k) => settings().kits[k] !== false;
 const hostName = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
+const BROKEN_PAGE = /^(access denied|forbidden|403|404|not found|page not found|error|server error|bad gateway|service unavailable|too many requests|just a moment|attention required|problem loading page|site can.t be reached)/i;
 const securePage = (origin) => /^https:/.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
 const remembers = (t) => t.identity !== 'vanish' && !t.agent;
 
@@ -1235,6 +1268,10 @@ async function checkUpdate() {
 
 // ---------------------------------------------------------------- peek
 function openPeek(url, from) {
+  // A page can ask for a Peek by alt-clicking a link of its own making, so only
+  // ordinary web links come through here: never a file on this Mac, never one
+  // of Cue's own pages.
+  if (!/^https?:\/\//i.test(String(url || ''))) return;
   closePeek();
   const view = new WebContentsView({ webPreferences: { session: sessionFor(from.identity), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
   view.setBackgroundColor('#FFFFFF');
@@ -1376,6 +1413,15 @@ const internal = {
   'alerts.clear': () => { store.data.alerts = []; store.save(); pushState(); },
   'library.bookmarks': () => lib.bookmarks(''),
   'library.history': ({ q }) => lib.history(q, 500),
+  'library.sites': ({ q }) => {
+    // Filed under the same headings the sidebar uses, so History reads the way
+    // your tabs do: Nathaniel School, AI & Subscriptions, Google, Social, Code.
+    const name = (id) => (id === 'other' ? 'Everything else' : (GROUP_LIST.find((g) => g.id === id) || {}).name || 'Everything else');
+    const rank = (id) => (id === 'other' ? 99 : GROUP_LIST.findIndex((g) => g.id === id));
+    return lib.sites(q, 400).map((r) => { const id = groupFor(`https://${r.host}/`); return { ...r, group: name(id), rank: rank(id) }; });
+  },
+  'library.pages': ({ host }) => lib.pages(host, 500),
+  'library.forget': ({ host }) => { lib.forgetSite(host); return true; },
   'library.archived': () => store.data.archived,
   'library.restore': ({ id }) => {
     const a = store.data.archived.find((x) => x.id === id); if (!a) return;
@@ -1907,6 +1953,7 @@ app.whenReady().then(async () => {
   buildMenu();
   createMain();
   checkBills(); tidyInstallers(); loadRepos(); setTimeout(checkUpdate, 8000); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
+  setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch
   const launchLink = process.argv.slice(1).find((x) => /^https?:\/\//.test(x)); if (launchLink) pendingUrls.push(launchLink);
   pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
   setupBlocker();

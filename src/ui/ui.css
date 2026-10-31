@@ -50,9 +50,9 @@ button { font: inherit; color: inherit; }
 .media { font-size: 10px !important; }
 
 /* hover volume: point at the speaker, the slider appears across the row, drag it, leave */
-.volpop { position: absolute; inset: 3px 58px 3px 32px; display: none; align-items: center; gap: 8px; padding: 0 8px; border-radius: 6px; background: var(--raised); border: 1px solid var(--line); z-index: 3; }
+.volpop { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 148px; display: none; align-items: center; gap: 8px;
+  height: 28px; padding: 0 9px; border-radius: 14px; background: var(--raised); border: 1px solid var(--line); box-shadow: 0 4px 14px -6px var(--shadow); z-index: 4; }
 .tab.vol-open .volpop { display: flex; }
-.tab.vol-open .title { visibility: hidden; }
 .volpop input { flex: 1; min-width: 0; accent-color: var(--ink); height: 16px; }
 .volpop .pct { font-variant-numeric: tabular-nums; font-size: 11px; color: var(--muted); width: 32px; text-align: right; }
 
@@ -210,10 +210,11 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
    12px labels on the same baseline, which is what made this corner look busy. */
 .spaces { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; flex: none; position: relative; }
 .spaces button { border: 0; background: none; padding: 0; cursor: pointer; display: inline-flex; align-items: baseline; gap: 5px; font: inherit; color: var(--muted); }
-.spaces button.on { font: italic 500 31px/1.05 var(--serif); letter-spacing: -.015em; color: var(--tone); padding-bottom: 1px; }
-.spaces button.on .ct { font: 600 10.5px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: .02em; color: var(--tone); opacity: .55; transform: translateY(-11px); }
+.spaces button.on { font: italic 500 25px/1.1 var(--serif); letter-spacing: -.005em; color: var(--ink); padding-bottom: 1px; align-items: center; gap: 7px; }
+.spaces button.on .ct { font: 600 10px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: .03em; color: var(--muted);
+  background: var(--hover); border-radius: 999px; padding: 3px 6px; transform: none; }
 .spacerow { display: flex; flex-wrap: wrap; gap: 4px; }
-.spacerow button { font: 500 11.5px/1 -apple-system, system-ui, sans-serif; letter-spacing: .015em; padding: 5px 9px; border-radius: 999px; background: var(--hover); transition: background .14s, color .14s; }
+.spacerow button { font: 500 11px/1 -apple-system, system-ui, sans-serif; letter-spacing: .02em; padding: 5px 10px; border-radius: 999px; background: var(--hover); transition: background .14s, color .14s; }
 .spacerow button:hover { background: color-mix(in srgb, var(--tone) 13%, transparent); color: var(--ink); }
 .spacerow button:focus-visible { outline: 2px solid var(--tone); outline-offset: 1px; }
 .spacerow .ct { font-variant-numeric: tabular-nums; font-size: 10px; font-weight: 600; opacity: .6; }
@@ -222,22 +223,31 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .newtab svg { width: 15px; height: 15px; stroke-width: 1.8; }
 .newtab:hover { transform: scale(1.06); }
 .newtab:active { transform: scale(.96); }
-.idpick { display: flex; gap: 4px; }
+.idpick { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.idwho { display: flex; flex-direction: column; justify-content: center; margin-left: 4px; line-height: 1.15; min-width: 0; }
+.idwho b { font: 600 11px/1.15 -apple-system, system-ui, sans-serif; color: var(--ink); white-space: nowrap; }
+.idwho span { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.rail .idwho { display: none; }
 .idpick button { width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid transparent; background: color-mix(in srgb, var(--c) 18%, transparent); color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer; display: grid; place-items: center; padding: 0; }
 .idpick button:hover { border-color: color-mix(in srgb, var(--c) 60%, transparent); }
 .idpick button.on { background: var(--c); border-color: var(--c); color: #fff; }
 .idpick button.vanish { background: none; border: 1.5px dashed var(--muted); }
 .idpick button.vanish:hover { border-color: var(--ink); }
-.pins { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+.pins { display: flex; flex-wrap: wrap; gap: 8px; flex: none; }
 .pins:empty { display: none; }
-.pin { width: 34px; height: 34px; border-radius: 50%; background: var(--raised); box-shadow: 0 1px 3px var(--shadow); display: grid; place-items: center; position: relative; cursor: pointer; font-size: 12px; font-weight: 600; }
-.pin img { width: 18px; height: 18px; border-radius: 4px; }
+.pin { width: 44px; height: 44px; border-radius: 13px; background: var(--raised); box-shadow: 0 1px 4px -1px var(--shadow); display: grid; place-items: center;
+  position: relative; cursor: pointer; transition: transform .12s, box-shadow .12s; }
+.pin:hover { transform: translateY(-1px); box-shadow: 0 4px 10px -4px var(--shadow); }
+.pin img { width: 26px; height: 26px; border-radius: 7px; object-fit: contain; }
+.pin .ltr { font: 700 15px/1 -apple-system, system-ui, sans-serif; font-style: normal; color: var(--muted); }
 .pin.active { box-shadow: 0 0 0 2px var(--tone); }
-.pin .dot { position: absolute; right: 0; top: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--ring); border: 1.5px solid var(--side); }
+.pin .dot { position: absolute; right: -1px; top: -1px; width: 9px; height: 9px; border-radius: 50%; background: var(--ring); border: 2px solid var(--side); }
 .pin.onair { box-shadow: 0 0 0 2px var(--onair); }
+body.rail .pin { width: 36px; height: 36px; border-radius: 11px; }
+body.rail .pin img { width: 22px; height: 22px; }
 .groups { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 0 -6px; padding: 2px 6px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .group { margin-bottom: 14px; }
-.ghead { display: flex; align-items: center; gap: 8px; padding: 2px 2px 4px; color: var(--muted); cursor: pointer; font: italic 500 14px/1.2 var(--serif); }
+.ghead { display: flex; align-items: center; gap: 8px; padding: 2px 2px 4px; color: var(--muted); cursor: pointer; font: italic 500 13.5px/1.2 var(--serif); letter-spacing: .005em; }
 .ghead::after { content: ""; order: 2; flex: 1; height: 1px; background: var(--stave); }
 .ghead:hover { color: var(--ink); }
 .ghead .caret { display: none; }
@@ -252,10 +262,14 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .tab.active { background: color-mix(in srgb, var(--tone) 14%, var(--raised)); box-shadow: 0 2px 7px -3px var(--shadow); }
 .tab.active .title { font-weight: 600; }
 .tab.insplit::after { content: ""; position: absolute; left: 1px; bottom: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--tone); }
-.fav { position: relative; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--raised); font-size: 10px; font-weight: 700; color: var(--muted); flex: none; box-shadow: 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent); }
-.fav.ringed { box-shadow: 0 0 0 2px var(--ring); }
-.fav img { width: 16px; height: 16px; border-radius: 3px; filter: drop-shadow(0 0 1px color-mix(in srgb, var(--ink) 55%, transparent)); }
-.fav svg { width: 14px; height: 14px; color: var(--tone); }
+.fav { position: relative; width: 22px; height: 22px; display: grid; place-items: center; flex: none; }
+.fav img { width: 20px; height: 20px; border-radius: 5px; object-fit: contain; }
+.fav .ltr { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; background: var(--hover);
+  font: 700 10px/1 -apple-system, system-ui, sans-serif; font-style: normal; color: var(--muted); }
+.fav svg { width: 17px; height: 17px; color: var(--tone); }
+/* Which account this tab belongs to: a dot in the corner. A ring around every
+   icon turned the whole sidebar one colour and buried the logos it marked. */
+.fav .idot { position: absolute; left: -2px; top: -2px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--side); }
 .favsound { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; background: var(--cued); border: 1.5px solid var(--side); }
 .favsound.off { background: var(--onair); }
 .sg .v img { width: 16px; height: 16px; border-radius: 3px; vertical-align: -3px; margin-right: 7px; }
@@ -321,3 +335,18 @@ body.rail .livebox .lb-title, body.rail .livebox .lb-thumb, body.rail .livebox .
 .updatebar button.ghost { background: transparent; color: var(--muted); padding: 4px 6px; }
 .updatebar button.ghost:hover { color: var(--ink); }
 body.rail .updatebar { display: none; }
+
+/* ---- Cue's own tooltip. The system's box is slow, yellow, and in dark mode it
+   lands on top of the thing you are pointing at. This one waits a moment, then
+   says what the control is and, underneath, what it does. */
+.tip { position: fixed; z-index: 90; pointer-events: none; max-width: 268px; padding: 7px 10px; border-radius: 9px;
+  background: var(--raised); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 8px 22px -8px var(--shadow);
+  font: 12px/1.35 -apple-system, system-ui, sans-serif; }
+.tip b { display: block; font-weight: 600; }
+.tip span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+
+/* ---- renaming a tab happens in place, on the row itself */
+.rename { grid-column: 2; min-width: 0; width: 100%; height: 24px; padding: 0 7px; border-radius: 6px;
+  border: 1px solid var(--accent); background: var(--raised); color: var(--ink);
+  font: 600 13px/1 -apple-system, system-ui, sans-serif; }
+.rename:focus { outline: none; }

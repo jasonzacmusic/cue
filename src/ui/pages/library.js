@@ -30,6 +30,12 @@
       { url: 'https://github.com/jasonzacmusic/cue', title: 'jasonzacmusic/cue: a browser for musicians', lastVisit: now - 1 * D - 6 * H, visits: 9 },
       { url: 'https://example.com/a-really-long-address/that-keeps-going/and-going/and-going/until-it-has-to-be-cut-off-by-the-row?with=query&and=more', title: 'A page with a very long title that should be cut off tidily at the end of the row instead of wrapping', lastVisit: now - 9 * D, visits: 1 },
     ],
+    sites: [
+      { host: 'learning-portal.nathanielschool.com', title: 'Learning Portal', visits: 310, lastVisit: now - 20 * 60000, pages: 24, group: 'Nathaniel School' },
+      { host: 'studio.youtube.com', title: 'YouTube Studio', visits: 88, lastVisit: now - 2 * H, pages: 6, group: 'Google' },
+      { host: 'espncricinfo.com', title: 'ESPNcricinfo', visits: 12, lastVisit: now - 1 * D, pages: 4, group: 'Tabs' },
+      { host: 'claude.ai', title: 'Claude', visits: 140, lastVisit: now - 4 * H, pages: 9, group: 'AI & Subscriptions' },
+    ],
     archived: [
       { id: 'x1', url: 'https://www.instagram.com/nathanielschool/', title: 'Nathaniel School of Music (@nathanielschool)', archivedAt: now - 3 * H },
       { id: 'x2', url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox - Gmail', archivedAt: now - 2 * D },
@@ -38,16 +44,20 @@
   async function fake(cmd, a) {
     if (cmd === 'library.bookmarks') return sample.bookmarks.slice();
     if (cmd === 'library.history') { const q = (a.q || '').toLowerCase(); return sample.history.filter((h) => !q || (h.title + ' ' + h.url).toLowerCase().includes(q)); }
+    if (cmd === 'library.sites') { const q = (a.q || '').toLowerCase(); return sample.sites.filter((x) => !q || (x.title + ' ' + x.host).toLowerCase().includes(q)); }
+    if (cmd === 'library.pages') return sample.history.filter((h) => host(h.url) === a.host);
+    if (cmd === 'library.forget') { sample.sites = sample.sites.filter((x) => x.host !== a.host); return true; }
     if (cmd === 'library.archived') return sample.archived.slice();
     if (cmd === 'library.restore') { sample.archived = sample.archived.filter((x) => x.id !== a.id); return true; }
-    if (cmd === 'library.history.clear') { sample.history = []; return true; }
+    if (cmd === 'library.history.clear') { sample.history = []; sample.sites = []; return true; }
     if (cmd === 'open') { toast('Would open ' + a.url); return true; }
     return null;
   }
   const call = (cmd, args) => (window.cueInternal ? window.cueInternal.invoke(cmd, args || {}) : fake(cmd, args || {}));
 
   // ---- state ----
-  const data = { bookmarks: [], history: [], archived: [] };
+  const data = { bookmarks: [], history: [], sites: [], archived: [] };
+  const openSites = new Set(); // which sites you have opened up to see their pages
   const counts = {};
   let tab = 'bookmarks';
   let confirmClear = false;
@@ -104,12 +114,66 @@
     for (const [f, items] of folders) out.appendChild(group(f, items.map((b) => row(b, q, []))));
     return list.length;
   }
+  // History is a list of places, not a list of pages. One line per website,
+  // filed under the same headings the sidebar uses, and you open a site up to
+  // see the pages Cue has kept from it — or forget that site completely.
+  function siteEntry(s, q) {
+    const li = el('li', 'row');
+    li.appendChild(el('div', 'ic', (s.host[0] || '?').toUpperCase()));
+    const tx = el('div', 'tx');
+    const a = el('a'); a.href = 'https://' + s.host + '/';
+    hl(a, s.title && s.title !== s.host ? s.title : s.host, q);
+    a.addEventListener('click', (e) => { e.preventDefault(); open('https://' + s.host + '/'); });
+    const u = el('span', 'u'); hl(u, s.host, q);
+    tx.append(a, u); li.appendChild(tx);
+
+    const meta = el('div', 'meta');
+    meta.append(el('span', null, relative(s.lastVisit)), el('span', null, s.visits === 1 ? '1 visit' : s.visits + ' visits'));
+    const openUp = el('button', 'btn small quiet', '');
+    openUp.type = 'button';
+    const pages = el('li', 'pagelist'); pages.hidden = !openSites.has(s.host);
+    const label = () => {
+      openUp.textContent = !s.pages ? 'No pages kept'
+        : openSites.has(s.host) ? 'Hide pages' : (s.pages === 1 ? 'Show 1 page' : 'Show ' + s.pages + ' pages');
+      openUp.disabled = !s.pages;
+    };
+    label();
+    openUp.addEventListener('click', async () => {
+      if (openSites.has(s.host)) { openSites.delete(s.host); pages.hidden = true; label(); return; }
+      openSites.add(s.host); label();
+      pages.textContent = ''; pages.hidden = false;
+      let rows = [];
+      try { rows = (await call('library.pages', { host: s.host })) || []; } catch (e) { rows = []; }
+      if (!rows.length) { pages.appendChild(el('p', 'none', 'Nothing kept from this site yet.')); return; }
+      const ul = el('ul', 'rows');
+      rows.forEach((h) => ul.appendChild(row(h, q, [el('span', null, relative(h.lastVisit))])));
+      pages.appendChild(ul);
+    });
+    const forget = el('button', 'btn small danger', 'Forget');
+    forget.type = 'button';
+    forget.setAttribute('aria-label', 'Forget everything from ' + s.host);
+    let sure = false;
+    forget.addEventListener('click', async () => {
+      if (!sure) { sure = true; forget.textContent = 'Forget it all?'; forget.classList.add('sure'); setTimeout(() => { sure = false; forget.textContent = 'Forget'; forget.classList.remove('sure'); }, 4000); return; }
+      try { await call('library.forget', { host: s.host }); toast('Forgot ' + s.host); } catch (e) { toast('Could not forget that site.'); }
+      openSites.delete(s.host); await loadHistory(); counts.history = data.sites.length; render();
+    });
+    meta.append(openUp, forget);
+    li.appendChild(meta);
+    return [li, pages];
+  }
+
   function renderHistory(q, out) {
-    const list = data.history.slice().sort((a, b) => b.lastVisit - a.lastVisit);
-    if (!list.length) { out.appendChild(q ? empty('Nothing found', 'No visited page matches that.') : empty('No history', 'Pages you visit will show up here.')); return 0; }
-    const days = new Map();
-    for (const h of list) { const k = dayLabel(h.lastVisit); if (!days.has(k)) days.set(k, []); days.get(k).push(h); }
-    for (const [k, items] of days) out.appendChild(group(k, items.map((h) => row(h, q, [el('span', null, clock(h.lastVisit)), el('span', null, h.visits === 1 ? '1 visit' : h.visits + ' visits')]))));
+    const list = data.sites.slice().sort((a, b) => b.lastVisit - a.lastVisit);
+    if (!list.length) { out.appendChild(q ? empty('Nothing found', 'No website matches that.') : empty('No history', 'The websites you visit will show up here, one line each.')); return 0; }
+    const cats = new Map();
+    for (const s of list) { const k = s.group || 'Everything else'; if (!cats.has(k)) cats.set(k, []); cats.get(k).push(s); }
+    const ordered = [...cats.entries()].sort((a, b) => (a[1][0].rank ?? 98) - (b[1][0].rank ?? 98));
+    for (const [k, items] of ordered) {
+      const rows = [];
+      items.forEach((s) => rows.push(...siteEntry(s, q)));
+      out.appendChild(group(k, rows));
+    }
     return list.length;
   }
   function renderArchived(q, out) {
@@ -142,7 +206,7 @@
     });
     $('out').setAttribute('aria-labelledby', 't-' + tab);
     $('status').textContent = q ? (n === 1 ? '1 match' : n + ' matches') : '';
-    const ch = $('clearHist'); ch.hidden = tab !== 'history' || !data.history.length;
+    const ch = $('clearHist'); ch.hidden = tab !== 'history' || !data.sites.length;
     ch.textContent = confirmClear ? 'Yes, clear it all' : 'Clear history'; ch.classList.toggle('sure', confirmClear);
   }
 
@@ -150,8 +214,8 @@
   async function loadArchived() { try { data.archived = (await call('library.archived')) || []; } catch (e) { data.archived = []; } counts.archived = data.archived.length; }
   async function loadHistory() {
     const q = $('q').value.trim();
-    try { data.history = (await call('library.history', { q })) || []; } catch (e) { data.history = []; }
-    if (!q) counts.history = data.history.length;
+    try { data.sites = (await call('library.sites', { q })) || []; } catch (e) { data.sites = []; }
+    if (!q) counts.history = data.sites.length;
   }
 
   function setTab(t) {
@@ -173,7 +237,7 @@
     if (!confirmClear) { confirmClear = true; render(); setTimeout(() => { if (confirmClear) { confirmClear = false; render(); } }, 5000); return; }
     confirmClear = false;
     try { await call('library.history.clear'); toast('History cleared'); } catch (e) { toast('Could not clear history.'); }
-    $('q').value = ''; await loadHistory(); counts.history = data.history.length; render();
+    $('q').value = ''; openSites.clear(); await loadHistory(); counts.history = data.sites.length; render();
   });
 
   (async () => {

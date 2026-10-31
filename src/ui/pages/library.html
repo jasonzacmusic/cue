@@ -27,6 +27,12 @@
 .row .tx a:hover { color: var(--accent); text-decoration: underline; }
 .row .u { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .meta { font-size: 12px; color: var(--muted); white-space: nowrap; display: flex; gap: 10px; align-items: center; }
+.pagelist { list-style: none; padding: 0 12px 10px 54px; border-top: 1px solid var(--line); background: var(--bg); }
+.pagelist .rows { border-radius: 9px; margin-top: 10px; }
+.pagelist .row { padding: 6px 10px; }
+.pagelist .row .ic { display: none; }
+.pagelist .row { grid-template-columns: minmax(0, 1fr) auto; }
+.pagelist .none { color: var(--muted); font-size: 12.5px; margin: 10px 0 2px; }
 .statusline { color: var(--muted); font-size: 12.5px; margin: 0 2px 10px; }
 mark { background: var(--due-wash); color: inherit; border-radius: 3px; padding: 0 1px; }
 @media (max-width: 700px) { .row { grid-template-columns: 30px minmax(0, 1fr); } .row .meta { grid-column: 2; } .tools { margin-left: 0; } }

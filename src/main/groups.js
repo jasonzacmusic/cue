@@ -25,7 +25,7 @@ const GROUPS = [
   { id: 'code', name: 'Code', hosts: ['github.com', 'gitlab.com', 'npmjs.com', 'stackoverflow.com'] },
 ];
 
-const OTHER = { id: 'other', name: 'Tabs' };
+const OTHER = { id: 'other', name: 'Tabs' }; // "Tabs" in the sidebar; History calls the same group "Everything else"
 
 function hostMatches(host, rule) {
   return host === rule || host.endsWith('.' + rule);

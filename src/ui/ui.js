@@ -34,24 +34,101 @@ $('#openlibrary').innerHTML = ICONS.library;
 $('#openbills').insertAdjacentHTML('afterbegin', ICONS.bills);
 $('#opensettings').innerHTML = ICONS.settings;
 
+// ---------------------------------------------------------------- tooltips
+// One quiet label of Cue's own, instead of the system's slow yellow box: it knows
+// the dark theme, it never covers what you are pointing at, and it can carry a
+// second line telling you what the thing does.
+const tipBox = el('div', 'tip'); tipBox.hidden = true; document.body.append(tipBox);
+let tipTimer = null;
+function tip(node, text, sub) {
+  node.removeAttribute('title');
+  node.dataset.tip = text || '';
+  if (sub) node.dataset.tipsub = sub; else delete node.dataset.tipsub;
+  if (!node.getAttribute('aria-label')) node.setAttribute('aria-label', text || '');
+  return node;
+}
+function showTip(node) {
+  if (!node.isConnected || !node.dataset.tip) return;
+  tipBox.innerHTML = `<b>${esc(node.dataset.tip)}</b>${node.dataset.tipsub ? `<span>${esc(node.dataset.tipsub)}</span>` : ''}`;
+  tipBox.hidden = false;
+  const r = node.getBoundingClientRect(); const b = tipBox.getBoundingClientRect();
+  const x = Math.max(6, Math.min(innerWidth - b.width - 6, r.left + r.width / 2 - b.width / 2));
+  const below = r.bottom + 8;
+  tipBox.style.left = `${Math.round(x)}px`;
+  tipBox.style.top = `${Math.round(below + b.height > innerHeight - 6 ? r.top - b.height - 8 : below)}px`;
+}
+const hideTip = () => { clearTimeout(tipTimer); tipBox.hidden = true; };
+document.addEventListener('mouseover', (e) => {
+  const node = e.target.closest && e.target.closest('[data-tip]');
+  clearTimeout(tipTimer);
+  if (!node) { tipBox.hidden = true; return; }
+  tipTimer = setTimeout(() => showTip(node), 380);
+});
+document.addEventListener('mouseout', hideTip);
+document.addEventListener('mousedown', hideTip, true);
+addEventListener('blur', hideTip);
+
+// ---------------------------------------------------------------- tab names
+// A page title is written for a search engine — "Chord Trees - Interactive Chord
+// Visualization | Learn Music Theory" — and in a narrow column all you ever see is
+// the part that says nothing. Cue keeps the piece that names the thing. Rename a
+// tab yourself (double-click it) and your name always wins.
+const TITLE_SPLIT = /\s+[|–—·•]\s+|\s+-\s+/;
+function shortName(t) {
+  if (t.name) return t.name;
+  const full = (t.title || '').trim();
+  if (!full) return hostOf(t.url) || 'New tab';
+  let head = full.split(TITLE_SPLIT)[0].trim();
+  const colon = head.match(/^([^:]{2,28}):\s+\S/); // "Pitara: piano, tuner, metronome…"
+  if (colon) head = colon[1].trim();
+  if (head.length < 3) head = full; // a bare "Home" or "(3)" tells you nothing
+  return head.length > 46 ? `${head.slice(0, 45).trimEnd()}…` : head;
+}
+
+// Where to look for a site's logo: the one the page gave us, then the usual
+// address, then Google's icon service.
+function iconSources(t) {
+  const tries = [t.favicon];
+  if (/^https?:/.test(t.url || '') && t.identity !== 'vanish') {
+    try {
+      const u = new URL(t.url);
+      const usual = `${u.origin}/favicon.ico`;
+      const service = `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`;
+      tries.push(...(/\.google\.com$/.test(u.hostname) ? [service, usual] : [usual, service]));
+    } catch {}
+  }
+  return tries.filter(Boolean);
+}
+// An image that quietly tries the next source, and falls back to a letter.
+function iconImg(srcs, onGiveUp) {
+  const i = new Image(); i.alt = '';
+  const list = srcs.slice();
+  i.onerror = () => { list.shift(); if (list.length) i.src = list[0]; else { i.remove(); onGiveUp(); } };
+  i.src = list[0];
+  return i;
+}
+// A tab is marked only when it is signed in somewhere other than the login this
+// Space uses — otherwise every row in the Space carried the same mark.
+function offLogin(t) {
+  const here = (S.settings.spaceLogins && S.settings.spaceLogins[t.space]) || S.settings.defaultIdentity;
+  return t.agent || t.identity !== here;
+}
+
 function favEl(t) {
   const f = el('span', 'fav');
-  const showRing = t.identity !== S.settings.defaultIdentity || t.agent;
-  if (showRing) { f.classList.add('ringed'); f.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); }
-  const letter = () => { f.textContent = (t.title || hostOf(t.url) || '?').slice(0, 1).toUpperCase(); };
+  const showRing = offLogin(t);
+  // A site's own logo, drawn as the site drew it. The login it belongs to is a
+  // small dot in the corner, not a ring around the icon: a ring on every row
+  // turned the whole sidebar orange and hid the logos it was meant to mark.
+  const letter = () => { const l = el('i', 'ltr'); l.textContent = (shortName(t) || hostOf(t.url) || '?').slice(0, 1).toUpperCase(); f.prepend(l); };
   // A tab that has not woken up yet has no icon from its page, so Cue's own pages draw theirs
   // and a site is tried at the usual address, then through Google's icon service.
   const page = /^cue:\/\/(\w+)/.exec(t.url || '');
-  const http = /^https?:/.test(t.url || '');
-  const tries = [t.favicon];
-  if (http && t.identity !== 'vanish') { try { const u = new URL(t.url); const usual = `${u.origin}/favicon.ico`; const service = `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`; tries.push(...(/\.google\.com$/.test(u.hostname) ? [service, usual] : [usual, service])); } catch {} }
-  const srcs = tries.filter(Boolean);
+  const srcs = iconSources(t);
   if (page && ICONS[page[1]]) f.innerHTML = ICONS[page[1]];
-  else if (srcs.length) {
-    const i = new Image(); i.alt = '';
-    i.onerror = () => { srcs.shift(); if (srcs.length) i.src = srcs[0]; else { i.remove(); letter(); } };
-    i.src = srcs[0]; f.append(i);
-  } else letter();
+  else if (srcs.length) f.append(iconImg(srcs, letter));
+  else letter();
+  if (showRing) { const d = el('i', 'idot'); d.style.background = t.agent ? 'var(--agent)' : ringColor(t); f.append(d); }
   if (t.audible || t.muted) f.append(el('b', 'favsound' + (t.muted ? ' off' : '')));
   return f;
 }
@@ -136,16 +213,26 @@ function renderIdPick() {
   for (const [id, v] of Object.entries(S.identities)) {
     const b = el('button', id === 'vanish' ? 'vanish' : '', id === 'vanish' ? '' : esc(v.name[0]));
     b.style.setProperty('--c', v.color);
-    b.title = id === 'vanish' ? 'Open the Vanish window: nothing is saved' : `New tabs open as ${v.name}${S.labels[id] ? ` · ${S.labels[id]}` : ''}`;
-    b.setAttribute('aria-label', b.title);
+    const what = { personal: 'Your own account', school: 'The school account', agent: 'The account AI agents use' }[id] || '';
+    tip(b, id === 'vanish' ? 'Vanish window' : `${v.name}${S.labels[id] ? ` · ${S.labels[id]}` : ''}`,
+      id === 'vanish' ? 'A window that saves nothing — no history, no cookies, no files' : `${what}. New tabs open here, with its own sign-ins.`);
+    b.setAttribute('aria-label', id === 'vanish' ? 'Open a Vanish window' : `New tabs open as ${v.name}`);
     if (id !== 'vanish') { b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === newIdentity); }
     if (id === newIdentity) b.classList.add('on');
+    b.dataset.who = id;
     b.onclick = () => {
       if (id === 'vanish') { send('new-tab', { identity: 'vanish' }); return; }
       newIdentity = id; try { localStorage.setItem('cue.newIdentity', id); } catch {} renderIdPick();
     };
     box.append(b);
   }
+  // A row of initials means nothing on its own. Say whose account new tabs open in.
+  const who = S.identities[newIdentity];
+  const cap = el('span', 'idwho');
+  cap.append(el('b', '', esc(who ? who.name : '')));
+  if (S.labels[newIdentity]) cap.append(el('span', '', esc(S.labels[newIdentity])));
+  tip(cap, `New tabs open as ${who ? who.name : ''}`, 'Each account keeps its own sign-ins — one Google in each.');
+  box.append(cap);
 }
 
 function renderSpaces() {
@@ -221,11 +308,17 @@ function renderExtras() {
 function renderPins() {
   const box = $('#pins'); box.innerHTML = '';
   for (const t of S.tabs.filter((x) => x.pinned && inSpace(x))) {
-    const p = el('div', 'pin'); p.title = t.title;
+    const p = el('div', 'pin');
+    tip(p, shortName(t), hostOf(t.url) || '');
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
-    if (t.favicon) { const i = new Image(); i.src = t.favicon; p.append(i); } else p.textContent = (t.title || '?')[0];
-    if (t.identity !== S.settings.defaultIdentity) { const d = el('span', 'dot'); d.style.setProperty('--ring', ringColor(t)); p.append(d); }
+    const letter = () => p.prepend(el('i', 'ltr', esc((shortName(t)[0] || '?').toUpperCase())));
+    const page = /^cue:\/\/(\w+)/.exec(t.url || '');
+    const srcs = iconSources(t);
+    if (page && ICONS[page[1]]) p.innerHTML = ICONS[page[1]];
+    else if (srcs.length) p.append(iconImg(srcs, letter));
+    else letter();
+    if (offLogin(t)) { const d = el('span', 'dot'); d.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); p.append(d); }
     p.onclick = () => send('activate', { id: t.id });
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
     box.append(p);
@@ -270,8 +363,22 @@ function tabRow(t, splitIds) {
   if (S.live && t.id === S.programId) row.classList.add('onair');
   else if (S.live && t.id === S.activeId) row.classList.add('cued');
   row.append(favEl(t));
-  const title = el('span', 'title', esc(t.loading ? `${t.title}` : t.title));
-  title.title = `${t.title}\n${t.url}`;
+  const title = el('span', 'title', esc(shortName(t)));
+  tip(title, t.title || shortName(t), t.name ? 'Your name for this tab · double-click to change it' : 'Double-click to rename');
+  title.ondblclick = (e) => {
+    e.stopPropagation(); hideTip();
+    const inp = el('input', 'rename');
+    inp.value = t.name || shortName(t);
+    inp.onclick = (ev) => ev.stopPropagation();
+    inp.ondblclick = (ev) => ev.stopPropagation();
+    inp.onkeydown = (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter') { send('rename', { id: t.id, name: inp.value }); inp.blur(); }
+      if (ev.key === 'Escape') { inp.dataset.cancel = '1'; inp.blur(); }
+    };
+    inp.onblur = () => { inp.remove(); title.hidden = false; };
+    title.hidden = true; title.after(inp); inp.focus(); inp.select();
+  };
   row.append(title);
 
   const ctl = el('span', 'ctl');
@@ -283,16 +390,15 @@ function tabRow(t, splitIds) {
 
   if (t.playing || t.audible) {
     const m = el('button', 'media', t.playing ? '❚❚' : '▶');
-    m.title = t.playing ? 'Pause (⌃P)' : 'Play (⌃P)';
+    tip(m, t.playing ? 'Pause' : 'Play', '⌃P');
     m.onclick = (e) => { e.stopPropagation(); send('media', { id: t.id, cmd: 'toggle' }); };
     ctl.append(m);
   }
   const hasSound = t.audible || t.muted || t.playing || t.volume < 1;
   const spk = el('button', 'spk' + (t.muted ? ' muted' : t.audible ? ' live' : ''), t.muted ? SPK.off : SPK.on);
-  spk.title = t.muted ? 'Unmute' : `Mute · volume ${Math.round(t.volume * 100)}%`;
-  spk.setAttribute('aria-label', spk.title);
+  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${Math.round(t.volume * 100)}%`, 'Click to mute · scroll to change · ⌥click for the slider');
   if (!hasSound) { spk.style.visibility = 'hidden'; row.addEventListener('mouseenter', () => { spk.style.visibility = 'visible'; }); row.addEventListener('mouseleave', () => { if (openVolId !== t.id) spk.style.visibility = 'hidden'; }); }
-  spk.onclick = (e) => { e.stopPropagation(); send('mute', { id: t.id }); };
+  spk.onclick = (e) => { e.stopPropagation(); if (e.altKey) { toggleVol(); return; } send('mute', { id: t.id }); };
   spk.onwheel = (e) => { e.preventDefault(); send('volume', { id: t.id, value: Math.round((t.volume + (e.deltaY < 0 ? 0.05 : -0.05)) * 100) / 100 }); };
 
   const pop = el('div', 'volpop');
@@ -303,26 +409,32 @@ function tabRow(t, splitIds) {
   r.onclick = (e) => e.stopPropagation();
   pop.append(r, pct);
   pop.onclick = (e) => e.stopPropagation();
+  // The slider used to slide over the whole row the moment the pointer crossed the
+  // speaker, which left you unable to click the tab you were aiming for. Now it
+  // only ever opens because you asked, and it sits at the end of the row.
   let closeTimer;
-  const openVol = () => { clearTimeout(closeTimer); openVolId = t.id; row.classList.add('vol-open'); };
-  const closeVol = () => { closeTimer = setTimeout(() => { if (openVolId === t.id) openVolId = null; row.classList.remove('vol-open'); }, 350); };
-  spk.addEventListener('mouseenter', openVol);
-  spk.addEventListener('mouseleave', closeVol);
-  pop.addEventListener('mouseenter', openVol);
-  pop.addEventListener('mouseleave', closeVol);
+  const closeVol = () => { clearTimeout(closeTimer); if (openVolId === t.id) openVolId = null; row.classList.remove('vol-open'); };
+  const toggleVol = () => {
+    if (openVolId === t.id) { closeVol(); return; }
+    openVolId = t.id; row.classList.add('vol-open');
+    document.querySelectorAll('.tab.vol-open').forEach((o) => { if (o !== row) o.classList.remove('vol-open'); });
+    r.focus();
+  };
+  pop.addEventListener('mouseleave', () => { closeTimer = setTimeout(closeVol, 600); });
+  pop.addEventListener('mouseenter', () => clearTimeout(closeTimer));
   if (openVolId === t.id) row.classList.add('vol-open');
   row.append(pop);
   ctl.append(spk);
 
-  const up = el('button', 'movet', '↑'); up.title = 'Move this tab up (⌥⌘↑)';
-  up.setAttribute('aria-label', `Move ${t.title || 'tab'} up`);
+  const up = el('button', 'movet', '↑'); tip(up, 'Move up', '⌥⌘↑');
+  up.setAttribute('aria-label', `Move ${shortName(t)} up`);
   up.onclick = (e) => { e.stopPropagation(); send('move-tab', { id: t.id, dir: -1 }); };
-  const dn = el('button', 'movet', '↓'); dn.title = 'Move this tab down (⌥⌘↓)';
-  dn.setAttribute('aria-label', `Move ${t.title || 'tab'} down`);
+  const dn = el('button', 'movet', '↓'); tip(dn, 'Move down', '⌥⌘↓');
+  dn.setAttribute('aria-label', `Move ${shortName(t)} down`);
   dn.onclick = (e) => { e.stopPropagation(); send('move-tab', { id: t.id, dir: 1 }); };
   ctl.append(up, dn);
 
-  const x = el('button', 'close', '×'); x.title = 'Close tab (⌘W)';
+  const x = el('button', 'close', '×'); tip(x, 'Close tab', '⌘W');
   x.onclick = (e) => { e.stopPropagation(); send('close', { id: t.id }); };
   ctl.append(x);
   row.append(ctl);

@@ -158,9 +158,11 @@ function install(init) {
     return s;
   };
 
-  Object.defineProperty(window, '__cue', {
-    enumerable: false,
-    value: {
+  // These are Cue's hooks, not the page's. A website must not be able to un-blur
+  // Safe-share, switch its own notifications back on in the middle of a class, or
+  // undo the volume you set for its tab, so they sit behind a secret Cue makes
+  // fresh for every page and never hands out.
+  const api = {
       setHold(on) { held = !!on; },
       music(op, v) {
         const e = main();
@@ -195,16 +197,20 @@ function install(init) {
       setOriginalSound(on) { originalSound = on; },
       effective() { return media().map((e) => desc.get.call(e)); },
       setSafe,
-    },
+  };
+  Object.defineProperty(window, '__cue', {
+    enumerable: false,
+    value: Object.freeze({ call(k, n, ...a) { return k === init.key && api[n] ? api[n](...a) : null; } }),
   });
   if (init.safe) document.addEventListener('DOMContentLoaded', () => setSafe(true));
 }
 
+const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
-contextBridge.executeInMainWorld({ func: install, args: [init] });
+contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
 
 const call = (name, ...args) => contextBridge.executeInMainWorld({
-  func: (n, a) => (window.__cue ? window.__cue[n](...a) : null), args: [name, args],
+  func: (k, n, a) => (window.__cue ? window.__cue.call(k, n, ...a) : null), args: [KEY, name, args],
 });
 
 ipcRenderer.on('cue:volume', (_e, v) => call('setVolume', v));
