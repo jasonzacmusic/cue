@@ -839,18 +839,23 @@ function hostOf(u) {
 // The handful of sites he keeps open all day. Each identity gets its own pinned tab for each one,
 // once, so Personal's Instagram and the school's are two separate sign-ins and WhatsApp is two
 // separate phones. Pin or unpin them after this and Cue leaves the choice alone.
-const EVERYDAY = ['https://www.facebook.com/', 'https://www.instagram.com/', 'https://web.whatsapp.com/'];
+const EVERYDAY = ['https://mail.google.com/', 'https://www.facebook.com/', 'https://www.instagram.com/', 'https://web.whatsapp.com/'];
 
 function seedEveryday() {
   const done = store.data.everydayPinned || {};
   for (const identity of ['personal', 'school']) {
-    if (done[identity]) continue;
+    // Remember which ones have been put there, not just that it happened once,
+    // so a site added to the list later still arrives - and one he unpins
+    // stays unpinned.
+    const had = Array.isArray(done[identity]) ? done[identity] : (done[identity] ? EVERYDAY.slice(0, 3) : []);
     for (const url of EVERYDAY) {
+      if (had.includes(url)) continue;
+      had.push(url);
       const host = hostOf(url);
       if (tabs.some((t) => t.identity === identity && hostOf(t.url) === host)) continue;
       tabs.push(makeTab({ url, identity, pinned: true }));
     }
-    done[identity] = true;
+    done[identity] = had;
   }
   store.data.everydayPinned = done;
 }
@@ -1450,6 +1455,7 @@ function uiCommand(cmd, a = {}) {
     case 'rename': if (t) { const n = String(a.name || '').trim().slice(0, 60); t.name = n || null; pushState(); persist(); } break;
     case 'tab-menu': tabMenu(t); break;
     case 'reorder': reorder(a); break;
+    case 'pin': if (t) { t.pinned = a.on === undefined ? !t.pinned : !!a.on; t.order = Date.now(); pushState(); persist(); } break;
     case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;

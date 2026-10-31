@@ -44,6 +44,10 @@ button { font: inherit; color: inherit; }
 .tab:hover .close, .tab:hover .movet { display: grid; }
 .movet:focus-visible { display: grid; }
 .spk { position: relative; }
+/* A silent tab still shows its speaker, faded, so the control never moves. */
+.spk.idle { opacity: .28; }
+.tab:hover .spk.idle, .tab.on .spk.idle { opacity: .6; }
+.spk.idle:hover { opacity: 1; }
 .spk svg { width: 15px; height: 15px; }
 .spk.live { color: var(--ink); }
 .spk.muted { color: var(--onair); }
@@ -229,23 +233,32 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
    words, and the number of tabs living in it. The open one is lifted and
    edged in its own colour. */
 .folders { display: flex; flex-direction: column; gap: 6px; flex: none; }
-.folder { position: relative; border: 0; padding: 0; background: none; cursor: pointer; text-align: left; display: block; padding-top: 6px; }
-.folder .ftab { position: absolute; top: 0; left: 0; width: 42%; height: 9px; border-radius: 6px 6px 0 0;
-  background: color-mix(in srgb, var(--c) 30%, var(--hover)); transition: background .14s; }
-.folder .fface { position: relative; display: flex; align-items: center; gap: 9px; padding: 7px 9px 7px 7px; border-radius: 0 10px 10px 10px;
-  background: var(--hover); border: 1.5px solid transparent; transition: background .14s, border-color .14s, transform .12s; }
+.folder { position: relative; border: 0; padding: 0; background: none; cursor: pointer; text-align: left; display: block; }
+/* One card, edged in the folder's own colour. The raised lip this used to have
+   read as a stray coloured bar once there were three of them stacked up. */
+.folder .fface { position: relative; display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px 7px 9px; border-radius: 10px; overflow: hidden;
+  background: var(--hover); border: 1.5px solid transparent; transition: background .14s, border-color .14s; }
+.folder .fface::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: color-mix(in srgb, var(--c) 55%, transparent); transition: background .14s; }
 .folder:hover .fface { background: color-mix(in srgb, var(--c) 12%, var(--hover)); }
-.folder:hover .ftab { background: color-mix(in srgb, var(--c) 45%, var(--hover)); }
+.folder:hover .fface::before { background: var(--c); }
 .folder.on .fface { background: color-mix(in srgb, var(--c) 15%, var(--raised)); border-color: var(--c); }
-.folder.on .ftab { background: var(--c); }
+.folder.on .fface::before { background: var(--c); }
 .folder:focus-visible { outline: none; }
 .folder:focus-visible .fface { outline: 2px solid var(--c); outline-offset: 1px; }
 .fpic { width: 34px; height: 34px; flex: none; border-radius: 8px; object-fit: cover; background: var(--raised); box-shadow: 0 1px 3px -1px var(--shadow); }
 .fltr { width: 34px; height: 34px; flex: none; border-radius: 8px; background: var(--c); color: #fff; font: 700 15px/34px -apple-system, system-ui, sans-serif; font-style: normal; text-align: center; }
-.ftext { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; gap: 1px; }
-.ftext b { font: 600 12.5px/1.2 -apple-system, system-ui, sans-serif; color: var(--ink); white-space: nowrap; }
-.facct { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.flive { font-size: 9.5px; font-weight: 600; color: color-mix(in srgb, var(--c) 70%, var(--ink)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ftext { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.2; gap: 2px; }
+.frow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ftext b { font: 600 12.5px/1.2 -apple-system, system-ui, sans-serif; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The whole address, wrapped. Half an email address is no use to anyone. */
+.facct { font-size: 9.5px; line-height: 1.25; color: var(--muted); overflow-wrap: anywhere; }
+.fwho { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.fchip { flex: none; height: 14px; min-width: 14px; padding: 0 3px; border-radius: 4px; color: #fff;
+  font: 700 8px/14px -apple-system, system-ui, sans-serif; font-style: normal; text-align: center; letter-spacing: .2px; }
+.fchip.google { background: #c5392c; }
+.fchip.instagram { background: #c2286a; }
+.fchip.facebook { background: #1877f2; }
+.fchip.whatsapp { background: #1f8f4d; }
 .fct { margin-left: auto; flex: none; font: 600 10px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: var(--muted); background: var(--raised); border-radius: 999px; padding: 3px 6px; }
 .folder.on .fct { color: #fff; background: var(--c); }
@@ -270,6 +283,9 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .pin.active { box-shadow: 0 0 0 2px var(--tone); }
 .pin .dot { position: absolute; right: -1px; top: -1px; width: 9px; height: 9px; border-radius: 50%; background: var(--ring); border: 2px solid var(--side); }
 .pin.onair { box-shadow: 0 0 0 2px var(--onair); }
+.pin.dragging { opacity: .4; }
+.pin.dropon { box-shadow: 0 0 0 2px var(--tone); transform: translateY(-2px); }
+.pins.drop { outline: 2px dashed var(--tone); outline-offset: 4px; border-radius: 14px; }
 body.rail .pin { width: 36px; height: 36px; border-radius: 11px; }
 body.rail .pin img { width: 22px; height: 22px; }
 .groups { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 0 -6px; padding: 2px 6px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
@@ -338,9 +354,7 @@ body.rail #sidehide { position: absolute; top: 30px; left: 50%; transform: trans
 body.rail .spaces { margin-top: 30px; }
 body.rail .newrow { flex-direction: column; }
 body.rail .folders { align-items: center; }
-body.rail .folder { padding-top: 4px; }
-body.rail .folder .ftab { width: 18px; height: 5px; left: 2px; }
-body.rail .folder .fface { padding: 3px; border-radius: 0 9px 9px 9px; }
+body.rail .folder .fface { padding: 3px 3px 3px 5px; border-radius: 9px; }
 body.rail .ftext, body.rail .fct { display: none; }
 body.rail .elsewhere { display: none; }
 body.rail .pins { justify-content: center; }

@@ -249,6 +249,10 @@ function renderGutters() {
 // Clicking a folder opens it: the sidebar below shows that folder's tabs, the
 // next new tab is born in it, and it is signed in to its own Gmail, Instagram,
 // YouTube and WhatsApp — all three at once, nothing to toggle.
+// One letter per account a folder is holding, so four of them fit where one
+// truncated line used to sit.
+const MARK = { google: 'G', instagram: 'ig', facebook: 'f', whatsapp: 'w' };
+
 function renderFolders() {
   const box = $('#folders'); box.innerHTML = '';
   for (const id of S.folders) {
@@ -260,30 +264,41 @@ function renderFolders() {
     b.dataset.who = id;
     b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', mine);
 
-    const tab = el('i', 'ftab');                       // the little raised lip of a folder
     const face = el('span', 'fface');
     const img = el('img', 'fpic'); img.src = `../../assets/logos/${v.picture}`; img.alt = '';
     img.onerror = () => { img.remove(); face.prepend(el('i', 'fltr', esc(v.name[0]))); };
     face.append(img);
     const txt = el('span', 'ftext');
-    txt.append(el('b', '', esc(v.name)));
+    const top = el('span', 'frow');
+    top.append(el('b', '', esc(v.name)));
+    if (all) top.append(el('span', 'fct', String(all)));
+    txt.append(top);
     // Whose it is, in words, under the name. No one should have to remember
-    // that "School" means music@nathanielschool.com.
+    // that "School" means music@nathanielschool.com. It wraps rather than
+    // cutting off mid-word: half an address tells you nothing.
     const acct = S.labels[id] || v.about || '';
     if (acct) txt.append(el('span', 'facct', esc(acct)));
-    // And, where a site can be two people at once, who is live in there right
-    // now — read off the page itself, so you can see which Instagram you are
-    // about to post from before you click anything.
+    // The accounts this folder is holding, one mark each, read off the pages
+    // themselves. They stay on the folder after the tab is closed, so you can
+    // see at a glance which Instagram is signed in here without opening it.
     const who = (S.whose || {})[id] || {};
-    const live = Object.values(who).filter((x) => x && x.who).map((x) => `${x.label}: ${x.who}`);
-    if (live.length) txt.append(el('span', 'flive', esc(live.join(' · '))));
+    const live = Object.entries(who).filter(([, x]) => x && x.who);
+    if (live.length) {
+      const row = el('span', 'fwho');
+      for (const [key, x] of live) {
+        const chip = el('i', `fchip ${key}`, esc(MARK[key] || x.label[0]));
+        chip.title = `${x.label} \u00b7 ${x.who}`;
+        row.append(chip);
+      }
+      txt.append(row);
+    }
     face.append(txt);
-    if (all) face.append(el('span', 'fct', String(all)));
-    b.append(tab, face);
+    b.append(face);
 
-    tip(b, `${v.name}${acct ? ` · ${acct}` : ''}`,
-      mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
-        : `${all} tab${all === 1 ? '' : 's'} in here. Click to open this folder — new tabs go in it and it stays signed in as ${acct || v.name}.`);
+    const held = live.map(([, x]) => `${x.label}: ${x.who}`).join(' \u00b7 ');
+    tip(b, `${v.name}${acct ? ` \u00b7 ${acct}` : ''}`,
+      `${held ? `${held}\n` : ''}${mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
+        : `${all} tab${all === 1 ? '' : 's'} in here. Click to open this folder \u2014 new tabs go in it and it stays signed in as ${acct || v.name}.`}`);
     b.onclick = () => send('folder', { name: id });
     box.append(b);
   }
@@ -403,8 +418,28 @@ function renderExtras() {
 
 function renderPins() {
   const box = $('#pins'); box.innerHTML = '';
+  // Dropping a tab on the strip pins it. Everywhere else in the sidebar you can
+  // drag a row where you want it, and this row used to be the one place you
+  // could not.
+  box.ondragover = (e) => { e.preventDefault(); box.classList.add('drop'); };
+  box.ondragleave = () => box.classList.remove('drop');
+  box.ondrop = (e) => {
+    e.preventDefault(); box.classList.remove('drop');
+    const id = Number(e.dataTransfer.getData('text/cue-tab'));
+    if (id) send('pin', { id, on: true });
+  };
   for (const t of S.tabs.filter((x) => x.pinned && here(x))) {
     const p = el('div', 'pin');
+    p.draggable = true;
+    p.ondragstart = (e) => { e.dataTransfer.setData('text/cue-tab', String(t.id)); p.classList.add('dragging'); };
+    p.ondragend = () => p.classList.remove('dragging');
+    p.ondragover = (e) => { e.preventDefault(); e.stopPropagation(); p.classList.add('dropon'); };
+    p.ondragleave = () => p.classList.remove('dropon');
+    p.ondrop = (e) => {
+      e.preventDefault(); e.stopPropagation(); p.classList.remove('dropon');
+      const id = Number(e.dataTransfer.getData('text/cue-tab'));
+      if (id && id !== t.id) send('reorder', { id, beforeId: t.id });
+    };
     tip(p, shortName(t), hostOf(t.url) || '');
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
@@ -440,7 +475,8 @@ function renderGroups() {
     head.onclick = () => send('collapse', { group: g.id });
     head.ondragover = (e) => { e.preventDefault(); head.classList.add('drop'); };
     head.ondragleave = () => head.classList.remove('drop');
-    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (id) send('reorder', { id, group: g.id }); };
+    // Dragging a pinned tab down onto a group takes it off the strip again.
+    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id) return; const d = S.tabs.find((x) => x.id === id); if (d && d.pinned) send('pin', { id, on: false }); send('reorder', { id, group: g.id }); };
     wrap.append(head);
     const ul = el('div', 'tablist');
     for (const t of list) ul.append(tabRow(t, splitIds));
@@ -486,8 +522,10 @@ function tabRow(t, splitIds) {
   }
   const hasSound = t.audible || t.muted || t.playing || t.volume < 1;
   const spk = el('button', 'spk' + (t.muted ? ' muted' : t.audible ? ' live' : ''), t.muted ? SPK.off : SPK.on);
-  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${Math.round(t.volume * 100)}%`, 'Click to mute · scroll to change · ⌥click for the slider');
-  if (!hasSound) { spk.style.visibility = 'hidden'; row.addEventListener('mouseenter', () => { spk.style.visibility = 'visible'; }); row.addEventListener('mouseleave', () => { if (openVolId !== t.id) spk.style.visibility = 'hidden'; }); }
+  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${Math.round(t.volume * 100)}%`, 'Click to mute · scroll to change · hold still for the slider');
+  // Silent tabs keep the speaker too, just faded: you can set a tab quiet
+  // before it ever makes a sound, and the control is always in the same place.
+  if (!hasSound) spk.classList.add('idle');
   spk.onclick = (e) => { e.stopPropagation(); if (e.altKey) { toggleVol(); return; } send('mute', { id: t.id }); };
   spk.onwheel = (e) => { e.preventDefault(); send('volume', { id: t.id, value: Math.round((t.volume + (e.deltaY < 0 ? 0.05 : -0.05)) * 100) / 100 }); };
 
@@ -512,6 +550,13 @@ function tabRow(t, splitIds) {
   };
   pop.addEventListener('mouseleave', () => { closeTimer = setTimeout(closeVol, 600); });
   pop.addEventListener('mouseenter', () => clearTimeout(closeTimer));
+  // Resting on the speaker opens the slider. The old version opened it the
+  // instant the pointer crossed the row, which swallowed the click you were
+  // aiming at; waiting for the pointer to stop keeps both.
+  let openTimer;
+  spk.addEventListener('mouseenter', () => { openTimer = setTimeout(() => { if (openVolId !== t.id) toggleVol(); }, 500); });
+  spk.addEventListener('mouseleave', () => clearTimeout(openTimer));
+  spk.addEventListener('mousedown', () => clearTimeout(openTimer));
   if (openVolId === t.id) row.classList.add('vol-open');
   row.append(pop);
   ctl.append(spk);
