@@ -192,6 +192,36 @@ function chromeUA() {
 }
 app.userAgentFallback = chromeUA();
 
+// Google (and a few others) will not let you sign in unless the browser says it is Chrome in BOTH
+// places they look: the old user agent line above, and the newer "client hints" headers. Electron
+// fills those in with Chromium only, which is what makes Google answer "Couldn't sign you in".
+function chromeHints() {
+  const v = process.versions.chrome;
+  const major = v.split('.')[0];
+  const platform = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux';
+  return {
+    'sec-ch-ua': `"Not?A_Brand";v="24", "Chromium";v="${major}", "Google Chrome";v="${major}"`,
+    'sec-ch-ua-full-version-list': `"Not?A_Brand";v="24.0.0.0", "Chromium";v="${v}", "Google Chrome";v="${v}"`,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': `"${platform}"`,
+  };
+}
+
+// Only on https, which is where a real Chrome sends them. The full version list only goes out if the
+// site asked for it, again like Chrome.
+function sayChrome(headers, url) {
+  if (!/^https:/i.test(url)) return headers;
+  const hints = chromeHints();
+  const seen = new Map();
+  for (const k of Object.keys(headers)) seen.set(k.toLowerCase(), k);
+  for (const [name, value] of Object.entries(hints)) {
+    const had = seen.get(name);
+    if (name === 'sec-ch-ua-full-version-list' && !had) continue;
+    headers[had || name] = value;
+  }
+  return headers;
+}
+
 // ---------------------------------------------------------------- state
 let store;
 let mainWin = null;
@@ -253,6 +283,7 @@ function sessionFor(identity) {
   sessionsReady.add(ses);
   ses.setUserAgent(chromeUA());
   enableBlocker(ses);
+  ses.webRequest.onBeforeSendHeaders((d, cb) => cb({ requestHeaders: sayChrome(d.requestHeaders, d.url) }));
   if (identity === 'vanish') ses.setSpellCheckerEnabled(false);
   servePages(ses);
   if (identity !== 'vanish') extensions.loadAll(ses, extDir).then((r) => r.forEach((x) => x.ok ? extsLoaded.add(x.id) : console.error('extension', x.name, x.error)));
@@ -561,6 +592,34 @@ function secureVersion(url) {
 // fail the same way over http, so dropping the padlock would gain nothing.
 const NO_SECURE_DOOR = new Set([-100, -101, -102, -107, -113, -118, -200, -201, -202, -207, -324]);
 
+// Where Google lands you when it refuses the browser: "Couldn't sign you in. This browser or app
+// may not be secure."
+const GOOGLE_REFUSED = /^https:\/\/accounts\.google\.[a-z.]+\/.*(signin\/rejected|deniedsigninrejected)/i;
+
+// The sign-ins worth carrying over for a Google account, and nothing else.
+const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com)$/i;
+
+// Brings the Google sign-in over from Chrome on this Mac, where he is already signed in. Cookies
+// only, for Google's own sites, into the one identity that asked.
+async function googleFromChrome(identity) {
+  const b = importer.findBrowsers().find((x) => x.id === 'chrome');
+  if (!b || !b.profiles.length) return { error: 'Chrome is not on this Mac, so there is no sign-in to bring over.' };
+  const label = String(settings().identityLabels[identity] || '').toLowerCase();
+  const p = b.profiles.find((x) => String(x.email || '').toLowerCase() === label) || b.profiles[0];
+  const key = await importer.getKey(b);
+  if (!key) return { error: 'Cue could not unlock Chrome\u2019s sign-ins. Say yes to the key request and try again.' };
+  const ses = sessionFor(identity);
+  let count = 0;
+  for (const c of importer.readCookies(b, p, key)) {
+    const host = String(c.domain || '').replace(/^\./, '');
+    if (!GOOGLE_LOGIN_HOST.test(host)) continue;
+    try { await ses.cookies.set(c); count++; } catch { /* one bad cookie never stops the rest */ }
+  }
+  await ses.cookies.flushStore();
+  await sharedLogins.syncNow();
+  return { count, from: p.email || p.name || 'Chrome' };
+}
+
 // Every way a page can be asked for - typed, clicked, restored at launch, woken
 // from sleep - goes through here, so a site on today's list is stopped whichever
 // way you arrived at it.
@@ -622,6 +681,14 @@ function wireTab(t) {
   });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
   wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; if (shield) shield.reset(wc.id); });
+  // Google will not sign you in inside a browser built the way Cue is, whatever Cue calls itself.
+  // Instead of leaving you on Google's dead end, Cue says so and offers the way through.
+  // Google's sign-in is one page that rewrites itself, so the refusal arrives without a page load.
+  const googleGate = (u) => {
+    if (GOOGLE_REFUSED.test(u) && t.identity !== 'vanish') wc.loadURL('cue://signin-blocked').catch(() => {});
+  };
+  wc.on('did-navigate', (_e, u) => googleGate(u));
+  wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) googleGate(u); });
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
@@ -1818,6 +1885,16 @@ const internal = {
     openTab({ url: a.url, identity: a.identity });
   },
   'library.history.clear': () => lib.clearHistory(),
+  'signin.from-chrome': async (_a, t) => {
+    if (!t) return { error: 'This page is not in a tab.' };
+    const r = await googleFromChrome(t.identity);
+    if (r.count) {
+      sendEvent('toast', `Your Google sign-in came over from Chrome (${r.from}).`);
+      t.view.webContents.loadURL('https://mail.google.com/').catch(() => {});
+    }
+    return r;
+  },
+  'signin.close': (_a, t) => { if (t) closeTab(t.id); },
 };
 
 // ---------------------------------------------------------------- move in from another browser

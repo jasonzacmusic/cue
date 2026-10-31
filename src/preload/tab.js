@@ -243,8 +243,33 @@ function quietYouTube() {
   }, true);
 }
 
+// Google asks the page itself which browser this is before it will let you sign in, and Electron
+// answers "Chromium" where a real Chrome answers "Google Chrome" too. This adds the missing name,
+// so the answer matches the user agent and the headers Cue already send.
+function sayChrome() {
+  const data = navigator.userAgentData;
+  if (!data || data.brands.some((b) => b.brand === 'Google Chrome')) return;
+  const major = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1];
+  if (!major) return;
+  const brands = Object.freeze([...data.brands.map((b) => ({ brand: b.brand, version: b.version })), { brand: 'Google Chrome', version: major }]);
+  const high = data.getHighEntropyValues.bind(data);
+  const patched = {
+    brands,
+    mobile: data.mobile,
+    platform: data.platform,
+    getHighEntropyValues: (hints) => high(hints).then((v) => {
+      if (v.brands) v.brands = brands.map((b) => ({ brand: b.brand, version: b.version }));
+      if (v.fullVersionList) v.fullVersionList = [...v.fullVersionList, { brand: 'Google Chrome', version: v.uaFullVersion || major }];
+      return v;
+    }),
+    toJSON: () => ({ brands: brands.map((b) => ({ brand: b.brand, version: b.version })), mobile: data.mobile, platform: data.platform }),
+  };
+  Object.defineProperty(navigator, 'userAgentData', { configurable: true, get: () => patched });
+}
+
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
+contextBridge.executeInMainWorld({ func: sayChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
 if (init.ytAds && /^(www|m|music)\.youtube\.com$/.test(location.hostname)) contextBridge.executeInMainWorld({ func: quietYouTube });
 

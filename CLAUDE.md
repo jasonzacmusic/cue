@@ -75,6 +75,7 @@ Helium installed and report the numbers.
 ## Honest limits today
 - YouTube's own ads are removed inside the page (`quietYouTube` in `src/preload/tab.js`), on youtube.com only, never Studio. YouTube can change its page and break this. Videos embedded on other sites aren't covered, and neither are sponsored posts inside Instagram or Facebook feeds.
 - Blocked ad scripts can retry in a tight loop, which costs more than the ad. `CUE_TEST=speed` shows it; a tiny exception in `shield.js` stops it, as with CNN.
+- Google will not run its sign-in form inside Cue, as in every browser built this way: it answers "this browser or app may not be secure". Cue says the user agent and the client hints Chrome says, which is not enough, so from 0.5.3 Cue replaces Google's dead end with `cue://signin-blocked` and carries the Google sign-in over from Chrome instead.
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.
 - Vanish is hidden from screen sharing with Apple's normal setting. Some capture tools on recent macOS ignore it.
