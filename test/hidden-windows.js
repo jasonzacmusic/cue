@@ -7,12 +7,15 @@ const electron = require('electron');
 
 const { app, screen } = electron;
 if (process.platform === 'darwin') app.setActivationPolicy('accessory');
+// He moves between desktops during a run. A window left behind stops drawing, which fails every check that needs a picture or a click.
+for (const sw of ['disable-backgrounding-occluded-windows', 'disable-renderer-backgrounding', 'disable-background-timer-throttling']) app.commandLine.appendSwitch(sw);
 
 function behindEverything(Base) {
   return class extends Base {
     constructor(o = {}) {
       super({ ...o, show: false, opacity: 0 });
       this.setIgnoreMouseEvents(true);
+      if (this.setVisibleOnAllWorkspaces) this.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
       if (o.show !== false) this.showInactive();
     }
     show() { this.showInactive(); }
