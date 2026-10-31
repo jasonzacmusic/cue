@@ -74,12 +74,101 @@ const TEAM_SITE = 'https://team.nathanielschool.com';
 const LABS_PAGE = 'https://labs.nathanielschool.com/products/cue';
 const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsapp\.com|facebook\.com|linkedin\.com)$/;
 
+// The three logins are FOLDERS, and the folder is the thing you open.
+//
+// Why folders and not the old "+ P S A" row: that row was a setting you had to
+// notice BEFORE you opened a tab, and a letter you had to decode. Nobody did.
+// Every one of the 38 tabs in this browser ended up in School because the row
+// was invisible in practice. A folder with a face on it is not a setting — it
+// is a place, and you can see which one you are standing in.
+//
+// Folders REPLACE the identity row outright; they do not sit above it. Opening
+// a folder does three things at once: it shows you the tabs that live in it, it
+// is where the next new tab is born, and it is the cookie jar those tabs use.
+// That is why each one stays signed in to its own Gmail, Instagram, YouTube and
+// WhatsApp at the same time — one Electron session partition per folder.
+//
+// SPACES (Teach / Create / Business / Build) stay exactly what they were: a
+// SEPARATE axis, the kind of work you are doing. A folder is WHOSE account;
+// a Space is WHICH job. They are never merged. The tab list shows the tabs that
+// are in both, and says out loud when tabs sit in another folder, so nothing
+// can quietly disappear.
+//
+// Vanish is not a folder. It is a window that keeps nothing, so it has no tabs
+// to hold and no account to stay signed in to. It keeps its own small button.
 const IDENTITIES = {
-  personal: { name: 'Personal', color: '#2A64CC', partition: 'persist:personal' },
-  school: { name: 'School', color: '#C2410C', partition: 'persist:school' },
-  agent: { name: 'AI agent', color: '#5F40CF', partition: 'persist:agent' },
+  personal: { name: 'Personal', color: '#2A64CC', partition: 'persist:personal', picture: 'folder-personal.png', about: 'Your own account' },
+  school: { name: 'School', color: '#C2410C', partition: 'persist:school', picture: 'folder-school.png', about: 'The school account' },
+  agent: { name: 'AI agent', color: '#5F40CF', partition: 'persist:agent', picture: 'folder-ai.png', about: 'The account AI agents use' },
   vanish: { name: 'Vanish', color: '#8A939C', partition: 'vanish' }, // no "persist:" = memory only
 };
+const FOLDERS = Object.keys(IDENTITIES).filter((k) => k !== 'vanish');
+const isFolder = (k) => FOLDERS.includes(k);
+
+// Sites that can be signed in as more than one person, and how to read the one
+// that is live straight off the page. This is not a guess from a cookie: it is
+// what the site itself is showing in its own corner, read after the page loads.
+// Instagram is the reason this exists — it has its own account switcher inside
+// one cookie jar, so the folder alone does not prove which account is live.
+const WHOSE = [
+  {
+    key: 'instagram',
+    host: /(^|\.)instagram\.com$/,
+    label: 'Instagram',
+    // The name or nothing. "Signed in" with no name is the kind of half-answer
+    // that sends a post to the wrong account, so it is never said.
+    read: `(() => {
+      if (!/(?:^|; )ds_user_id=\\d+/.test(document.cookie)) return '';
+      const a = document.querySelector('nav a[href^="/"][role="link"] img[alt]')
+        || document.querySelector('img[alt$="profile picture"]');
+      const n = a && /^(.+?)'s profile picture$/.exec(a.getAttribute('alt') || '');
+      return n ? '@' + n[1] : '';
+    })()`,
+  },
+  {
+    key: 'google',
+    host: /(^|\.)(google\.com|youtube\.com)$/,
+    label: 'Google',
+    // Only the address Google itself prints next to the account button. A
+    // signed-out page that happens to carry a Google avatar must say nothing:
+    // Gmail sends you to its advertising page when you are signed out, and
+    // that page would otherwise read as "signed in".
+    read: `(() => {
+      const a = document.querySelector('a[aria-label*="Google Account"], a[aria-label*="Google-Konto"]');
+      const m = a && /\\(([^()\\s]+@[^()\\s]+)\\)/.exec(a.getAttribute('aria-label') || '');
+      return m ? m[1] : '';
+    })()`,
+  },
+];
+
+// What each folder is signed in as, as last read off a real page in it.
+function whoseIn(folder) { return (store.data.whose && store.data.whose[folder]) || {}; }
+function rememberWhose(folder, key, label, who) {
+  if (!isFolder(folder)) return;
+  store.data.whose = store.data.whose || {};
+  const box = store.data.whose[folder] = store.data.whose[folder] || {};
+  // Nothing read means the page could not tell us. Clear the old answer rather
+  // than leave a stale name on the folder — a wrong name is worse than none.
+  if (!who) { if (!box[key]) return; delete box[key]; pushState(); persist(); return; }
+  if (box[key] && box[key].who === who) return;
+  box[key] = { who, label, at: Date.now() };
+  pushState(); persist();
+}
+// Read it off the page itself once it has settled. Costs one tiny script on the
+// handful of sites that can be two people at once, and nothing anywhere else.
+function sniffWhose(t) {
+  if (!t || !t.view || !isFolder(t.identity)) return;
+  let host = ''; try { host = new URL(t.url).hostname; } catch { return; }
+  const site = WHOSE.find((w) => w.host.test(host));
+  if (!site) return;
+  const folder = t.identity;
+  setTimeout(() => {
+    if (!t.view || t.view.webContents.isDestroyed()) return;
+    t.view.webContents.executeJavaScript(site.read, true)
+      .then((who) => rememberWhose(folder, site.key, site.label, String(who || '').slice(0, 40)))
+      .catch(() => {});
+  }, 1500);
+}
 
 const ENGINES = {
   google: 'https://www.google.com/search?q=',
@@ -333,11 +422,40 @@ function enableBlocker(ses) {
 
 function safeOrigin(url) { try { return new URL(url).origin; } catch { return url; } }
 
+// ---------------------------------------------------------------- folders
+// The folder you have open. A new tab is born in it, and the sidebar shows the
+// tabs that live in it. Kept in the store, like the Space, so it survives a
+// restart and every way of opening a tab agrees on where the tab goes.
+const usualFolderFor = (space) => settings().spaceLogins[space] || settings().defaultIdentity;
+function openFolder() { return isFolder(store.data.folder) ? store.data.folder : usualFolderFor(store.data.space); }
+// A tab asked for in another Space belongs to that Space's usual folder; one
+// asked for here belongs in the folder that is open in front of you.
+function folderForNewTab(space) {
+  if (space && space !== store.data.space) return usualFolderFor(space);
+  return openFolder();
+}
+// Called whenever a tab becomes the one you are looking at. The folder follows
+// the tab, never the other way round, so the tab in front of you is always one
+// of the tabs its folder is showing. Nothing can be active but out of sight.
+function followFolder(t) {
+  if (!t || !isFolder(t.identity) || store.data.folder === t.identity) return;
+  store.data.folder = t.identity;
+}
+function setFolder(name) {
+  if (!isFolder(name) || store.data.folder === name) return;
+  store.data.folder = name;
+  // Land on something that is actually in this folder, in this Space, so the
+  // page in front of you matches the folder you just opened.
+  const here = spaceOrder().filter((t) => t.identity === name && t.id !== programId);
+  const first = here.sort((a, b) => b.lastActive - a.lastActive)[0];
+  if (first) activate(first.id); else { layout(); pushState(); persist(); }
+}
+
 // ---------------------------------------------------------------- tabs
 function makeTab(opts) {
   const t = {
     id: nextId++, uid: opts.uid || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
-    identity: IDENTITIES[opts.identity] ? opts.identity : (settings().spaceLogins[opts.space || store.data.space] || settings().defaultIdentity),
+    identity: IDENTITIES[opts.identity] ? opts.identity : folderForNewTab(opts.space),
     pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
     order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: spaces().includes(opts.space) ? opts.space : store.data.space,
@@ -501,6 +619,7 @@ function wireTab(t) {
   wc.on('did-finish-load', () => {
     if (t.volume !== 1) wc.send('cue:volume', t.volume);
     teamSignedIn(t);
+    sniffWhose(t); // keep the folder honest about which account is live in it
   });
   wc.on('did-navigate-in-page', () => teamSignedIn(t)); // the team site signs in without a page load
   wc.setWindowOpenHandler(({ url, disposition }) => {
@@ -545,6 +664,7 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
 function activate(id) {
   const t = byId(id); if (!t) return;
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
+  if (t.id !== programId) followFolder(t);
   activeId = id; t.lastActive = Date.now();
   if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
@@ -748,7 +868,11 @@ function switchSpace(name) {
   enterSpace(name);
   const list = tabs.filter((t) => t.space === name && t.id !== programId).sort((a, b) => b.lastActive - a.lastActive);
   const first = list.find((t) => store.data.split.ids.includes(t.id)) || list[0];
-  if (first) activate(first.id); else openTab({});
+  // Landing on a tab takes you into that tab's folder (activate does it). An
+  // empty Space has no tab to follow, so it falls back to the folder this Space
+  // usually uses — Teach to School, Create to Personal, as set in Settings.
+  if (first) activate(first.id);
+  else { store.data.folder = usualFolderFor(name); openTab({}); }
   layout(); pushState(); persist();
 }
 
@@ -918,7 +1042,10 @@ function tabMenu(t) {
     { label: t.pinned ? 'Unpin' : 'Pin', click: () => { t.pinned = !t.pinned; pushState(); persist(); } },
     { label: t.muted ? 'Unmute' : 'Mute', click: () => setMuted(t, !t.muted) },
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
-    { label: 'Open as…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
+    // Two different things, named for what they do: one leaves this tab where
+    // it is and opens a second copy elsewhere; the other takes this tab with you.
+    { label: 'Move to folder', enabled: isFolder(t.identity), submenu: FOLDERS.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => moveToFolder({ id: t.id, to: i }) })) },
+    { label: 'Open a copy in…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
     { label: 'Move to Space', submenu: spaces().map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
@@ -995,6 +1122,7 @@ function sendState() {
     space: store.data.space, spaces: spaces(), kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
     ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
     activeId, programId, live, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
+    folder: openFolder(), folders: FOLDERS, whose: store.data.whose || {},
     split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
     agent: { port: AGENT_PORT, on: s.agentPort, last: agentLog[agentLog.length - 1] || null },
@@ -1087,7 +1215,7 @@ ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   return internal[cmd](a, byWC(e.sender));
 });
 
-ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
+function uiCommand(cmd, a = {}) {
   const t = a.id ? byId(a.id) : byId(activeId);
   const wc = t && t.view ? t.view.webContents : null;
   switch (cmd) {
@@ -1177,6 +1305,8 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
       break;
     }
     case 'space': switchSpace(a.name); break;
+    case 'folder': setFolder(a.name); break;
+    case 'move-folder': moveToFolder({ id: a.id, to: a.to }); break;
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
     case 'ai': toggleAI(a.which); break;
@@ -1204,7 +1334,8 @@ ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
     case 'agent-copy': clipboard.writeText(agentSetupText()); sendEvent('toast', 'AI setup copied.'); break;
     default: break;
   }
-});
+}
+ipcMain.on('ui:cmd', (_e, cmd, a = {}) => uiCommand(cmd, a));
 
 ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   if (cmd === 'obs-scenes') return obs.scenes();
@@ -1253,6 +1384,44 @@ function reorder({ id, beforeId, group }) {
 // Move a tab one place up or down inside its own group. Dragging was the only
 // way to reorder, which is awkward with a long list and impossible from the
 // keyboard.
+// Move an open tab into another folder, keeping the page.
+//
+// A folder IS its cookie jar, so the same page in another folder is the same
+// page signed in as somebody else: the view has to be built again in the other
+// session. That is a reload, not a loss — same address, same name, same Space,
+// same group, same place in the list, same zoom and volume, and it stays the
+// tab you are looking at. What it cannot keep is anything the old account was
+// holding on the page: a half-typed message, a sign-in, an unsaved form. So it
+// always asks first and names both folders. A tab never changes folder on its
+// own — this is the only thing that moves one, and only you can start it.
+async function moveToFolder({ id, to, confirmed }) {
+  const t = byId(id);
+  if (!t || !isFolder(to) || !isFolder(t.identity) || t.identity === to) return;
+  const from = IDENTITIES[t.identity].name; const into = IDENTITIES[to].name;
+  if (!confirmed) {
+    const r = await dialog.showMessageBox(hostWindow(t), {
+      type: 'question', buttons: [`Move to ${into}`, 'Cancel'], defaultId: 0, cancelId: 1,
+      message: `Move this tab from ${from} to ${into}?`,
+      detail: `${t.title || hostName(t.url)}\n\nThe page opens again as ${into}, signed in as that account. Anything you have typed on it and not sent will be lost.`,
+    });
+    if (r.response !== 0) return;
+  }
+  const live = t.id === activeId;
+  const wasSplit = store.data.split.ids.includes(t.id);
+  if (t.view) { // let go of the old session's view; the tab object itself stays
+    try { mainWin.contentView.removeChildView(t.view); } catch {}
+    try { t.view.webContents.close(); } catch {}
+    t.view = null;
+  }
+  t.identity = to;
+  t.sleeping = false;
+  ensureView(t); // rebuilt in the new folder's cookie jar
+  t.view.webContents.loadURL(t.url);
+  if (live) activate(t.id); else if (wasSplit) { layout(); pushState(); }
+  pushState(); persist();
+  sendEvent('toast', `Moved to ${into}. This page is now signed in as ${into}.`);
+}
+
 function moveTab({ id, dir }) {
   const t = byId(id); if (!t || !dir) return;
   const list = sidebarOrder().filter((x) => groupOf(x) === groupOf(t) && x.pinned === t.pinned);
@@ -2087,7 +2256,7 @@ app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL
 app.whenReady().then(async () => {
   store = new Store(app.getPath('userData'), 'cue.json', {
     tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, savedSplit: null, savedSpaceSplit: {}, collapsed: {}, permissions: {},
-    space: 'Teach', spaceSplit: {}, aiWhich: 'claude', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
+    space: 'Teach', spaceSplit: {}, folder: 'school', whose: {}, aiWhich: 'claude', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
     settings: {
       autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
       stageWidth: 1920, stageHeight: 1080, obs: { host: '127.0.0.1', port: 4455, password: '' },
@@ -2098,6 +2267,14 @@ app.whenReady().then(async () => {
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  // Browsers that have been running since before folders existed have no folder
+  // in the store. Open the one the tabs are actually in, not a guess.
+  if (!FOLDERS.includes(store.data.folder)) {
+    const tally = {};
+    for (const t of store.data.tabs || []) if (FOLDERS.includes(t.identity)) tally[t.identity] = (tally[t.identity] || 0) + 1;
+    store.data.folder = Object.keys(tally).sort((a, b) => tally[b] - tally[a])[0] || usualFolderFor(store.data.space);
+  }
+  if (!store.data.whose || typeof store.data.whose !== 'object') store.data.whose = {};
   if (store.data.settings.cacheCapMB === 1024) store.data.settings.cacheCapMB = CACHE_MB;
   extDir = path.join(app.getPath('userData'), 'extensions');
   lib = new Library(app.getPath('userData'));
@@ -2151,7 +2328,7 @@ app.whenReady().then(async () => {
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });
