@@ -76,6 +76,16 @@ Helium installed and report the numbers.
 - YouTube's own ads are removed inside the page (`quietYouTube` in `src/preload/tab.js`), on youtube.com only, never Studio. YouTube can change its page and break this. Videos embedded on other sites aren't covered, and neither are sponsored posts inside Instagram or Facebook feeds.
 - Blocked ad scripts can retry in a tight loop, which costs more than the ad. `CUE_TEST=speed` shows it; a tiny exception in `shield.js` stops it, as with CNN.
 - Google will not run its sign-in form inside Cue, as in every browser built this way: it answers "this browser or app may not be secure". Cue says the user agent and the client hints Chrome says, which is not enough, so from 0.5.3 Cue replaces Google's dead end with `cue://signin-blocked` and carries the Google sign-in over from Chrome instead.
+- Carrying a sign-in over from Chrome (File > Bring This Site's Sign-in Over From Chrome) empties
+  the jar for that site first. Adding Chrome's cookies to the ones already there mixed two
+  generations of the same session, which is what made Google answer "we've detected a problem with
+  your cookie settings". It also takes the Chrome profile that actually holds cookies for that
+  site; the first profile and the email on the identity are both wrong on this Mac.
+- WhatsApp Web keeps its link in IndexedDB, not cookies, so it cannot be carried from any browser.
+  Each identity has to scan the code once with the phone; after that it stays. That is also how
+  Personal and School end up as two separate WhatsApps.
+- Safari's cookies cannot be read at all (macOS protects `~/Library/Safari` and the cookie store),
+  so Chrome is the only browser a sign-in can come from.
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.
 - Vanish is hidden from screen sharing with Apple's normal setting. Some capture tools on recent macOS ignore it.
