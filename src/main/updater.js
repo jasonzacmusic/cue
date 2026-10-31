@@ -36,6 +36,18 @@ function newer(a, b) {
   return false;
 }
 
+// What version is actually sitting in /Applications right now? Cue may have
+// been open for hours while another build was installed by hand, or by one of
+// the machines that also ships this app. Reading the real folder is the only
+// honest answer; app.getVersion() only knows about the copy that is running.
+function versionAt(appPath) {
+  try {
+    const plist = fs.readFileSync(path.join(appPath, 'Contents', 'Info.plist'), 'utf8');
+    const m = plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/);
+    return m ? m[1].trim() : '';
+  } catch { return ''; }
+}
+
 function get(url) {
   return new Promise((resolve, reject) => {
     const req = net.request({ url, redirect: 'follow' });
@@ -51,8 +63,12 @@ function get(url) {
   });
 }
 
-function createUpdater({ onState, canInterrupt, log, auto }) {
+function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = {}) {
   const autoOn = () => (auto ? auto() !== false : true);
+  // Where the real app lives, and where the version file is asked for. Only
+  // the tests ever pass anything else.
+  const APPS = appsDir || '/Applications';
+  const FEED_URL = feedUrl || FEED;
   // state: idle | checking | available | downloading | ready | error
   let state = { state: 'idle', version: app.getVersion(), latest: null, notes: '', percent: 0, error: '' };
   let timer = null;
@@ -64,7 +80,7 @@ function createUpdater({ onState, canInterrupt, log, auto }) {
     if (state.state === 'downloading' || state.state === 'ready') return state;
     push({ state: 'checking', error: '' });
     try {
-      const body = JSON.parse(String(await get(`${FEED}?t=${Date.now()}`)));
+      const body = JSON.parse(String(await get(`${FEED_URL}?t=${Date.now()}`)));
       if (!body.version || !body.url) throw new Error('the update file is incomplete');
       if (newer(body.version, app.getVersion())) {
         push({ state: 'available', latest: body.version, notes: String(body.notes || ''), feed: body });
@@ -122,13 +138,27 @@ function createUpdater({ onState, canInterrupt, log, auto }) {
     return state;
   }
 
+  // Never put an older Cue over a newer one. Three machines ship this app, so
+  // between the moment a download finished and the moment Cue closes, the copy
+  // in /Applications may already be newer than the one waiting. Then the right
+  // thing to do is nothing at all.
+  function wouldDowngrade(live) {
+    const here = versionAt(live);
+    const coming = state.latest || '';
+    if (!here || !coming) return false;          // cannot tell; carry on as before
+    if (newer(coming, here)) return false;
+    log && log({ tool: 'update', error: `left alone: ${here} is already in place, the download was ${coming}` });
+    return true;
+  }
+
   // The only step that closes Cue, and only ever because you clicked it.
   async function install() {
     if (state.state !== 'ready' || !staged) return state;
     const reason = canInterrupt && canInterrupt();
     if (reason) { push({ error: reason }); return state; }
-    const live = path.join('/Applications', 'Cue.app');
+    const live = path.join(APPS, 'Cue.app');
     const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
+    if (wouldDowngrade(live)) { staged = null; push({ state: 'idle', error: '' }); return state; }
     try {
       if (fs.existsSync(live)) await run('/bin/mv', [live, keep]); // recoverable, never deleted
       await run('/usr/bin/ditto', [staged, live]);
@@ -147,9 +177,10 @@ function createUpdater({ onState, canInterrupt, log, auto }) {
   // any step fails the old version is put straight back.
   function installOnQuit() {
     if (!staged || !autoOn() || state.state !== 'ready') return false;
-    const live = path.join('/Applications', 'Cue.app');
+    const live = path.join(APPS, 'Cue.app');
     const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
     if (!fs.existsSync(live)) return false;            // running from somewhere else; leave it alone
+    if (wouldDowngrade(live)) { staged = null; return false; }
     try {
       fs.renameSync(live, keep);                        // recoverable, never deleted
     } catch (e) { log && log({ tool: 'update', error: `step aside: ${e.message}` }); return false; }
@@ -173,4 +204,4 @@ function createUpdater({ onState, canInterrupt, log, auto }) {
   return { start, check, download, install, installOnQuit, ready: () => state.state === 'ready', openPage: () => shell.openExternal('https://labs.nathanielschool.com/products/cue'), state: () => state };
 }
 
-module.exports = { createUpdater, newer };
+module.exports = { createUpdater, newer, versionAt };
