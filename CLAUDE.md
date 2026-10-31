@@ -56,8 +56,18 @@ Testing NSM apps through Cue: open the app with `cue_open` in the agent lane, cl
 3. `~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh build/Cue-darwin-arm64/Cue.app --no-resign --dmg`
    Never re-sign an Electron build after packaging.
 4. `~/.claude/skills/nsm-mac-app/scripts/nsm-publish.sh cue <version> <dmg> --notes "..."`
-5. Windows and Linux build in GitHub Actions when you push a `v<version>` tag (`.github/workflows/build.yml`).
-   They are not code-signed, and their smoke test must pass before they are attached to the release.
+5. Push a `v<version>` tag. That builds Windows and Linux in GitHub Actions
+   (`.github/workflows/build.yml`; not code-signed, smoke test must pass) AND it is where
+   labs.nathanielschool.com reads Cue's version from, so without the tag the Labs page keeps
+   showing the old release however the registry reads.
+6. `nsm-publish.sh` does NOT write the in-app update feed. Write `cue-update.json` by hand
+   (version, date, notes, sha256, size, the rolling `downloads/Cue.dmg` url) and
+   `gh release upload downloads cue-update.json --repo jasonzacmusic/labs-downloads --clobber`.
+7. Check the registry really changed: its "registry.yaml: cue -> x" line can print while the
+   file is untouched. `release.version`, `asset_patterns` and `stable_download_urls` in
+   `product-registry/registry.yaml` all carry the version; commit and push them yourself.
+8. Prove it from outside: the Labs page, the three download links and the feed, each with a
+   cache-busting `?t=`. The script's own "shows x ✓" line has been wrong.
 
 ## Retiring Helium
 Prove it on the Mac mini with real measured numbers (time to first page and
