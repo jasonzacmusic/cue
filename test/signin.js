@@ -13,7 +13,7 @@ const until = async (fn, ms = 40000) => { const end = Date.now() + ms; while (Da
 
 const NOBODY = 'cue.browser.check@gmail.com'; // a made-up address: no account, no password, no risk
 
-module.exports = async ({ app, openTab, byId, internal }) => {
+module.exports = async ({ app, openTab, byId, internal, sessionFor }) => {
   try {
     const t = openTab({ url: 'https://accounts.google.com/ServiceLogin?service=mail', identity: 'personal' });
     const wc = t.view.webContents;
@@ -51,6 +51,30 @@ module.exports = async ({ app, openTab, byId, internal }) => {
     await until(() => ok.view.webContents.getURL().startsWith('https://www.google.com'));
     await sleep(2500);
     check('an ordinary Google page is left alone', !ok.view.webContents.getURL().startsWith('cue://'), ok.view.webContents.getURL());
+
+    // The other two sites he lives in. Each identity is its own jar, so a personal WhatsApp in one
+    // and the school's in the other are two separate links, not one fighting the other.
+    const ig = openTab({ url: 'https://www.instagram.com/accounts/login/', identity: 'personal' });
+    await until(() => ig.view.webContents.getURL().includes('instagram.com'));
+    await sleep(4000);
+    const igText = await until(() => ig.view.webContents.executeJavaScript('document.body.innerText')) || '';
+    check('Instagram: Cue gets the real sign-in page', /log in|phone number, username|password/i.test(igText) && !/not supported|update your browser/i.test(igText), igText.slice(0, 80));
+
+    const wa = openTab({ url: 'https://web.whatsapp.com/', identity: 'personal' });
+    await until(() => wa.view.webContents.getURL().includes('whatsapp.com'));
+    await sleep(9000);
+    const waText = await until(() => wa.view.webContents.executeJavaScript('document.body.innerText')) || '';
+    const waShape = await wa.view.webContents.executeJavaScript('JSON.stringify({canvas: !!document.querySelector("canvas"), imgs: document.querySelectorAll("img").length})').catch(() => '{}');
+    // WhatsApp's own "Download WhatsApp for Mac" banner sits above the code and is not a refusal,
+    // so the check looks for the words it uses when it will not run at all.
+    check('WhatsApp: Cue is not turned away as an old browser', !/update (your )?browser|browser is not supported|unsupported browser|isn.t supported/i.test(waText), waText.slice(0, 120));
+    check('WhatsApp: the link-a-phone code is drawn', /link|scan|qr|steps to log in/i.test(waText) || /"canvas":true/.test(waShape), waShape);
+
+    const waSchool = openTab({ url: 'https://web.whatsapp.com/', identity: 'school' });
+    await until(() => waSchool.view.webContents.getURL().includes('whatsapp.com'));
+    await sleep(3000);
+    const jars = await Promise.all(['personal', 'school'].map(async (id) => (await sessionFor(id).cookies.get({ domain: 'web.whatsapp.com' })).length));
+    check('WhatsApp: personal and the school keep separate jars', sessionFor('personal') !== sessionFor('school'), jars);
 
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
   } catch (e) {

@@ -599,25 +599,95 @@ const GOOGLE_REFUSED = /^https:\/\/accounts\.google\.[a-z.]+\/.*(signin\/rejecte
 // The sign-ins worth carrying over for a Google account, and nothing else.
 const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com)$/i;
 
-// Brings the Google sign-in over from Chrome on this Mac, where he is already signed in. Cookies
-// only, for Google's own sites, into the one identity that asked.
-async function googleFromChrome(identity) {
+// Where a Google sign-in lives, and the pages that keep their own copy of it.
+const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com', 'https://www.google.com',
+  'https://drive.google.com', 'https://calendar.google.com', 'https://www.youtube.com'];
+
+const cookieUrl = (c) => `${c.secure ? 'https' : 'http'}://${String(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
+
+// Brings a sign-in over from Chrome on this Mac, where he is already signed in. Cookies only, for
+// the sites asked for, into the one identity that asked.
+//
+// Whatever is already here for those sites is cleared first, and that is the whole trick: half of
+// last week's session and half of Chrome's is exactly what makes Google answer "we've detected a
+// problem with your cookie settings". A carried sign-in only works if it lands in an empty jar.
+async function carryFromChrome(identity, hostRe, origins = []) {
   const b = importer.findBrowsers().find((x) => x.id === 'chrome');
   if (!b || !b.profiles.length) return { error: 'Chrome is not on this Mac, so there is no sign-in to bring over.' };
-  const label = String(settings().identityLabels[identity] || '').toLowerCase();
-  const p = b.profiles.find((x) => String(x.email || '').toLowerCase() === label) || b.profiles[0];
   const key = await importer.getKey(b);
-  if (!key) return { error: 'Cue could not unlock Chrome\u2019s sign-ins. Say yes to the key request and try again.' };
+  if (!key) return { error: 'Cue could not unlock Chrome\u2019s sign-ins. Say yes when your Mac asks for the key, then try again.' };
   const ses = sessionFor(identity);
+  const host = (c) => String(c.domain || (() => { try { return new URL(c.url).hostname; } catch { return ''; } })()).replace(/^\./, '');
+
+  // Read Chrome's side first, and take the profile that actually holds a sign-in for this site.
+  // His Chrome keeps the real one in a later profile, so going by the first profile, or by the
+  // email on the identity, found an empty jar and brought nothing over.
+  const label = String(settings().identityLabels[identity] || '').toLowerCase();
+  let best = null;
+  for (const p of b.profiles) {
+    const found = importer.readCookies(b, p, key).filter((c) => hostRe.test(host(c)));
+    if (!found.length) continue;
+    const score = found.length + (label && String(p.email || '').toLowerCase() === label ? 1e6 : 0);
+    if (!best || score > best.score) best = { score, from: p.email || p.name || 'Chrome', cookies: found };
+  }
+  // If there is nothing to put back, nothing here is touched: clearing a working sign-in and then
+  // finding Chrome locked would leave him signed out of everything.
+  if (!best) return { count: 0, cleared: 0, from: 'Chrome' };
+  const incoming = best.cookies;
+
+  let cleared = 0;
+  for (const c of await ses.cookies.get({})) {
+    if (!hostRe.test(host(c))) continue;
+    try { await ses.cookies.remove(cookieUrl(c), c.name); cleared++; } catch { /* one stubborn cookie never stops the rest */ }
+  }
+  for (const origin of origins) {
+    await ses.clearStorageData({ origin, storages: ['localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }).catch(() => {});
+  }
+
   let count = 0;
-  for (const c of importer.readCookies(b, p, key)) {
-    const host = String(c.domain || '').replace(/^\./, '');
-    if (!GOOGLE_LOGIN_HOST.test(host)) continue;
-    try { await ses.cookies.set(c); count++; } catch { /* one bad cookie never stops the rest */ }
+  for (const c of incoming) {
+    try { await ses.cookies.set(c); count++; } catch { /* same */ }
   }
   await ses.cookies.flushStore();
   await sharedLogins.syncNow();
-  return { count, from: p.email || p.name || 'Chrome' };
+  return { count, cleared, from: best.from };
+}
+
+const googleFromChrome = (identity) => carryFromChrome(identity, GOOGLE_LOGIN_HOST, GOOGLE_ORIGINS);
+
+// For a site that will not let you sign in inside Cue - Google is the one that always refuses -
+// this carries the sign-in you already have in Chrome across to the tab you are looking at.
+async function carrySignIn(t) {
+  if (!t || !t.view) return;
+  if (t.identity === 'vanish') { sendEvent('toast', 'Vanish keeps nothing, so there is nowhere to put a sign-in.'); return; }
+  const site = siteName(t.url);
+  if (!site) { sendEvent('toast', 'Open the site first, then try this again.'); return; }
+  const where = (IDENTITIES[t.identity] || {}).name || t.identity;
+  if (!process.env.CUE_TEST) {
+    const { response } = await dialog.showMessageBox(mainWin, {
+      type: 'question', buttons: ['Bring it over', 'Cancel'], defaultId: 0, cancelId: 1,
+      message: `Bring your ${site} sign-in over from Chrome?`,
+      detail: `Cue clears what it has for ${site} in ${where} and puts Chrome's sign-in there instead. Chrome is left exactly as it is.\n\nA sign-in that moves from one app to another is the thing these checks are watching for. The site may take it quietly, or it may ask you to prove it is you.`,
+    });
+    if (response !== 0) return;
+  }
+  const re = new RegExp(`(^|\\.)${site.replace(/\./g, '\\.')}$`, 'i');
+  const r = await carryFromChrome(t.identity, re, [`https://${site}`, `https://www.${site}`]);
+  if (r.error) { sendEvent('toast', r.error); return; }
+  if (!r.count) { sendEvent('toast', `Chrome had no ${site} sign-in to bring over.`); return; }
+  sendEvent('toast', `Your ${site} sign-in came over from Chrome (${r.from}).`);
+  t.view.webContents.reload();
+}
+
+// The name a site is signed in under: "instagram.com" for www.instagram.com, "google.co.uk" for
+// accounts.google.co.uk. Good enough to decide which sign-ins travel together.
+function siteName(url) {
+  let h = '';
+  try { h = new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+  const parts = h.split('.');
+  if (parts.length < 3) return h;
+  const second = parts[parts.length - 2];
+  return (['co', 'com', 'net', 'org', 'gov', 'ac'].includes(second) ? parts.slice(-3) : parts.slice(-2)).join('.');
 }
 
 // Every way a page can be asked for - typed, clicked, restored at launch, woken
@@ -764,6 +834,25 @@ function hostWindow(t) { return t.host === 'stage' ? stageWin : t.host === 'popo
 // are treated as one place.
 function hostOf(u) {
   try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+// The handful of sites he keeps open all day. Each identity gets its own pinned tab for each one,
+// once, so Personal's Instagram and the school's are two separate sign-ins and WhatsApp is two
+// separate phones. Pin or unpin them after this and Cue leaves the choice alone.
+const EVERYDAY = ['https://www.facebook.com/', 'https://www.instagram.com/', 'https://web.whatsapp.com/'];
+
+function seedEveryday() {
+  const done = store.data.everydayPinned || {};
+  for (const identity of ['personal', 'school']) {
+    if (done[identity]) continue;
+    for (const url of EVERYDAY) {
+      const host = hostOf(url);
+      if (tabs.some((t) => t.identity === identity && hostOf(t.url) === host)) continue;
+      tabs.push(makeTab({ url, identity, pinned: true }));
+    }
+    done[identity] = true;
+  }
+  store.data.everydayPinned = done;
 }
 
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
@@ -2225,6 +2314,7 @@ function buildMenu() {
         { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Alt+N', visible: false, acceleratorWorksWhenHidden: true, click: cmd('new-tab', { identity: 'vanish' }) }, // for Macs where another app owns Cmd+Shift+N
         { label: 'New Tab As', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: cmd('new-tab', { identity: i }) })) },
         { label: 'Move In From Another Browser…', click: () => sendEvent('import') },
+        { label: 'Bring This Site\u2019s Sign-in Over From Chrome…', click: () => carrySignIn(byId(activeId)) },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: () => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } } },
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: () => { uiView.webContents.focus(); sendEvent('focus-omnibox'); } },
         { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: () => { uiView.webContents.focus(); sendEvent('palette-open'); } },
@@ -2397,6 +2487,7 @@ function createMain() {
 
   const saved = store.data.tabs || [];
   for (const s of saved) tabs.push(makeTab(s));
+  seedEveryday();
   if (!tabs.length) tabs.push(makeTab({ url: START_URL }));
   const first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
   const current = (sp) => ({ ...sp, uids: undefined, ids: (sp.uids || []).map((u) => tabs.find((t) => t.uid === u)?.id).filter(Boolean) });
