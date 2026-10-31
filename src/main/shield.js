@@ -40,6 +40,9 @@ const DANGER_LISTS = [
 const NEVER_TOUCH = [
   '@@||youtube.com^$document', '@@||youtube-nocookie.com^$document', '@@||ytimg.com^', '@@||googlevideo.com^',
   '@@||nathanielschool.com^$document', '@@||nathanielschool.com^',
+  // CNN's player asks for this settings file about 3,000 times a second if it is refused, which
+  // costs far more than the file. The ads it would lead to are still blocked.
+  '@@||cdn-media.brightline.tv/config/$xmlhttprequest,domain=cnn.com',
 ];
 const COSMETIC_OFF = /^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|nathanielschool\.com)\//;
 

@@ -18,6 +18,8 @@ const crypto = require('crypto');
 const { execFile, execFileSync } = require('child_process');
 
 const FEED = 'https://github.com/jasonzacmusic/labs-downloads/releases/download/downloads/cue-update.json';
+// Only Cue, signed by us. Being signed by some other developer, or notarized by Apple, isn't enough.
+const OURS = 'identifier "com.jasonzac.cue" and anchor apple generic and certificate leaf[subject.OU] = "R3UNCZH45H"';
 const FIRST_CHECK = 25_000;      // let the window settle before touching the network
 const EVERY = 6 * 60 * 60 * 1000;
 
@@ -108,10 +110,8 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
     try {
       const bytes = await get(feed.url);
       fs.writeFileSync(dmg, bytes);
-      if (feed.sha256) {
-        const got = crypto.createHash('sha256').update(bytes).digest('hex');
-        if (got !== feed.sha256) throw new Error('the download did not match its checksum, so it was thrown away');
-      }
+      const got = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (got !== feed.sha256) throw new Error('the download did not match its checksum, so it was thrown away');
       push({ percent: 60 });
       const out = await run('/usr/bin/hdiutil', ['attach', '-nobrowse', '-readonly', dmg]);
       const vol = (out.match(/\/Volumes\/[^\n]*/) || [])[0];
@@ -121,9 +121,15 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
         const dest = path.join(dir, 'Cue.app');
         await run('/usr/bin/ditto', [src, dest]);
         // Refuse anything that is not properly signed, even from our own link.
-        await run('/usr/sbin/spctl', ['-a', '-t', 'exec', dest]).catch(() => {
+        await Promise.all([
+          run('/usr/sbin/spctl', ['-a', '-t', 'exec', dest]),
+          run('/usr/bin/codesign', ['--verify', '--deep', '--strict', `-R=${OURS}`, dest]),
+        ]).catch(() => {
           throw new Error('the downloaded copy is not signed properly, so it was thrown away');
         });
+        const inside = versionAt(dest); // what the app itself says, not what the update file claimed
+        if (!inside || !newer(inside, app.getVersion())) throw new Error('the download is not newer than this Cue, so it was thrown away');
+        push({ latest: inside });
         staged = dest;
       } finally {
         await run('/usr/bin/hdiutil', ['detach', vol.trim()]).catch(() => {});
@@ -142,6 +148,14 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
   // between the moment a download finished and the moment Cue closes, the copy
   // in /Applications may already be newer than the one waiting. Then the right
   // thing to do is nothing at all.
+  const stillOurs = () => {
+    try { execFileSync('/usr/bin/codesign', ['--verify', '--strict', `-R=${OURS}`, staged], { timeout: 60_000 }); return true; } catch (e) {
+      log && log({ tool: 'update', error: `the waiting copy changed: ${e.message}` });
+      staged = null;
+      return false;
+    }
+  };
+
   function wouldDowngrade(live) {
     const here = versionAt(live);
     const coming = state.latest || '';
@@ -159,6 +173,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
     const live = path.join(APPS, 'Cue.app');
     const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
     if (wouldDowngrade(live)) { staged = null; push({ state: 'idle', error: '' }); return state; }
+    if (!stillOurs()) { push({ state: 'idle', error: '' }); return state; }
     try {
       if (fs.existsSync(live)) await run('/bin/mv', [live, keep]); // recoverable, never deleted
       await run('/usr/bin/ditto', [staged, live]);
@@ -180,7 +195,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
     const live = path.join(APPS, 'Cue.app');
     const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
     if (!fs.existsSync(live)) return false;            // running from somewhere else; leave it alone
-    if (wouldDowngrade(live)) { staged = null; return false; }
+    if (wouldDowngrade(live) || !stillOurs()) { staged = null; return false; }
     try {
       fs.renameSync(live, keep);                        // recoverable, never deleted
     } catch (e) { log && log({ tool: 'update', error: `step aside: ${e.message}` }); return false; }

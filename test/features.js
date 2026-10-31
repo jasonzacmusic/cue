@@ -202,10 +202,12 @@ module.exports = async function run(c) {
   check('passwords: encrypted on disk', !raw.includes(TEST_PASS));
   // Since 0.4.0 a password goes in only once you touch the box, so the test
   // touches it the way you would. The hands-free case is covered in test/shield.js.
-  const clickPw = (t) => t.view.webContents.executeJavaScript(`(() => {
-    const pw = document.getElementById('pw');
-    pw.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); pw.focus(); return true;
-  })()`).catch(() => false);
+  const clickPw = async (t) => {
+    const wc = t.view.webContents;
+    const { x, y } = await wc.executeJavaScript(`(()=>{const b=document.getElementById('pw').getBoundingClientRect();return {x:Math.round(b.x+5),y:Math.round(b.y+5)}})()`);
+    wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+  };
   const lg = c.openTab({ url: `${base}/login`, identity: 'personal' }); await loaded(lg);
   await sleep(500);
   check('passwords: nothing goes in before you touch the box', (await lg.view.webContents.executeJavaScript('document.getElementById("pw").value')) === '');

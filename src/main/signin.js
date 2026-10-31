@@ -12,4 +12,9 @@ function whereToOpen(url, disposition, from = '') {
   return GOOGLE_FRONT_PAGE.test(from) ? 'here' : 'tab';
 }
 
-module.exports = { whereToOpen };
+// A page may ask Cue to open a new window, and Cue does the opening with more rights than the page
+// has, so local files and Cue's own pages are refused here. Only Cue's own pages may open each other.
+const NOT_FOR_PAGES = /^(file|data|cue|chrome|devtools|view-source|javascript|filesystem):/i;
+const refuseOpen = (url, from = '') => NOT_FOR_PAGES.test(url) && !/^(cue|chrome-extension):/i.test(from);
+
+module.exports = { refuseOpen, whereToOpen };

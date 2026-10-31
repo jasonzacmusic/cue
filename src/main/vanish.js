@@ -2,11 +2,11 @@
 // Its tabs are kept here and never join Cue's own tab list, so nothing that saves, syncs or
 // shares tabs can reach them. Closing the window wipes its memory-only session.
 const { BaseWindow, WebContentsView, Menu, clipboard, screen } = require('electron');
-const { whereToOpen } = require('./signin');
+const { whereToOpen, refuseOpen } = require('./signin');
 
 const BAR = 86; // tab strip + address bar
 
-function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, onClosed }) {
+function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
   const tabs = [];
   const byId = (id) => tabs.find((t) => t.id === id);
@@ -68,7 +68,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   }
 
   function add(url) {
-    if (!win) build(); else win.focus();
+    if (!win) build();
+    else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } // it may be behind Cue or on another desktop
     const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false } });
     view.setBackgroundColor('#0B0B0D');
     const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false };
@@ -94,14 +95,16 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       Menu.buildFromTemplate(items).popup({ window: win });
     });
     wc.setWindowOpenHandler(({ url: u, disposition }) => {
+      if (refuseOpen(u, wc.getURL())) return { action: 'deny' };
       const where = whereToOpen(u, disposition, wc.getURL());
       if (where === 'popup') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, webPreferences: { session: session() } } };
-      if (where === 'here') wc.loadURL(u).catch(() => {}); else add(u);
+      if (where === 'here') wc.loadURL(guardUrl(u)).catch(() => {}); else add(u);
       return { action: 'deny' };
     });
     wc.on('did-create-window', (popup) => popup.setContentProtection(true));
     if (!url) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
-    wc.loadURL(t.url).catch(() => {});
+    protect(wc, t);
+    wc.loadURL(guardUrl(t.url)).catch(() => {});
     activate(t.id);
     if (!url) focusBar();
     return t;
@@ -168,7 +171,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
 
   function command(cmd, a = {}) {
     const t = byId(activeId); const wc = t && t.view.webContents;
-    if (cmd === 'navigate' && wc) { const u = resolveInput(a.text); t.url = u; wc.loadURL(u).catch(() => {}); wc.focus(); }
+    if (cmd === 'navigate' && wc) { const u = guardUrl(resolveInput(a.text)); t.url = u; wc.loadURL(u).catch(() => {}); wc.focus(); }
     if (cmd === 'back' && wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
     if (cmd === 'forward' && wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
     if (cmd === 'reload' && wc) wc.reload();

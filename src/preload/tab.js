@@ -205,9 +205,48 @@ function install(init) {
   if (init.safe) document.addEventListener('DOMContentLoaded', () => setSafe(true));
 }
 
+// YouTube sends its ads from the same addresses as the video, so a filter list can't touch them.
+// This takes them out of the page's own data before the player reads it. Anything that still gets
+// through is muted and run to its end the moment it starts. Studio is left alone.
+function quietYouTube() {
+  const AD_KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams'];
+  const strip = (o) => {
+    if (!o || typeof o !== 'object') return o;
+    for (const k of AD_KEYS) delete o[k];
+    if (o.playerResponse) strip(o.playerResponse);
+    return o;
+  };
+  const parse = JSON.parse;
+  JSON.parse = function (...a) { return strip(parse.apply(this, a)); };
+  const json = Response.prototype.json;
+  Response.prototype.json = function () { return json.call(this).then(strip); };
+  let first;
+  Object.defineProperty(window, 'ytInitialPlayerResponse', { configurable: true, get: () => first, set: (v) => { first = strip(v); } });
+
+  const hide = new CSSStyleSheet(); // CSS this way can't be refused by the page's security rules
+  hide.replaceSync(`#masthead-ad, #player-ads, ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer,
+    ytd-rich-item-renderer:has(ytd-ad-slot-renderer), ytd-companion-slot-renderer, .ytp-ad-overlay-container, ytd-enforcement-message-view-model,
+    tp-yt-paper-dialog:has(ytd-enforcement-message-view-model) { display: none !important; }`);
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, hide];
+
+  let silenced = false; let wasMuted = false;
+  document.addEventListener('timeupdate', (e) => { // only fires while a video plays, so an idle tab costs nothing
+    const v = e.target;
+    if (!(v instanceof HTMLVideoElement)) return;
+    const player = v.closest('.html5-video-player');
+    if (player && player.classList.contains('ad-showing')) {
+      if (!silenced) { silenced = true; wasMuted = v.muted; v.muted = true; }
+      if (Number.isFinite(v.duration) && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
+      const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
+      if (skip) skip.click();
+    } else if (silenced) { silenced = false; v.muted = wasMuted; }
+  }, true);
+}
+
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
+if (init.ytAds && /^(www|m|music)\.youtube\.com$/.test(location.hostname)) contextBridge.executeInMainWorld({ func: quietYouTube });
 
 const call = (name, ...args) => contextBridge.executeInMainWorld({
   func: (k, n, a) => (window.__cue ? window.__cue.call(k, n, ...a) : null), args: [KEY, name, args],
@@ -260,7 +299,7 @@ document.addEventListener('cue-note', (e) => {
 
 // Alt-click a link to Peek at it without leaving the page.
 document.addEventListener('click', (e) => {
-  if (!e.altKey) return;
+  if (!e.altKey || !e.isTrusted) return;
   const a = e.target.closest && e.target.closest('a[href]');
   if (!a) return;
   e.preventDefault(); e.stopPropagation();
@@ -315,16 +354,15 @@ if (window === window.top && /^https?:$/.test(location.protocol)) {
     if (!ready) return;
     if (ready.handsFree) { fill(pw); return; }
     const wake = (e) => {
+      if (!e.isTrusted) return; // a real press only: a page's own script can focus a box or fake a press
       const box = e.target;
       if (!box || box.tagName !== 'INPUT') return;
       const now = pwField();
       if (!now || (box !== now && box !== userField(now))) return;
       document.removeEventListener('pointerdown', wake, true);
-      document.removeEventListener('focusin', wake, true);
       fill(now);
     };
     document.addEventListener('pointerdown', wake, true);
-    document.addEventListener('focusin', wake, true);
   };
   const offer = () => {
     const pw = pwField();

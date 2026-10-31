@@ -2,6 +2,7 @@
 // Usage: node scripts/build-mac.js            -> build/Cue-darwin-arm64/Cue.app
 // Notarizing happens after, with ~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh --no-resign
 const { packager } = require('@electron/packager');
+const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
@@ -26,6 +27,16 @@ packager({
   asar: { unpackDir: 'bin' },
   // Chromium ships every language it knows, about 40 MB Cue never shows. English stays.
   afterCopy: [async ({ buildPath }) => {
+    // Stops another program using Cue's camera and microphone rights by running Cue as a plain script host.
+    await flipFuses(path.resolve(buildPath, '..', '..', '..'), {
+      version: FuseVersion.V1,
+      [FuseV1Options.RunAsNode]: false,
+      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+      [FuseV1Options.EnableNodeCliInspectArguments]: false,
+      [FuseV1Options.EnableCookieEncryption]: true,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
+      [FuseV1Options.OnlyLoadAppFromAsar]: true,
+    });
     const res = path.join(buildPath, '..', '..', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Resources');
     for (const f of fs.readdirSync(res)) { if (f.endsWith('.lproj') && !/^en(_GB)?\.lproj$/.test(f)) fs.rmSync(path.join(res, f), { recursive: true }); }
   }],

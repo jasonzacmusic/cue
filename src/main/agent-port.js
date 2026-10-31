@@ -50,6 +50,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function startAgentPort({ port, tokenFile, api }) {
   const token = loadToken(tokenFile);
   fs.writeFileSync(tokenFile, JSON.stringify({ url: `http://127.0.0.1:${port}`, token }, null, 2), { mode: 0o600 });
+  fs.chmodSync(tokenFile, 0o600); // the mode above only applies when the file is new
 
   const need = (t, act) => {
     if (!t) throw new Error('No tab with that id.');

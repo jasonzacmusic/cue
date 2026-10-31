@@ -22,13 +22,14 @@ const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
-const { whereToOpen } = require('./signin');
+const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
 if (process.env.CUE_USER_DATA) app.setPath('userData', process.env.CUE_USER_DATA);
+app.commandLine.appendSwitch('disable-features', 'MediaRouter,Translate,OptimizationHints'); // Chrome services Cue never uses
 if (process.env.CUE_QUIET) app.commandLine.appendSwitch('mute-audio'); // tests must not depend on, or play through, whatever headphones are connected
 if (process.env.CUE_TEST) { app.commandLine.appendSwitch('use-mock-keychain'); app.setPath('downloads', path.join(app.getPath('userData'), 'downloads')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'cue', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
@@ -230,13 +231,23 @@ function sessionFor(identity) {
   });
 
   ses.on('will-download', (_e, item) => {
+    const bad = shield && settings().warnDangerous !== false && shield.verdict(item.getURL());
+    if (bad) { item.cancel(); sendEvent('toast', `Cue stopped a download from ${shield.hostOf(item.getURL())}. That site is reported for ${bad}.`); return; }
     const dir = app.getPath('downloads');
     let name = item.getFilename(); let file = path.join(dir, name); let n = 1;
     while (fs.existsSync(file) || downloads.some((x) => x.file === file && x.state === 'progressing')) { const ext = path.extname(name); file = path.join(dir, `${path.basename(name, ext)} (${n++})${ext}`); }
     // Vanish leaves no file behind unless you choose where it goes.
     if (identity === 'vanish') item.setSaveDialogOptions({ title: 'Vanish tab: save this file?', defaultPath: file });
     else item.setSavePath(file);
-    if (identity === 'vanish') return; // the save dialog is the only trace, and it is yours
+    if (identity === 'vanish') { // the save dialog is the only trace, and it is yours
+      item.once('done', (_ev, state) => { if (state === 'completed') markDownloaded(item.getSavePath()); });
+      return;
+    }
+    if (RUNS_ITSELF.test(name) && !process.env.CUE_TEST) {
+      item.pause();
+      dialog.showMessageBox(mainWin, { type: 'warning', buttons: ['Cancel', 'Keep'], defaultId: 0, cancelId: 0, message: `${name} runs as a program when you open it.`, detail: 'Keep it only if you know who it came from.' })
+        .then((r) => { if (r.response === 1) item.resume(); else item.cancel(); });
+    }
     const d = { id: Date.now() + Math.random(), name: path.basename(file), file, kind: fileKind(file), received: 0, total: item.getTotalBytes(), state: 'progressing' };
     downloads.unshift(d); downloads.length = Math.min(downloads.length, 30);
     item.on('updated', (_ev, state) => { d.received = item.getReceivedBytes(); d.state = state; pushState(); });
@@ -261,6 +272,7 @@ const KINDS = {
   Documents: ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.md', '.musicxml', '.mscz'],
   Archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
 };
+const RUNS_ITSELF = /\.(command|terminal|tool|workflow|action|jar|scpt|sh)$/i; // Finder runs these on a double-click
 // macOS only lets Gatekeeper check a file that is marked as downloaded. Chrome and
 // Safari write that mark; without it an installer from the web would open with no
 // check at all, so Cue writes it on every finished download.
@@ -404,9 +416,8 @@ function guardUrl(url) {
   return bad ? `cue://danger?kind=${bad}&site=${encodeURIComponent(url)}` : url;
 }
 
-function wireTab(t) {
-  const wc = t.view.webContents;
-  wc.setAudioMuted(t.muted);
+// The same guards for every tab, Vanish included. Vanish passes no note, so nothing is written down.
+function protectPage(wc, t, note) {
   // On a VPN, this is the one thing a browser does that gives your real address
   // away. Video calling asks the operating system for every network address
   // this Mac has and hands the lot to the page, which is how a site reads your
@@ -420,7 +431,7 @@ function wireTab(t) {
     if (warn !== url) {
       e.preventDefault();
       wc.loadURL(warn).catch(() => {});
-      logTab(t, 'blocked', `dangerous site ${url}`);
+      if (note) note(`dangerous site ${url}`);
       return;
     }
     const safe = settings().httpsFirst !== false ? secureVersion(url) : null;
@@ -438,10 +449,16 @@ function wireTab(t) {
     const back = t.httpsFrom; t.httpsFrom = null;
     if (!NO_SECURE_DOOR.has(Number(code)) || !/^https:/.test(url)) return;
     try { NO_HTTPS.add(new URL(back).hostname); } catch {}
-    sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
+    if (note) sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
     wc.loadURL(back).catch(() => {});
   });
   wc.on('did-finish-load', () => { t.httpsFrom = null; });
+}
+
+function wireTab(t) {
+  const wc = t.view.webContents;
+  wc.setAudioMuted(t.muted);
+  protectPage(wc, t, (what) => logTab(t, 'blocked', what));
   wc.on('page-title-updated', (_e, title) => {
     t.title = title; if (t.popout) t.popout.setTitle(`Cue · ${title}`);
     if (remembers(t)) lib.title(wc.getURL(), title);
@@ -504,7 +521,7 @@ function wireTab(t) {
   });
   wc.on('did-navigate-in-page', () => teamSignedIn(t)); // the team site signs in without a page load
   wc.setWindowOpenHandler(({ url, disposition }) => {
-    if (recTabId === t.id) return { action: 'deny' };
+    if (recTabId === t.id || refuseOpen(url, wc.getURL())) return { action: 'deny' };
     const where = whereToOpen(url, disposition, wc.getURL());
     if (where === 'popup') {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
@@ -1020,7 +1037,8 @@ function startThumbs() {
 // ---------------------------------------------------------------- IPC
 ipcMain.on('cue:tab-init', (e) => {
   const t = byWC(e.sender);
-  e.returnValue = { volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live };
+  const ytAds = settings().blockAds !== false && !(shield && shield.isAllowed('https://youtube.com/'));
+  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live };
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
@@ -1040,9 +1058,13 @@ ipcMain.on('cue:scroll', (e, ratio) => {
 ipcMain.on('cue:peek', (e, url) => { const t = byWC(e.sender); if (t) openPeek(url, t); });
 ipcMain.on('cue:music-state', (_e, st) => sendEvent('music-state', st));
 ipcMain.on('cue:note', (e, n) => {
-  const t = byWC(e.sender); if (!t || t.identity === 'vanish') return;
+  const t = byWC(e.sender); if (!t || t.identity === 'vanish' || !n) return;
+  const now = Date.now(); // a page can send these as fast as it likes, so it gets a few a minute and no more
+  t.noteTimes = (t.noteTimes || []).filter((at) => now - at < 60000);
+  if (t.noteTimes.length >= 5) return;
+  t.noteTimes.push(now);
   if (live) heldCount++;
-  addAlert({ source: hostName(t.url), title: n.title, body: n.body, url: t.url, held: live });
+  addAlert({ source: hostName(t.url), title: String(n.title || '').slice(0, 200), body: String(n.body || '').slice(0, 500), url: t.url, held: live });
 });
 const sharesPasswords = (identity, origin) => (identity === 'personal' || identity === 'school') && !hasTwoAccounts(hostName(origin));
 // Which saved login applies here, found the same way for both handlers below so
@@ -1084,7 +1106,7 @@ ipcMain.on('cue:cred-offer', (e, c) => {
 });
 ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   if (!e.senderFrame.url.startsWith('cue://') || !internal[cmd]) throw new Error('Not allowed');
-  return internal[cmd](a, byWC(e.sender));
+  return internal[cmd](a, byWC(e.sender), e.sender);
 });
 
 ipcMain.on('ui:cmd', (_e, cmd, a = {}) => {
@@ -1563,11 +1585,13 @@ const internal = {
   'shield.refresh': async () => { if (shield) await shield.refreshDanger(); return shield ? shield.status() : null; },
   // "Open it anyway" on the warning page. One host, until Cue is closed.
   'shield.close': (_a, from) => { if (from) closeTab(from.id); return true; },
-  'shield.proceed': ({ site }, from) => {
+  'shield.proceed': ({ site }, from, sender) => {
     if (!shield || !/^https?:\/\//i.test(String(site || ''))) return false;
     const host = shield.hostOf(site);
     if (!host) return false;
     dangerOk.add(host);
+    // A Vanish tab has no entry in Cue's tab list, so it must never fall through to the active tab.
+    if (!from && sender && vanish && vanish.tabs.some((x) => x.view.webContents === sender)) { sender.loadURL(site).catch(() => {}); return true; }
     const t = from || byId(activeId);
     if (t && t.view) t.view.webContents.loadURL(site).catch(() => {});
     return true;
@@ -2004,6 +2028,7 @@ setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(
 
 // ---------------------------------------------------------------- start
 async function setupBlocker() {
+  app.configureHostResolver({ secureDnsMode: 'automatic' }); // private lookups wherever the network's provider offers them
   shield = createShield({ dir: app.getPath('userData'), log: (e) => logAgent(e) });
   await shield.start({
     sessions: settings().blockAds === false ? [] : [...sessionsReady],
@@ -2091,10 +2116,10 @@ app.whenReady().then(async () => {
     settings: {
       autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
       stageWidth: 1920, stageHeight: 1080, obs: { host: '127.0.0.1', port: 4455, password: '' },
-      defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 30,
+      defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 30, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [] }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [] }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -2103,7 +2128,7 @@ app.whenReady().then(async () => {
   lib = new Library(app.getPath('userData'));
   vanish = createVanish({
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
-    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput,
+    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage,
   });
   ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
   vault = new Vault(app.getPath('userData'));

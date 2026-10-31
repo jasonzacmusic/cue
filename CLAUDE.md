@@ -21,7 +21,7 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 - `src/main/main.js`: windows, tabs, Spaces, split views, on air, Peek, AI panel, menus, every wire.
 - `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
 - `src/main/vanish.js`: the Vanish window. Its tabs are kept out of Cue's tab list on purpose, so nothing that saves or shares tabs can reach them.
-- `src/main/signin.js`: where a page's new window goes (popup, same tab, new tab). `shared-logins.js`: copies sign-ins between Personal and School, except sites with two accounts.
+- `src/main/signin.js`: where a page's new window goes (popup, same tab, new tab). `refuseOpen` stops pages opening local files or Cue's own pages. `shared-logins.js`: copies sign-ins between Personal and School, except sites with two accounts.
 - The team.nathanielschool.com password import is a one-time step for the school's own staff. It shows only if this computer is signed in to that site. Everyone else moves in from Chrome or Safari; never present it as a Cue feature.
 - `src/main/db.js`: history, bookmarks, Boards. `vault.js`: passwords (OS keychain). `bills.js`: bill reader.
 - `src/main/importer.js`: move in from Chrome, Safari, Helium, Brave, Edge, Arc. Safari needs Full Disk Access.
@@ -73,6 +73,8 @@ Helium installed and report the numbers.
 - History keeps the newest 50,000 pages. Logs rotate.
 
 ## Honest limits today
+- YouTube's own ads are removed inside the page (`quietYouTube` in `src/preload/tab.js`), on youtube.com only, never Studio. YouTube can change its page and break this. Videos embedded on other sites aren't covered, and neither are sponsored posts inside Instagram or Facebook feeds.
+- Blocked ad scripts can retry in a tight loop, which costs more than the ad. `CUE_TEST=speed` shows it; a tiny exception in `shield.js` stops it, as with CNN.
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.
 - Vanish is hidden from screen sharing with Apple's normal setting. Some capture tools on recent macOS ignore it.

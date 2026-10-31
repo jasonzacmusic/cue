@@ -34,6 +34,13 @@ function server() {
   });
 }
 
+// A click that comes from the mouse, which a page's own script can't produce.
+async function realClick(wc, id) {
+  const { x, y } = await wc.executeJavaScript(`(()=>{const b=document.getElementById('${id}').getBoundingClientRect();return {x:Math.round(b.x+5),y:Math.round(b.y+5)}})()`);
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+}
+
 module.exports = async function run(c) {
   fs.mkdirSync(OUT, { recursive: true });
   const srv = await server();
@@ -57,6 +64,27 @@ module.exports = async function run(c) {
   const blockedAds = adHosts.filter((u) => shield.matches(u, 'https://example.com/', 'script'));
   check('ads: known ad and tracker scripts are blocked', blockedAds.length === adHosts.length, { blocked: blockedAds.length, of: adHosts.length });
   check('ads: an ordinary script is not blocked', !shield.matches('https://example.com/app.js', 'https://example.com/', 'script'));
+  // YouTube's own ads come in the page's data, so the proof is in the page, not the filter list.
+  const yt = c.openTab({ url: 'https://www.youtube.com/watch?v=rWGvrodpcBc', identity: 'personal' }); await sleep(9000);
+  const yw = yt.view.webContents;
+  await yw.executeJavaScript(`(()=>{const v=document.querySelector('video');return v&&v.play().then(()=>1).catch(()=>0)})()`, true).catch(() => {});
+  const parsed = await yw.executeJavaScript(`JSON.parse('{"adPlacements":[1],"playerAds":[1],"videoDetails":{"a":1}}')`, true);
+  check('YouTube ads: taken out of the data the player reads', !parsed.adPlacements && !parsed.playerAds && parsed.videoDetails && parsed.videoDetails.a === 1, parsed);
+  const first = await yw.executeJavaScript(`(()=>{const r=window.ytInitialPlayerResponse;return r?{ads:!!(r.adPlacements||r.playerAds),video:!!r.videoDetails}:null})()`, true);
+  check('YouTube ads: none in the page as it arrived, video intact', first && !first.ads && first.video, first);
+  let adSeen = 0;
+  for (let i = 0; i < 16; i++) { adSeen += await yw.executeJavaScript(`document.querySelector('.ad-showing')?1:0`, true); await sleep(500); }
+  const t = await yw.executeJavaScript(`(()=>{const v=document.querySelector('video');return v?{time:v.currentTime,paused:v.paused,len:v.duration}:null})()`, true);
+  check('YouTube ads: the lesson itself plays', t && t.time > 1 && !t.paused, t);
+  check('YouTube ads: no ad on screen in 8 seconds', adSeen === 0, { adSeen });
+  const warned = await yw.executeJavaScript(`!!document.querySelector('ytd-enforcement-message-view-model')`, true);
+  check('YouTube ads: YouTube did not complain', !warned);
+  await yw.capturePage().then((img) => fs.writeFileSync(path.join(OUT, 'youtube.png'), img.toPNG())).catch(() => {});
+  c.closeTab(yt.id);
+  const plain = c.openTab({ url: `http://127.0.0.1:${port}/plain`, identity: 'personal' }); await sleep(1500);
+  const kept = await plain.view.webContents.executeJavaScript(`JSON.parse('{"adPlacements":[1]}')`, true);
+  check('YouTube ads: other sites are untouched (control)', !!kept.adPlacements, kept);
+  c.closeTab(plain.id);
   check('ads: YouTube is left exactly as Chrome has it', !shield.matches('https://www.youtube.com/watch?v=x', 'https://www.youtube.com/', 'document')
     && !shield.matches('https://rr3---sn-x.googlevideo.com/videoplayback', 'https://www.youtube.com/', 'media'));
   check('ads: the school\'s own sites are never touched', !shield.matches('https://learning-portal.nathanielschool.com/x.js', 'https://learning-portal.nathanielschool.com/', 'script'));
@@ -120,11 +148,15 @@ module.exports = async function run(c) {
   await sleep(1400);
   const empty = await lg.view.webContents.executeJavaScript('document.getElementById("pw").value').catch(() => 'err');
   check('passwords: nothing is typed in until you touch the box', empty === '', { was: empty });
+  // A page can focus the box or fake a press with its own script. Neither may be enough.
   await lg.view.webContents.executeJavaScript(`
     const pw = document.getElementById('pw');
     pw.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     pw.focus();
   `).catch(() => {});
+  await sleep(1000);
+  check('passwords: a page cannot pull one out by itself', (await lg.view.webContents.executeJavaScript('document.getElementById("pw").value').catch(() => 'err')) === '');
+  await realClick(lg.view.webContents, 'pw');
   const filledIn = await until(async () => {
     const v = await lg.view.webContents.executeJavaScript('document.getElementById("pw").value').catch(() => '');
     return v ? v : null;
@@ -180,6 +212,27 @@ module.exports = async function run(c) {
   check('extensions: cookies are said as staying signed in', /cookies that keep you signed in/.test(canDo({ permissions: ['cookies'] })));
   check('extensions: a harmless one says so', canDo({ permissions: ['storage', 'alarms'] }) === 'It cannot see the pages you open.');
   check('extensions: no jargon survives', !/<all_urls>|webRequest|nativeMessaging|permission/i.test(canDo({ permissions: ['webRequest', 'nativeMessaging'], host_permissions: ['<all_urls>'] })));
+
+  // ---- a page must not be able to open what only Cue may open
+  const { refuseOpen } = require('../src/main/signin');
+  check('new windows: a page cannot open local files or Cue\'s own pages', ['file:///etc/hosts', 'data:text/html,x', 'cue://library', 'javascript:alert(1)', 'chrome://gpu'].every((u) => refuseOpen(u, 'https://example.com/')));
+  check('new windows: ordinary links still open (control)', !['https://example.com/', 'http://example.com/', 'about:blank', 'mailto:a@b.c', 'blob:https://example.com/x'].some((u) => refuseOpen(u, 'https://example.com/')));
+  const before = c.tabs.length;
+  const opener = c.openTab({ url: `http://127.0.0.1:${port}/plain`, identity: 'personal' }); await sleep(1200);
+  await opener.view.webContents.executeJavaScript(`window.open('file:///etc/hosts');1`, true).catch(() => {}); await sleep(800);
+  check('new windows: a real page trying it gets nothing', c.tabs.length === before + 1, { tabs: c.tabs.length, before });
+  c.closeTab(opener.id);
+  // ---- Vanish has the same guards as every other tab
+  const vbad = c.openTab({ url: `https://${phish}/pay`, identity: 'vanish' });
+  check('Vanish: a dangerous site shows the warning', !!(await until(() => url(vbad).startsWith('cue://danger'), 15000)), { went: url(vbad).slice(0, 80) });
+  check('Vanish: the warning goes nowhere near a normal tab', !c.tabs.some((x) => x.view && x.view.webContents.getURL().includes(phish)));
+  const v2 = c.openTab({ url: 'https://example.com/', identity: 'vanish' }); await sleep(1500);
+  const notTitleBar = await c.vanish.ui().webContents.executeJavaScript(`[...document.querySelectorAll('.tab')].map((t) => getComputedStyle(t).webkitAppRegion)`);
+  check('Vanish: every tab takes a click, none acts as title bar', notTitleBar.length === 2 && notTitleBar.every((r) => r === 'no-drag'), notTitleBar);
+  await c.vanish.ui().webContents.executeJavaScript(`document.querySelectorAll('.tab')[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));1`); await sleep(500);
+  check('Vanish: clicking a tab shows that tab', c.vanish.activeId() === vbad.id, { active: c.vanish.activeId(), first: vbad.id });
+  c.vanish.closeTab(v2.id); await sleep(300);
+  c.vanish.closeTab(vbad.id); await sleep(300);
 
   // ---- a deliberate control, so a silent pass can never be mistaken for a run
   check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
