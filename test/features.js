@@ -141,9 +141,14 @@ module.exports = async function run(c) {
   vPlay.view.webContents.focus();
   await vPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1800);
   const vb1 = vPlay.view.getBounds(); const [vfw, vfh] = vw.getContentSize();
-  check('vanish: a video fills the whole screen', c.vanish.isFull() && vw.isFullScreen() && vb1.y === 0 && vb1.height === vfh && vb1.width === vfw, [vb1, vfw, vfh]);
+  check('vanish: a video fills the whole screen without leaving this desktop', c.vanish.isFull() && vw.isSimpleFullScreen() && !vw.isFullScreen() && vb1.y === 0 && vb1.height === vfh && vb1.width === vfw, [vb1, vfw, vfh]);
   vPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
-  check('vanish: leaving full screen brings the tabs back', !c.vanish.isFull() && !vw.isFullScreen() && vPlay.view.getBounds().y > 0);
+  check('vanish: leaving full screen brings the tabs back', !c.vanish.isFull() && !vw.isSimpleFullScreen() && vPlay.view.getBounds().y > 0);
+  check('vanish: Cue\'s main window stays out of it', !c.win().isFullScreen());
+  await vPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1200);
+  const inFull = c.vanish.isFull();
+  vPlay.view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); await sleep(1500);
+  check('vanish: Escape leaves full screen', inFull && !c.vanish.isFull() && !vw.isSimpleFullScreen() && vPlay.view.getBounds().y > 0, { inFull, still: c.vanish.isFull() });
   c.vanish.closeTab(vPlay.id); await sleep(300);
   c.vanish.closeTab(v2.id); await sleep(300);
   const pSes = c.sessionFor('personal'); const sSes = c.sessionFor('school');
@@ -164,6 +169,11 @@ module.exports = async function run(c) {
   check('full screen: a normal tab fills the screen', c.win().isFullScreen() && nb.x === 0 && nb.y === 0 && nb.width === nw && nb.height === nh, [nb, nw, nh]);
   nPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
   check('full screen: leaving restores the window', !c.win().isFullScreen() && nPlay.view.getBounds().x > 0, nPlay.view.getBounds());
+  await nPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1500);
+  const nIn = c.win().isFullScreen();
+  nPlay.view.webContents.focus();
+  nPlay.view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); nPlay.view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' }); await sleep(2500);
+  check('full screen: Escape leaves it on a normal tab too', nIn && !c.win().isFullScreen() && nPlay.view.getBounds().x > 0, { nIn, still: c.win().isFullScreen() });
   c.closeTab(nPlay.id); await sleep(200);
   const { whereToOpen } = require('../src/main/signin');
   const FRONT = 'https://workspace.google.com/intl/en-US/gmail/';
@@ -608,6 +618,58 @@ module.exports = async function run(c) {
   const tv2 = await c.loadTeamVault(base);
   check('team vault: says so when signed out', tv2.signedIn === false);
   for (const x of c.tabs.filter((y) => y.url.startsWith(`${base}/vault`))) c.closeTab(x.id);
+
+  const cueMenu = require('electron').Menu.getApplicationMenu().items[0].submenu.items.map((i) => i.label);
+  check('menu: Check for Updates sits in the Cue menu', cueMenu.some((l) => /^Check for Updates/.test(l)), cueMenu);
+
+  // ---- where a new tab lands, and what happens to the video that was playing
+  PAGES['/play'] = `<title>Play</title><audio id=a loop src="/tone.wav"></audio><button id=go onclick="a.play()">go</button><script>a.play().catch(()=>{})</script>`;
+  const video = require('../src/main/video');
+  check('protected video: Netflix and Prime are spotted', video.protectedSite('https://www.netflix.com/in/') === 'Netflix' && video.protectedSite('https://www.primevideo.com/') === 'Prime Video' && video.protectedSite('https://www.amazon.in/gp/video/storefront') === 'Prime Video');
+  check('protected video: YouTube and shopping on Amazon are not', !video.protectedSite('https://www.youtube.com/watch?v=x') && !video.protectedSite('https://www.amazon.in/dp/B0'));
+  const places = async (mode) => {
+    c.setSetting('newTabPlace', mode); c.setSetting('videoSwitch', 'switch');
+    const a = c.openTab({ url: `${base}/note?a`, identity: 'personal' }); await loaded(a);
+    const b = c.openTab({ url: `${base}/note?b`, identity: 'personal' }); await loaded(b);
+    const d = c.openTab({ url: `${base}/note?d`, identity: 'personal' }); await loaded(d);
+    c.activate(a.id); await sleep(150);
+    await a.view.webContents.executeJavaScript(`window.open('https://${mode}.example.test/page'); 1`, true).catch(() => {}); await sleep(500);
+    const n = c.tabs.find((t) => t.url.includes(`${mode}.example.test`));
+    const order = c.sidebarOrder().filter((t) => t.space === c.store.data.space && !t.pinned);
+    const out = { a: order.indexOf(a), n: order.indexOf(n), len: order.length, group: !!n };
+    for (const t of [a, b, d, n]) if (t) c.closeTab(t.id);
+    await sleep(150);
+    return out;
+  };
+  const pNext = await places('next'); check('new tab: opens right beside the tab it came from', pNext.n === pNext.a + 1, pNext);
+  const pStart = await places('start'); check('new tab: the setting can send it to the beginning', pStart.n === 0, pStart);
+  const pEnd = await places('end'); check('new tab: the setting can send it to the end', pEnd.n === pEnd.len - 1, pEnd);
+  c.setSetting('newTabPlace', 'next');
+
+  const handover = async (mode) => {
+    c.setSetting('videoSwitch', mode); c.setSetting('onePlayer', true);
+    const a = c.openTab({ url: `${base}/play?${mode}a`, identity: 'personal' }); await loaded(a); await sleep(800);
+    const playing = a.playing;
+    await a.view.webContents.executeJavaScript(`window.open('${base}/play?${mode}b'); 1`, true).catch(() => {}); await sleep(2500);
+    const n = c.tabs.find((t) => t.url.includes(`?${mode}b`));
+    const out = { playing, oldPlaying: a.playing, newPlaying: !!n && n.playing, active: c.getState().activeId === (n && n.id), stayed: c.getState().activeId === a.id, a, n };
+    return out;
+  };
+  const sw = await handover('switch');
+  check('video: by default the old one pauses and the new tab plays', sw.playing && !sw.oldPlaying && sw.newPlaying && sw.active, { ...sw, a: 0, n: 0 });
+  c.closeTab(sw.a.id); if (sw.n) c.closeTab(sw.n.id); await sleep(200);
+  const st = await handover('stay');
+  check('video: with the setting, you stay and the old one keeps playing', st.playing && st.oldPlaying && !st.newPlaying && st.stayed, { ...st, a: 0, n: 0 });
+  if (st.n) { c.activate(st.n.id); await sleep(1500); check('video: going to the waiting tab starts it and pauses the other', st.n.playing && !st.a.playing, { n: st.n.playing, a: st.a.playing }); c.closeTab(st.n.id); }
+  c.closeTab(st.a.id); c.setSetting('videoSwitch', 'switch'); await sleep(200);
+
+  const vA = c.openTab({ url: `${base}/play?va`, identity: 'vanish' }); await sleep(1500);
+  await vA.view.webContents.executeJavaScript(`window.open('${base}/play?vb'); 1`, true).catch(() => {}); await sleep(2500);
+  const vB = c.vanish.tabs.find((t) => t.url.includes('?vb'));
+  check('vanish: a new tab opens beside the old one', !!vB && c.vanish.tabs.indexOf(vB) === c.vanish.tabs.indexOf(vA) + 1);
+  check('vanish: the old video pauses and the new tab plays', !!vB && !vA.playing && vB.playing && c.vanish.activeId() === vB.id, { a: vA.playing, b: vB && vB.playing });
+  for (const t of [...c.vanish.tabs]) c.vanish.closeTab(t.id);
+  await sleep(300);
 
   // ---- tiny control: a failing check must be visible
   fs.writeFileSync(path.join(OUT, 'features.json'), JSON.stringify(results, null, 2));

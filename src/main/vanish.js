@@ -3,10 +3,12 @@
 // shares tabs can reach them. Closing the window wipes its memory-only session.
 const { BaseWindow, WebContentsView, Menu, clipboard, screen } = require('electron');
 const { whereToOpen, refuseOpen } = require('./signin');
+const { PICTURE_IN_PICTURE } = require('./video');
 
 const BAR = 86; // tab strip + address bar
+const FRESH = 30000; // a new tab that starts playing this soon after opening is what the link was for
 
-function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, onClosed }) {
+function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
   const tabs = [];
   const byId = (id) => tabs.find((t) => t.id === id);
@@ -40,7 +42,23 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (i >= 0) activate(tabs[(i + by + tabs.length) % tabs.length].id);
   }
 
+  // A Mac's own full screen moves the window to a desktop of its own, and the Mac can land on
+  // Cue's main window on the way there or back. This fills the screen where the window already is.
+  function fillScreen(on) {
+    if (!win || win.isFullScreen()) { layout(); return; } // the green button got there first
+    if (process.platform === 'darwin') win.setSimpleFullScreen(on); else win.setFullScreen(on);
+    layout();
+    if (on) { win.focus(); const a = byId(activeId); if (a) a.view.webContents.focus(); }
+  }
+
+  function leaveFull(wc) {
+    if (!full) return;
+    wc.executeJavaScript('document.fullscreenElement ? document.exitFullscreen() : 0', true).catch(() => {});
+    setTimeout(() => { if (full) { full = false; fillScreen(false); } }, 800); // the page never answered
+  }
+
   function keys(e, input) {
+    if (full && input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); const a = byId(activeId); if (a) leaveFull(a.view.webContents); return; }
     if (input.type !== 'keyDown' || !(input.meta || input.control)) return;
     const k = input.key.toLowerCase(); const a = byId(activeId); const wc = a && a.view.webContents;
     if (k === 'tab') { e.preventDefault(); step(input.shift ? -1 : 1); return; }
@@ -67,13 +85,18 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (run) { e.preventDefault(); run(); }
   }
 
-  function add(url) {
+  function add(url, { from } = {}) {
     if (!win) build();
     else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } // it may be behind Cue or on another desktop
-    const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false } });
+    const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false, disableHtmlFullscreenWindowResize: true } });
     view.setBackgroundColor('#0B0B0D');
-    const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false };
-    tabs.push(t);
+    const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
+    const { newTabPlace, videoSwitch } = prefs();
+    const calm = !!from && from.playing && videoSwitch === 'stay'; // stay on the video; the new tab opens quietly behind it
+    if (calm) t.calm = true; else if (from && from.playing) { t.from = from; t.openedAt = Date.now(); }
+    if (from && newTabPlace === 'start') tabs.unshift(t);
+    else if (from && newTabPlace !== 'end') tabs.splice(tabs.indexOf(from) + 1, 0, t);
+    else tabs.push(t);
     win.contentView.addChildView(view);
     const wc = view.webContents;
     const sync = () => { t.url = wc.getURL(); state(); };
@@ -82,13 +105,22 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     wc.on('did-navigate', () => { t.favicon = null; sync(); }); wc.on('did-navigate-in-page', sync);
     wc.on('did-start-loading', () => { t.loading = true; state(); });
     wc.on('did-stop-loading', () => { t.loading = false; sync(); });
-    wc.on('enter-html-full-screen', () => { full = true; win.setFullScreen(true); layout(); });
-    wc.on('leave-html-full-screen', () => { full = false; win.setFullScreen(false); layout(); });
+    wc.on('enter-html-full-screen', () => { full = true; fillScreen(true); });
+    wc.on('leave-html-full-screen', () => { full = false; fillScreen(false); });
+    wc.on('media-started-playing', () => {
+      t.playing = true;
+      if (t.calm) { t.held = true; wc.send('cue:media', 'pause'); return; }
+      if (t.from && Date.now() - t.openedAt < FRESH && t.from.playing && activeId !== t.id) activate(t.id);
+      t.from = null;
+      if (prefs().onePlayer) for (const o of tabs) if (o !== t && o.playing) o.view.webContents.send('cue:media', 'pause');
+    });
+    wc.on('media-paused', () => { t.playing = false; });
     wc.on('render-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') setTimeout(() => { if (!wc.isDestroyed()) wc.reload(); }, 500); });
     wc.on('before-input-event', keys);
     wc.on('context-menu', (_e, p) => {
       const items = [];
-      if (p.linkURL) items.push({ label: 'Open link in new Vanish tab', click: () => add(p.linkURL) }, { label: 'Copy link', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' });
+      if (p.linkURL) items.push({ label: 'Open link in new Vanish tab', click: () => add(p.linkURL, { from: t }) }, { label: 'Copy link', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' });
+      if (p.mediaType === 'video') items.push({ label: 'Picture in Picture', click: pictureInPicture }, { type: 'separator' });
       if (p.selectionText) items.push({ role: 'copy' });
       if (p.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' });
       items.push({ label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() }, { label: 'Reload', click: () => wc.reload() });
@@ -98,24 +130,35 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       if (refuseOpen(u, wc.getURL())) return { action: 'deny' };
       const where = whereToOpen(u, disposition, wc.getURL());
       if (where === 'popup') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, webPreferences: { session: session() } } };
-      if (where === 'here') wc.loadURL(guardUrl(u)).catch(() => {}); else add(u);
+      if (where === 'here') wc.loadURL(guardUrl(u)).catch(() => {}); else add(u, { from: t });
       return { action: 'deny' };
     });
     wc.on('did-create-window', (popup) => popup.setContentProtection(true));
     if (!url) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
     protect(wc, t);
     wc.loadURL(guardUrl(t.url)).catch(() => {});
-    activate(t.id);
+    if (calm) { layout(); state(); } else activate(t.id);
     if (!url) focusBar();
     return t;
   }
 
-  function activate(id) { if (!byId(id)) return; activeId = id; layout(); state(); byId(id).view.webContents.focus(); }
+  function activate(id) {
+    const t = byId(id); if (!t) return;
+    const was = byId(activeId);
+    if (full && was && was !== t) leaveFull(was.view.webContents);
+    activeId = id; layout(); state(); t.view.webContents.focus();
+    if (t.calm) { t.calm = false; if (t.held) { t.held = false; t.view.webContents.send('cue:media', 'play'); } }
+  }
+
+  function pictureInPicture() {
+    const a = byId(activeId);
+    if (a) a.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {});
+  }
 
   function closeTab(id) {
     const t = byId(id); if (!t) return;
     const i = tabs.indexOf(t);
-    if (full && id === activeId) { full = false; win.setFullScreen(false); }
+    if (full && id === activeId) { full = false; fillScreen(false); }
     tabs.splice(i, 1);
     try { win.contentView.removeChildView(t.view); t.view.webContents.close(); } catch {}
     if (!tabs.length) { win.close(); return; }
@@ -181,7 +224,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'move') move(a.id, a.to);
   }
 
-  return { add, closeTab, command, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, pictureInPicture, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };

@@ -244,8 +244,19 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl } = 
     return true;
   }
 
+  // A copy left behind by a Cue that closed mid-download, or by an older Cue.
+  function clearLeftovers() {
+    const tmp = os.tmpdir();
+    try {
+      for (const name of fs.readdirSync(tmp)) {
+        if (/^cue-update-(?!test-)/.test(name)) fs.rmSync(path.join(tmp, name), { recursive: true, force: true });
+      }
+    } catch {}
+  }
+
   function start() {
     if (timer) return;
+    clearLeftovers();
     setTimeout(() => check(), FIRST_CHECK);
     timer = setInterval(() => check(), EVERY);
   }

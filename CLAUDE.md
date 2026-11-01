@@ -102,6 +102,8 @@ Helium installed and report the numbers.
   Personal and School end up as two separate WhatsApps.
 - Safari's cookies cannot be read at all (macOS protects `~/Library/Safari` and the cookie store),
   so Chrome is the only browser a sign-in can come from.
+- Protected video (Netflix, Prime, Hotstar, Apple TV, Spotify) does not play: the Electron we use has no Widevine. `src/main/video.js` lists these sites and Cue says so once. The way in is castLabs' Electron with Widevine plus free EVS signing, which needs an account. Dolby audio (E-AC3), AirPlay and casting aren't available either.
+- Vanish full screen fills the screen where the window already is (`setSimpleFullScreen`). A Mac's own full screen moved it to another desktop and could land on the main window.
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.
 - Vanish is hidden from screen sharing with Apple's normal setting. Some capture tools on recent macOS ignore it.

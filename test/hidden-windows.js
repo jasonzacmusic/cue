@@ -28,6 +28,12 @@ function behindEverything(Base) {
       setImmediate(() => { if (!this.isDestroyed()) this.emit(on ? 'enter-full-screen' : 'leave-full-screen'); });
     }
     isFullScreen() { return !!this.actedFull; }
+    setSimpleFullScreen(on) {
+      if (on === !!this.actedSimple) return;
+      this.actedSimple = on;
+      if (on) { this.before = this.getBounds(); this.setBounds(screen.getPrimaryDisplay().bounds); } else this.setBounds(this.before);
+    }
+    isSimpleFullScreen() { return !!this.actedSimple; }
   };
 }
 

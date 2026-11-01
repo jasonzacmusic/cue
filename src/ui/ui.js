@@ -1172,6 +1172,14 @@ function openSettings() {
     sh.append(el('h3', '', 'Tabs and sound'));
     sh.append(settingRow('Group tabs automatically (Google, AI & Subscriptions…)', check('autoGroup', s.autoGroup)));
     sh.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. The on-air tab is never paused.'));
+    const choice = (key, val, opts) => {
+      const c = el('select');
+      opts.forEach(([v, n]) => { const o = el('option', '', n); o.value = v; o.selected = v === val; c.append(o); });
+      c.onchange = () => send('setting', { key, value: c.value });
+      return c;
+    };
+    sh.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
+    sh.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'switch', [['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
     sh.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
     sh.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
     sh.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));

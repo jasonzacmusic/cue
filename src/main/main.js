@@ -22,6 +22,7 @@ const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
+const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
@@ -757,7 +758,7 @@ function wireTab(t) {
   const googleGate = (u) => {
     if (GOOGLE_REFUSED.test(u) && t.identity !== 'vanish') wc.loadURL('cue://signin-blocked').catch(() => {});
   };
-  wc.on('did-navigate', (_e, u) => googleGate(u));
+  wc.on('did-navigate', (_e, u) => { googleGate(u); sayProtected(u); });
   wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) googleGate(u); });
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
@@ -781,16 +782,21 @@ function wireTab(t) {
   wc.on('console-message', (e) => { if (e.level === 'error' || e.level === 'warning') logTab(t, e.level, `${e.message} (${e.sourceId}:${e.lineNumber})`); });
   wc.on('audio-state-changed', (e) => { t.audible = e.audible; pushState(); });
   wc.on('media-started-playing', () => {
-    t.playing = true;
-    if (settings().onePlayer) {
+    t.playing = true; t.videoAt = Date.now();
+    if (t.calm) { t.held = true; wc.send('cue:media', 'pause'); pushState(); return; } // it waits, silent, until you go to it
+    const from = t.from && Date.now() - t.openedAt < FRESH_TAB ? byId(t.from) : null;
+    t.from = null;
+    const handover = from && from.playing && from.id !== programId && !from.holdAwake;
+    if (handover && t.id !== activeId) activate(t.id);
+    if (settings().onePlayer || handover) {
       for (const o of tabs) {
         const together = sharesSplit(t) && sharesSplit(o);
-        if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together) o.view.webContents.send('cue:media', 'pause');
+        if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) o.view.webContents.send('cue:media', 'pause');
       }
     }
     pushState();
   });
-  wc.on('media-paused', () => { t.playing = false; pushState(); });
+  wc.on('media-paused', () => { t.playing = false; t.videoAt = Date.now(); pushState(); });
   wc.on('enter-html-full-screen', () => { t.fullscreen = true; const w = hostWindow(t); if (w) w.setFullScreen(true); layout(); });
   wc.on('leave-html-full-screen', () => { t.fullscreen = false; const w = hostWindow(t); if (w) w.setFullScreen(false); layout(); });
   wc.on('found-in-page', (_e, r) => sendEvent('find-result', { active: r.activeMatchOrdinal, total: r.matches }));
@@ -820,13 +826,31 @@ function wireTab(t) {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
     }
     if (where === 'here') { wc.loadURL(url).catch(() => {}); return { action: 'deny' }; }
-    const nt = openTab({ url, identity: t.identity, background: disposition === 'background-tab', after: t, agent: t.agent });
-    nt.groupOverride = t.groupOverride;
+    const calm = t.playing && settings().videoSwitch === 'stay'; // stay on the video; the new tab opens quietly behind it
+    const nt = openTab({ url, identity: t.identity, background: calm || disposition === 'background-tab', after: t, agent: t.agent });
+    if (calm) nt.calm = true; else if (t.playing) { nt.from = t.id; nt.openedAt = Date.now(); }
     return { action: 'deny' };
   });
 }
 
 function sharesSplit(t) { const sp = store.data.split; return sp.mode !== 'single' && sp.ids.includes(t.id); }
+
+const FRESH_TAB = 30000;                // a new tab that starts playing this soon after opening is what the link was for
+const KEEP_PAUSED = 3 * 60 * 60 * 1000; // a video you paused keeps its place this long, however many tabs are asleep
+
+// Netflix and its like won't start in Cue. Better to say so once than leave a spinning player.
+const toldProtected = new Set();
+function sayProtected(url) {
+  const name = protectedSite(url);
+  if (!name || toldProtected.has(name) || live || programId || process.env.CUE_TEST) return;
+  toldProtected.add(name);
+  const message = `${name} can't play its shows in Cue yet.`;
+  const detail = "It uses protected video, which Cue can't play yet. Everything else on the site works.";
+  dialog.showMessageBox(mainWin, MAC
+    ? { type: 'info', buttons: ['Open in Safari', 'Stay Here'], defaultId: 0, cancelId: 1, message, detail }
+    : { type: 'info', buttons: ['OK'], message, detail })
+    .then((r) => { if (MAC && r.response === 0) require('child_process').execFile('/usr/bin/open', ['-a', 'Safari', url], () => {}); });
+}
 
 function hostWindow(t) { return t.host === 'stage' ? stageWin : t.host === 'popout' ? t.popout : mainWin; }
 
@@ -860,6 +884,22 @@ function seedEveryday() {
   store.data.everydayPinned = done;
 }
 
+// A tab opened from another one lands where "New tabs open" says. Groups sort the sidebar, so it
+// takes on the group of whichever tab it lands beside; otherwise a link to another kind of site
+// would jump to a different section of the list.
+function placeTab(t, from) {
+  const list = spaceOrder().filter((x) => !x.pinned && x !== t);
+  const how = from.pinned && settings().newTabPlace === 'next' ? 'start' : settings().newTabPlace;
+  const beside = how === 'start' ? list[0] : how === 'end' ? list[list.length - 1] : from;
+  if (!beside) { t.order = from.order + 0.001; return; }
+  const group = groupOf(beside);
+  if (group !== groupOf(t)) t.groupOverride = group;
+  const next = list[list.indexOf(beside) + 1];
+  if (how === 'start') t.order = beside.order - 1;
+  else if (how === 'end' || !next || groupOf(next) !== group) t.order = beside.order + 1;
+  else t.order = (beside.order + next.order) / 2;
+}
+
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
@@ -867,7 +907,7 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
   if (safe) t.httpsFrom = url;
   if (after) {
     const i = tabs.indexOf(after);
-    t.order = after.order + 0.001;
+    placeTab(t, after);
     tabs.splice(i + 1, 0, t);
   } else tabs.push(t);
   ensureView(t);
@@ -883,6 +923,7 @@ function activate(id) {
   activeId = id; t.lastActive = Date.now();
   if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
+  if (t.calm) { t.calm = false; if (t.held) { t.held = false; t.view.webContents.send('cue:media', 'play'); } }
   const sp = store.data.split;
   if (sp.mode !== 'single' && !sp.ids.includes(id)) sp.ids = [id];
   layout(); pushState(); persist();
@@ -1239,6 +1280,7 @@ function contextMenu(t, p) {
     items.push({ label: 'Add to dictionary', click: () => wc.session.addWordToSpellCheckerDictionary(p.misspelledWord) }, { type: 'separator' });
   }
   if (p.isEditable) items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'pasteAndMatchStyle' }, { role: 'selectAll' }, { type: 'separator' });
+  if (p.mediaType === 'video') items.push({ label: 'Picture in Picture', click: () => wc.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}) }, { type: 'separator' });
   items.push(
     { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() },
     { label: 'Forward', enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() },
@@ -1444,7 +1486,7 @@ function uiCommand(cmd, a = {}) {
     case 'close': closeTab(a.id); break;
     case 'new-tab':
       if (!a.identity && vanish.focused()) { vanish.add(); break; }
-      openTab({ identity: a.identity, url: a.url }); sendEvent('focus-omnibox'); break;
+      openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined }); sendEvent('focus-omnibox'); break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': if (wc) wc.reload(); break;
@@ -2308,11 +2350,39 @@ function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private &&
 
 // ---------------------------------------------------------------- menus
 const MAC = process.platform === 'darwin';
+// The one place you can ask. With "Update Cue by itself" on, the update bar stays hidden,
+// so the answer has to be said out loud here.
+async function checkForUpdates() {
+  if (!updater) return;
+  const u = await updater.check({ quiet: false });
+  if (u.state === 'available') return; // "Update Cue by itself" is off: the bar is asking already
+  const waiting = u.state === 'ready' || u.state === 'downloading';
+  const said = u.state === 'error'
+    ? { message: 'Cue could not check for updates.', detail: u.error }
+    : waiting
+      ? { message: `Cue ${u.latest} is on its way.`, detail: 'It goes in the next time you close Cue.' }
+      : { message: 'You have the newest Cue.', detail: `This is version ${app.getVersion()}.` };
+  if (!process.env.CUE_TEST) dialog.showMessageBox(mainWin, { type: 'info', buttons: ['OK'], ...said });
+}
+
 function buildMenu() {
   const cmd = (c, a) => () => ipcMain.emit('ui:cmd', {}, c, a);
   const ids = Object.keys(IDENTITIES);
   const tpl = [
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    ...(process.platform === 'darwin' ? [{
+      label: app.name, submenu: [
+        { role: 'about' },
+        { label: 'Check for Updates…', click: () => checkForUpdates() },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    }] : []),
     {
       label: 'File', submenu: [
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: cmd('new-tab') },
@@ -2374,6 +2444,7 @@ function buildMenu() {
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
+        { label: 'Picture in Picture', accelerator: 'CmdOrCtrl+Alt+P', click: () => { if (vanish.focused()) { vanish.pictureInPicture(); return; } const t = byId(activeId); if (t && t.view) t.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}); } },
         ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
       ],
     },
@@ -2425,6 +2496,7 @@ setInterval(() => {
   for (const t of tabs) {
     if (!t.view || t.host !== 'main' || visible.has(t.id) || t.id === activeId) continue;
     if (t.audible || t.playing || t.lastActive > cutoff || mustStayAwake(t)) continue;
+    if (t.videoAt > Date.now() - KEEP_PAUSED) continue; // waking a tab starts its video again from the top
     destroyView(t);
   }
   pushState();
@@ -2526,7 +2598,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [] }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch' }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -2543,7 +2615,7 @@ app.whenReady().then(async () => {
   lib = new Library(app.getPath('userData'));
   vanish = createVanish({
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
-    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage,
+    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage, prefs: () => settings(),
   });
   ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
   vault = new Vault(app.getPath('userData'));
@@ -2594,7 +2666,7 @@ app.whenReady().then(async () => {
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, loadTeamVault, agentApi, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });
