@@ -130,7 +130,11 @@ function favEl(t) {
   else if (srcs.length) f.append(iconImg(srcs, letter));
   else letter();
   if (showRing) { const d = el('i', 'idot'); d.style.background = t.agent ? 'var(--agent)' : ringColor(t); f.append(d); }
-  if (t.audible || t.muted) f.append(el('b', 'favsound' + (t.muted ? ' off' : '')));
+  // Muted has to be readable at a glance and without relying on colour, because
+  // red already means on air. A crossed-out speaker says it outright, and it is
+  // the same mark wherever the tab appears.
+  if (t.muted) f.append(el('b', 'favsound off', SPK.off));
+  else if (t.audible) f.append(el('b', 'favsound'));
   return f;
 }
 
@@ -453,7 +457,7 @@ function renderPins() {
       const id = Number(e.dataTransfer.getData('text/cue-tab'));
       if (id && id !== t.id) send('reorder', { id, beforeId: t.id });
     };
-    tip(p, shortName(t), here(t) ? (hostOf(t.url) || '')
+    tip(p, `${shortName(t)}${t.muted ? ' \u00b7 muted' : ''}`, here(t) ? (hostOf(t.url) || '')
       : `Opens as ${(S.identities[S.folder] || {}).name || 'this folder'}`);
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
@@ -464,6 +468,9 @@ function renderPins() {
     else if (srcs.length) p.append(iconImg(srcs, letter));
     else letter();
     if (offLogin(t)) { const d = el('span', 'dot'); d.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); p.append(d); }
+    // The strip is where he looks first, so a muted app says so here too.
+    if (t.muted) { p.append(el('b', 'favsound off', SPK.off)); p.classList.add('ismuted'); }
+    else if (t.audible) p.append(el('b', 'favsound'));
     if (!here(t)) p.classList.add('elsewhere');
     p.onclick = () => (here(t) ? send('activate', { id: t.id }) : send('app-open', { url: t.url }));
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
@@ -1107,6 +1114,18 @@ function openSettings() {
     // Jason asked this one out loud, so the answer lives where he will meet it,
     // not only in a message he has to go back and find.
     sh.append(el('div', 'note', 'Instagram has its own account switcher inside the app, which keeps several accounts in one place. With a folder for each Google account you never need it: Instagram in Personal is your own account, Instagram in School is the school\'s, and both stay signed in at once. Each folder shows the Instagram account that is live in it, so you can see which one you are about to post from before you touch anything.'));
+    // Google and Meta both refuse a sign-in form inside a browser they have not
+    // seen before. Chrome on this Mac is already signed in to all of them, and
+    // its cookies are the way in that needs no password. One button per folder,
+    // because which folder it lands in is the whole question.
+    sh.append(el('div', 'note', 'Google and Instagram will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those sign-ins straight across instead. They go into the one folder you choose and nothing leaves this Mac. Chrome is left exactly as it is.'));
+    const carry = el('div', 'row');
+    for (const k of ['personal', 'school']) {
+      const b = el('button', 'btn', `Bring sign-ins into ${S.identities[k].name}`);
+      b.onclick = () => { b.disabled = true; b.textContent = 'Bringing them over\u2026'; send('signin.carry-all', { identity: k }); };
+      carry.append(b);
+    }
+    sh.append(carry);
     const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
     def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
     sh.append(settingRow('Folder a new, empty Space opens in', def));

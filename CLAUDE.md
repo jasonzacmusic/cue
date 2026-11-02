@@ -79,6 +79,20 @@ browser per phone, so there is no second session to make — these tabs are it.
 - Clicks are dispatched in the page, never aimed at x,y: these tabs live in the background with
   no geometry, and a mouse sent at a tab nobody can see hits nothing.
 
+## Carrying sign-ins over from Chrome
+Google and Meta both refuse a sign-in form typed into a browser they do not recognise. Chrome on
+this Mac is signed in to Google, YouTube, Facebook and Instagram, and `carryFromChrome()` copies
+those cookies into one folder. `signin.carry-all` does Google and Meta together, from a button per
+folder in Settings. Instagram, Facebook and Threads MUST come over together — half a Meta session
+is exactly what Meta's checks look for. Chrome keeps one Instagram and one Facebook account, so
+the second account still needs a real sign-in, which is what the shield fix above made possible.
+
+## Muted has to be a shape
+Red already means on air, so mute cannot be a red dot. It is a crossed-out speaker badge on the
+favicon and on the pinned app, and the pinned app dims. `test/folders.js` photographs the sidebar
+and checks the badge is in the list AND on the pin — a pinned tab leaves the list, so proving both
+needs two muted tabs.
+
 ## Meta's sites need Meta's own addresses
 EasyPrivacy stops `instagram.com/ajax/bz` and `logging_client_events`. Those are Instagram's OWN
 addresses, and `/ajax/bz` is where Meta plants the `mid` and `datr` device cookies. Without them a

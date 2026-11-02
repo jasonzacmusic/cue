@@ -321,7 +321,17 @@ body.rail .pin img { width: 22px; height: 22px; }
    icon turned the whole sidebar one colour and buried the logos it marked. */
 .fav .idot { position: absolute; left: -2px; top: -2px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--side); }
 .favsound { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; background: var(--cued); border: 1.5px solid var(--side); }
-.favsound.off { background: var(--onair); }
+/* Muted is a crossed-out speaker, not a coloured dot: red already means on air,
+   and a shape reads the same to everyone, in either theme, at this size. */
+.favsound.off { width: 13px; height: 13px; right: -4px; bottom: -4px; background: var(--ink); color: var(--side);
+  border-color: var(--side); display: grid; place-items: center; }
+.favsound.off svg { width: 9px; height: 9px; display: block; }
+/* On a pin the icon is bigger, so the mark can be too, and the face dims a
+   little so a muted app is obvious before you read the badge. */
+.pin .favsound { right: -3px; bottom: -3px; border-color: var(--raised); }
+.pin .favsound.off { width: 16px; height: 16px; right: -5px; bottom: -5px; }
+.pin .favsound.off svg { width: 11px; height: 11px; }
+.pin.ismuted img, .pin.ismuted svg.appicon { opacity: .6; }
 .sg .v img { width: 16px; height: 16px; border-radius: 3px; vertical-align: -3px; margin-right: 7px; }
 .side-tools { flex: none; display: flex; justify-content: space-between; gap: 2px; }
 .tool { position: relative; width: 34px; height: 34px; border: 0; background: transparent; border-radius: 50%; color: var(--muted); cursor: pointer; display: grid; place-items: center; }

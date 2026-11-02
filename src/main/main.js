@@ -631,6 +631,13 @@ const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|google
 const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com', 'https://www.google.com',
   'https://drive.google.com', 'https://calendar.google.com', 'https://www.youtube.com'];
 
+// The same, for Meta. Instagram, Facebook and Threads share one sign-in, so they
+// come over together or not at all: carrying Instagram alone leaves Facebook
+// holding a half-session, which is what Meta's own checks are looking for.
+const META_LOGIN_HOST = /(^|\.)(instagram\.com|facebook\.com|threads\.net|cdninstagram\.com|fbcdn\.net)$/i;
+const META_ORIGINS = ['https://www.instagram.com', 'https://instagram.com',
+  'https://www.facebook.com', 'https://facebook.com', 'https://www.threads.net'];
+
 const cookieUrl = (c) => `${c.secure ? 'https' : 'http'}://${String(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
 
 // Brings a sign-in over from Chrome on this Mac, where he is already signed in. Cookies only, for
@@ -682,6 +689,18 @@ async function carryFromChrome(identity, hostRe, origins = []) {
 }
 
 const googleFromChrome = (identity) => carryFromChrome(identity, GOOGLE_LOGIN_HOST, GOOGLE_ORIGINS);
+const metaFromChrome = (identity) => carryFromChrome(identity, META_LOGIN_HOST, META_ORIGINS);
+
+// One folder, every sign-in Chrome has. Each family is carried on its own so a
+// locked keychain or an empty jar for one of them never costs the other.
+async function carryAllFromChrome(identity) {
+  const out = [];
+  for (const [name, run] of [['Google', googleFromChrome], ['Instagram and Facebook', metaFromChrome]]) {
+    const r = await run(identity).catch((e) => ({ error: e.message }));
+    out.push({ name, ...r });
+  }
+  return out;
+}
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
 // carried over arrives holding both. Google's own answer to that is the account
@@ -1628,6 +1647,9 @@ function uiCommand(cmd, a = {}) {
     }
     case 'space': switchSpace(a.name); break;
     case 'folder': setFolder(a.name); break;
+    // Reachable from Settings as well as from Cue's own pages: the sidebar and
+    // the cue:// pages speak to two different tables.
+    case 'signin.carry-all': internal['signin.carry-all'](a); break;
     case 'move-folder': moveToFolder({ id: a.id, to: a.to }); break;
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
@@ -2082,6 +2104,23 @@ const internal = {
     return r;
   },
   'signin.close': (_a, t) => { if (t) closeTab(t.id); },
+  // Every sign-in Chrome has, into one folder, from the folder's own row in
+  // Settings. Google and Meta both refuse a browser they have not seen before,
+  // and this is the way past that does not need his password.
+  'signin.carry-all': async (a) => {
+    const who = isFolder(a.identity) ? a.identity : store.data.folder;
+    const name = (IDENTITIES[who] || {}).name || who;
+    const done = await carryAllFromChrome(who);
+    const got = done.filter((d) => d.count);
+    const stuck = done.find((d) => d.error);
+    if (got.length) {
+      sendEvent('toast', `${got.map((d) => d.name).join(' and ')} came over from Chrome into ${name}.`);
+    } else {
+      sendEvent('toast', stuck ? stuck.error : `Chrome has no sign-in to bring into ${name}.`);
+    }
+    pushState();
+    return done;
+  },
 };
 
 // ---------------------------------------------------------------- move in from another browser

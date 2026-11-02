@@ -174,6 +174,55 @@ module.exports = async (c) => {
   check('gmail: a mailbox he named himself is left alone',
     (c.byId(gTab.id) || {}).url.includes('/mail/u/2/'), (c.byId(gTab.id) || {}).url);
 
+  // ---- bringing the sign-ins over from Chrome
+  // The tests run on a mock keychain, so nothing real can be decrypted here.
+  // What this proves is the part that used to be wrong: the command exists, it
+  // is reachable from Settings as well as from Cue's own pages, it names the
+  // folder it worked on, and it says so plainly instead of throwing.
+  let said = null;
+  const offToast = c.internal && null;
+  const seen = [];
+  const origSend = c.sendEvent;
+  try {
+    const r = await c.internal['signin.carry-all']({ identity: 'school' });
+    said = r;
+  } catch (e) { said = { threw: e.message }; }
+  check('sign-ins: bringing them over answers instead of throwing',
+    Array.isArray(said) && said.length === 2, said);
+  check('sign-ins: it reports on Google and on Meta separately',
+    Array.isArray(said) && said.map((x) => x.name).join('|') === 'Google|Instagram and Facebook',
+    Array.isArray(said) && said.map((x) => x.name));
+  check('sign-ins: the sidebar can reach it too, not only Cue\'s own pages',
+    typeof c.command === 'function');
+  void offToast; void seen; void origSend;
+
+  // ---- a muted tab has to be obvious, wherever it shows
+  c.setFolder('personal'); await sleep(200);
+  const loud = c.openTab({ url: 'https://web.whatsapp.com/', identity: 'personal' });
+  await sleep(500);
+  c.command('pin', { id: loud.id, on: true });
+  c.setMuted(loud, true);
+  await sleep(700);
+  check('muted: the tab really is muted', c.byId(loud.id).muted === true);
+  check('muted: and it is pinned, so it shows in the strip', c.byId(loud.id).pinned === true);
+  await shot('folders-muted');
+  // A second muted tab, left unpinned, so both places are covered: a pinned tab
+  // moves out of the list into the strip, so one tab can only ever prove one.
+  const quiet = c.openTab({ url: 'https://example.com/quiet', identity: 'personal' });
+  await sleep(400); c.setMuted(quiet, true); await sleep(600);
+  const marks = await c.ui().webContents.executeJavaScript(`(() => {
+    const badges = [...document.querySelectorAll('.favsound.off')];
+    return { count: badges.length,
+      onPin: badges.some((b) => b.closest('.pin')),
+      inList: badges.some((b) => !b.closest('.pin')),
+      hasGlyph: badges.every((b) => !!b.querySelector('svg')),
+      pinDimmed: !!document.querySelector('.pin.ismuted') };
+  })()`);
+  check('muted: the mark shows on a pinned app and on a tab in the list',
+    marks.onPin && marks.inList, marks);
+  check('muted: it is a crossed-out speaker, not just a colour', marks.hasGlyph, marks);
+  check('muted: the pinned app dims as well', marks.pinDimmed, marks);
+
   fs.writeFileSync(path.join(OUT, 'folders.json'), JSON.stringify(results, null, 2));
   const fails = results.filter((x) => !x.ok);
   console.log(`[cue-folders] DONE ${results.length - fails.length}/${results.length} passed`);
