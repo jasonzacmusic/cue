@@ -111,7 +111,15 @@ async function startAgentPort({ port, tokenFile, api }) {
     },
     press: async (a) => { const t = api.get(a.id); const wc = need(t, true); wc.sendInputEvent({ type: 'keyDown', keyCode: a.key }); wc.sendInputEvent({ type: 'keyUp', keyCode: a.key }); await sleep(150); return { pressed: a.key }; },
     scroll: async (a) => { const t = api.get(a.id); const wc = need(t, false); await wc.executeJavaScript(`window.scrollBy(0, ${Number(a.dy) || 600})`, true); return { ok: true }; },
-    eval: async (a) => { const t = api.get(a.id); const wc = need(t, true); const r = await wc.executeJavaScript(String(a.script), true); return { result: r === undefined ? null : r }; },
+    // Say so when the script is missing. String(undefined) is the word "undefined", which evaluates
+    // to nothing and comes back as a perfectly innocent null - three calls in a row looked like the
+    // page was empty when the real answer was that the caller had named the argument something else.
+    eval: async (a) => {
+      const t = api.get(a.id); const wc = need(t, true);
+      if (typeof a.script !== 'string' || !a.script.trim()) return { error: 'eval needs "script": the JavaScript to run, as a string.' };
+      const r = await wc.executeJavaScript(a.script, true);
+      return { result: r === undefined ? null : r };
+    },
     wait: async (a) => {
       const t = api.get(a.id); const wc = need(t, false); const end = Date.now() + Math.min(Number(a.ms) || 5000, 30000);
       while (Date.now() < end) {
