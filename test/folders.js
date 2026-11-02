@@ -203,9 +203,13 @@ module.exports = async (c) => {
     said = r;
   } catch (e) { said = { threw: e.message }; }
   check('sign-ins: bringing them over answers instead of throwing',
-    Array.isArray(said) && said.length === 2, said);
-  check('sign-ins: it reports on Google and on Meta separately',
-    Array.isArray(said) && said.map((x) => x.name).join('|') === 'Google|Instagram and Facebook',
+    Array.isArray(said) && said.length === 1, said);
+  // Meta only, and that is deliberate. Carrying Google's cookies from Chrome signed BOTH folders
+  // out on 2-Nov-2026 - Google ties a sign-in to the browser it was made in, so the copy was
+  // cancelled and took the original with it - and his Chrome holds both his Google accounts in one
+  // profile, so the copy made the two folders identical. Google is signed into inside Cue instead.
+  check('sign-ins: Meta is carried and Google is not',
+    Array.isArray(said) && said.map((x) => x.name).join('|') === 'Instagram and Facebook',
     Array.isArray(said) && said.map((x) => x.name));
   check('sign-ins: the sidebar can reach it too, not only Cue\'s own pages',
     typeof c.command === 'function');

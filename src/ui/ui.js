@@ -78,6 +78,10 @@ addEventListener('blur', hideTip);
 const TITLE_SPLIT = /\s+[|–—·•]\s+|\s+-\s+/;
 function shortName(t) {
   if (t.name) return t.name;
+  // Cue's main side knows the site by name - an NSM app by its own name from the app list, a
+  // service by what he calls it - and strips the unread count the badge already shows. Fall back
+  // to trimming the page title only for a site it has never heard of.
+  if (t.siteName) return t.siteName;
   const full = (t.title || '').trim();
   if (!full) return hostOf(t.url) || 'New tab';
   let head = full.split(TITLE_SPLIT)[0].trim();
@@ -99,6 +103,10 @@ function iconSources(t) {
       tries.push(...(/\.google\.com$/.test(u.hostname) ? [service, usual] : [usual, service]));
     } catch {}
   }
+  // Last, a logo Cue ships, for the sites whose own icon never arrives: several NSM apps answer
+  // 404 for /favicon.ico and used to show a bare letter. It comes after every attempt at the
+  // site's own logo, so a site that has one still draws its own.
+  if (t.siteLogo) tries.push(`../../assets/logos/${t.siteLogo}`);
   return tries.filter(Boolean);
 }
 // An image that quietly tries the next source, and falls back to a letter.
@@ -1105,6 +1113,18 @@ function openSettings() {
     showShield();
     sh.append(el('h3', '', 'Updates'));
     sh.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
+    // The number keys. Nine rows, each his to re-point, because the whole value of a shortcut is
+    // that it goes where he expects without him thinking about it.
+    sh.append(el('h3', '', 'The number keys'));
+    sh.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school\u2019s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Change any of them here: give it a name and a web address, or leave the address empty to make that key open a brand new tab.'));
+    const keys = Array.isArray(s.quickKeys) ? s.quickKeys : [];
+    for (let i = 0; i < 9; i++) {
+      const q = keys[i] || {};
+      const pair = el('div', 'row');
+      pair.append(text(`quick.${i + 1}.name`, q.name, 'What to call it'));
+      pair.append(text(`quick.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
+      sh.append(settingRow(`Command-${i + 1}`, pair));
+    }
     sh.append(el('h3', '', 'Spaces'));
     sh.append(el('div', 'note', 'Double-click a Space in the sidebar to call it whatever you like. Its tabs, its layout and the login it opens with all come across with the name.'));
     sh.append(el('h3', '', 'Folders'));
