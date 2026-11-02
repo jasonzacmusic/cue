@@ -1,7 +1,7 @@
 {
   "name": "cue-browser",
   "productName": "Cue",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "main": "src/main/main.js",
   "author": "Jason Zac, Nathaniel School of Music",
   "license": "GPL-3.0-or-later",
@@ -11,7 +11,8 @@
     "test": "CUE_TEST=1 electron .",
     "dist:mac": "node scripts/build-mac.js",
     "dist:win": "node scripts/build-win.js",
-    "dist:linux": "node scripts/build-linux.js"
+    "dist:linux": "node scripts/build-linux.js",
+    "check": "node -e \"const{execFileSync}=require('child_process'),fs=require('fs'),path=require('path');const walk=(d)=>fs.readdirSync(d,{withFileTypes:true}).flatMap((e)=>e.isDirectory()?(e.name==='node_modules'?[]:walk(path.join(d,e.name))):e.name.endsWith('.js')?[path.join(d,e.name)]:[]);const files=[...walk('src'),...walk('bin'),...walk('test')];for(const f of files)execFileSync(process.execPath,['--check',f],{stdio:'inherit'});console.log(files.length+' files parse')\""
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",

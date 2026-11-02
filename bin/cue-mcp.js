@@ -73,8 +73,8 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.6.0' },
-      instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose account every time - who:"jason" is his own number, who:"nathaniel" is the school's.',
+      serverInfo: { name: 'cue', version: '0.6.1' },
+      instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose account every time - who:"jason" is his own number, who:"nathaniel" is the school\'s.',
     });
   }
   if (method === 'ping') return reply(msgId, {});

@@ -87,6 +87,9 @@ about it stands: private tabs, Vanish tabs and the tab on air are refused, every
 and Cue says on screen when an agent reaches into a tab he did not hand it.
 
 ## Releasing (needs the `nsm-notary` keychain profile; `~/Documents/NSM Reports/codex-cue-notary-release.md` sets it up on a new Mac)
+0. `npm run check` - every file Cue ships has to parse. 0.6.0 shipped a broken MCP bridge
+   because an apostrophe in "the school's" closed a single-quoted string, and no suite caught it:
+   the bridge only runs in a separate process that nothing in the gate starts. Never skip this.
 1. Raise `version` in `package.json` and the `serverInfo` version in `bin/cue-mcp.js`.
 2. `npm run dist:mac`
 3. `~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh build/Cue-darwin-arm64/Cue.app --no-resign --dmg`
