@@ -51,6 +51,41 @@ every new feature, and run a control when a test proves something by finding not
 Testing NSM apps through Cue: open the app with `cue_open` in the agent lane, click through with
 `cue_snapshot` and `cue_click`, then report from `cue_problems`.
 
+## WhatsApp (src/main/whatsapp.js)
+
+Jason, Claude, Codex and every other agent use the SAME two WhatsApp logins: the pinned tab in
+Personal is his own number, the pinned tab in School is the school's. WhatsApp allows one linked
+browser per phone, so there is no second session to make — these tabs are it.
+
+- `cue_whatsapp` is the only way an agent should touch WhatsApp. One call per job, one piece of
+  JavaScript in a tab that is already open, an answer of a few plain lines. No screenshot, no
+  snapshot, no navigation: a chat list costs about 120 characters.
+- `who` is always said out loud — "jason" or "nathaniel". It refuses to guess, so a message
+  meant for a student never leaves his personal number.
+- `send` is only reported as sent once the words are seen in the conversation. If it cannot see
+  them it says so and names the tab to look at. Never soften that into "sent".
+- The two WhatsApp tabs are the one place agents may click and type in Jason's own tabs
+  (`HANDED_OVER` in main.js), because group admin and saving a contact still need hands.
+  Everywhere else the old rule holds: an agent's own tab, or one he ticked.
+- Linking is his: Cue cannot scan a code. When an account is not linked every action says so in
+  plain words and `status` with `show: true` brings the tab forward for the scan.
+- The page scripts lean on the few parts of WhatsApp's markup that have outlived its redesigns:
+  `#pane-side`, `[role="listitem"]`, `span[title]`, `data-pre-plain-text`, the two
+  contenteditable boxes. `test/whatsapp.js` drives them against a stand-in page, so a WhatsApp
+  redesign will NOT turn that test red — check the live thing after any WhatsApp change.
+- Opening a chat to read it is the same as opening it on his phone: WhatsApp marks it read. So
+  `read` costs him the unread mark. Use `chats unreadOnly:true` to see what is waiting without
+  spending it, and only read what he asked for.
+- Clicks are dispatched in the page, never aimed at x,y: these tabs live in the background with
+  no geometry, and a mouse sent at a tab nobody can see hits nothing.
+
+## The AI door
+
+It is remembered now, not reset at every launch (`settings().aiDoor`), because an agent
+answering WhatsApp while he teaches cannot wait for someone to open a door. Everything else
+about it stands: private tabs, Vanish tabs and the tab on air are refused, every call is logged,
+and Cue says on screen when an agent reaches into a tab he did not hand it.
+
 ## Releasing (needs the `nsm-notary` keychain profile; `~/Documents/NSM Reports/codex-cue-notary-release.md` sets it up on a new Mac)
 1. Raise `version` in `package.json` and the `serverInfo` version in `bin/cue-mcp.js`.
 2. `npm run dist:mac`

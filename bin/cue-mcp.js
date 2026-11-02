@@ -39,6 +39,14 @@ const TOOLS = [
   ['fullpage', 'Save a picture of the whole page, however long, to the Cue Captures folder.', { id }, ['id']],
   ['alert', 'Put a message in the user\'s Cue alert tray, such as a failed deploy. It stays quiet during class.', { title: { type: 'string' }, body: { type: 'string' }, url: { type: 'string' }, source: { type: 'string' } }, ['title']],
   ['bills', 'List the subscriptions Cue is tracking with amounts in rupees, renewal dates and status.', {}],
+  ['whatsapp', 'WhatsApp, in one call. Use this for anything on WhatsApp instead of opening web.whatsapp.com and clicking: it works in the tab that is already linked, in the background, and answers in short plain lines. who: "jason" for his own number, "nathaniel" for the school\'s - always say which. action: "chats" (recent chats, or unreadOnly for the ones waiting), "read" (a conversation), "send" (a message, confirmed only when it is seen in the conversation), "search" (find a chat), "status" (is this account linked; show:true puts the tab in front for the one-time scan).',
+    { who: { type: 'string', description: '"jason" (personal number) or "nathaniel" (the school\'s)' },
+      action: { type: 'string', enum: ['chats', 'read', 'send', 'search', 'status'] },
+      chat: { type: 'string', description: 'Who the conversation is with, as it is named in WhatsApp' },
+      message: { type: 'string', description: 'For send: exactly the words to send' },
+      query: { type: 'string', description: 'For search' },
+      unreadOnly: { type: 'boolean' }, limit: { type: 'number' }, show: { type: 'boolean' } },
+    ['who']],
 ].map(([name, description, props, required = []]) => ({ name: `cue_${name}`, description, inputSchema: { type: 'object', properties: props, required } }));
 
 async function call(name, args) {
@@ -65,8 +73,8 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.5.9' },
-      instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air.',
+      serverInfo: { name: 'cue', version: '0.6.0' },
+      instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose account every time - who:"jason" is his own number, who:"nathaniel" is the school's.',
     });
   }
   if (method === 'ping') return reply(msgId, {});
@@ -75,6 +83,9 @@ async function handle(msg) {
     try {
       const out = await call(params.name, params.arguments);
       if (out && out.base64) return reply(msgId, { content: [{ type: 'image', data: out.base64, mimeType: out.mime || 'image/png' }] });
+      // Some tools answer in lines a person could read. Those go through untouched: a page of
+      // pretty-printed JSON costs the agent many times what the same answer costs as text.
+      if (out && typeof out.text === 'string' && Object.keys(out).length <= 3) return reply(msgId, { content: [{ type: 'text', text: out.text }] });
       return reply(msgId, { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] });
     } catch (e) {
       return reply(msgId, { content: [{ type: 'text', text: e.message }], isError: true });

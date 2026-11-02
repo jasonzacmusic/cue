@@ -14,14 +14,17 @@ module.exports = async (c) => {
     c.setSplit('rows2');
     c.switchSpace('Teach');
     await sleep(800);
-    const names = (sp) => sp.ids.map((id) => c.byId(id)?.title).sort().join(',');
+    const names = (sp) => sp.ids.slice().sort((a, b) => a - b).join(',');
     fs.writeFileSync(path.join(c.app.getPath('userData'), 'want.json'), JSON.stringify({ teach: names(c.store.data.split), create: names(c.store.data.spaceSplit.Create) }));
+    // The AI door is his switch, not a per-run one: an agent answering WhatsApp
+    // while he teaches cannot wait for somebody to open a door after a restart.
+    c.command('ai-door', { on: true });
     c.app.quit();
     return;
   }
   await sleep(1500);
   const want = JSON.parse(fs.readFileSync(path.join(c.app.getPath('userData'), 'want.json'), 'utf8'));
-  const titles = (ids) => ids.map((id) => c.byId(id)?.title).sort().join(',');
+  const titles = (ids) => ids.slice().sort((a, b) => a - b).join(',');
   const s = c.getState();
   const first = s.split.mode === 'cols3' && s.panes.length === 3 && titles(s.split.ids) === want.teach;
   console.log(`[cue-restart] ${first ? 'PASS' : 'FAIL'} three columns came back`, s.split.mode, titles(s.split.ids), s.panes.length);
@@ -29,6 +32,8 @@ module.exports = async (c) => {
   const t = c.getState();
   const second = t.split.mode === 'rows2' && t.panes.length === 2 && titles(t.split.ids) === want.create;
   console.log(`[cue-restart] ${second ? 'PASS' : 'FAIL'} the other Space kept its own split`, t.split.mode, titles(t.split.ids), t.panes.length);
+  const door = c.agentApi.doorOpen();
+  console.log(`[cue-restart] ${door ? 'PASS' : 'FAIL'} the AI door is still open after a restart`, door);
   c.closeTab(t.split.ids[0]); await sleep(300);
   const u = c.getState();
   console.log(`[cue-restart] ${u.split.mode === 'single' ? 'PASS' : 'FAIL'} closing one of two closes up the split`, u.split.mode, u.panes.length);

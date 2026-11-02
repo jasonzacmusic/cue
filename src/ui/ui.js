@@ -1216,8 +1216,8 @@ function openSettings() {
     sh.append(el('div', 'note', `Claude Code, Codex and other AI tools connect through Cue's AI port (127.0.0.1:${S.agent.port}). They work in their own tabs with a purple ring, can use your Personal or School logins, and can never touch private tabs, Vanish tabs or the tab on air. If one reaches into a tab you did not hand it, Cue says so on screen.`));
     const door = el('input'); door.type = 'checkbox'; door.checked = !!S.agent.on;
     door.onchange = () => send('ai-door', { on: door.checked });
-    sh.append(settingRow('Let AI agents drive Cue (until you close Cue)', door,
-      'Closed every time Cue starts. While it is closed nothing can drive Cue but you, and an AI tool that tries is told why.'));
+    sh.append(settingRow('Let AI agents drive Cue', door,
+      'Stays as you leave it, so an agent can answer WhatsApp or check a page while you teach. While it is off nothing can drive Cue but you, and an AI tool that tries is told why. Either way they never touch private tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it.'));
     const cp = el('button', 'btn', 'Copy AI setup'); cp.onclick = () => send('agent-copy');
     const r = el('div', 'row'); r.append(el('span', 'note', S.agent.last ? `Last: ${esc(S.agent.last.agent)} used ${esc(S.agent.last.tool)}` : 'No agent has connected yet.'), cp); sh.append(r);
     const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);

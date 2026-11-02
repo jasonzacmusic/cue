@@ -26,6 +26,7 @@ const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
+const { makeWhatsApp } = require('./whatsapp');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
@@ -240,10 +241,16 @@ let nextId = 1;
 const closedStack = [];
 const downloads = [];
 const agentLog = [];
-// The AI door starts shut at every launch and is opened for one run of Cue, by
-// hand. The key sits in a file in his account, so anything running as him could
-// otherwise drive the browser; this way nothing drives it unless he said so
-// today. Opening it is never written back to disk.
+// The AI door. The key sits in a file in his account, so anything running as him
+// could otherwise drive the browser: the door itself is the permission, and it is
+// his switch, never a token's.
+//
+// It used to shut at every launch. It no longer does, because the work it carries
+// now - an agent answering WhatsApp for him while he teaches - cannot wait for
+// somebody to open a door first. So the switch is remembered: on means on until
+// he turns it off, and Cue still says on screen when an agent reaches into a tab
+// he did not hand it, still keeps every call in the log, and still refuses
+// private tabs, Vanish tabs and the tab on air.
 let doorOpen = false;
 let lastKnock = 0;
 const agentSeen = new Set();
@@ -1569,6 +1576,7 @@ function uiCommand(cmd, a = {}) {
     }
     case 'ai-door': {
       doorOpen = !!a.on;
+      setSetting('aiDoor', doorOpen);
       if (!doorOpen) agentSeen.clear();
       sendEvent('toast', doorOpen
         ? 'AI agents can drive Cue until you close it.'
@@ -2268,6 +2276,8 @@ function logAgent(entry) {
   pushState();
 }
 
+const whatsapp = makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId: () => programId });
+
 const agentApi = {
   doorOpen: () => doorOpen,
   // Somebody tried while the door was shut. Say it once a minute, no more.
@@ -2315,6 +2325,11 @@ const agentApi = {
   problems: (t) => t.log,
   alert: (a) => addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '' }),
   bills: () => store.data.bills.map((b) => ({ ...b, status: bills.status(b) })),
+  // WhatsApp is its own narrow door. A general agent may not click or type in Jason's own
+  // tabs, and that stays true; this tool can work in the pinned WhatsApp tabs because it can
+  // do nothing else there — list chats, read one, send a message he asked for, and say whether
+  // the account is linked. Private tabs, Vanish tabs and the tab on air are still off limits.
+  whatsapp: (a) => whatsapp(a),
   setMuted, setVolume,
   // ---- the teaching rig's door (Stream Deck pedal + OBS), not an AI agent's.
   // OBS captures Cue as an application, so the class sees whatever tab is
@@ -2346,7 +2361,11 @@ const agentApi = {
 };
 
 function hiddenFromAI(t) { return t.private || t.id === programId; }
-function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed); }
+// WhatsApp is the one site Jason handed over on purpose: the agents answer for him there, in
+// the tab his phone is linked to, because a second linked browser is not a thing WhatsApp
+// allows. Everything else still has to be a tab an agent opened, or one he ticked himself.
+const HANDED_OVER = (t) => hostOf(t.url) === 'web.whatsapp.com' && (t.identity === 'personal' || t.identity === 'school');
+function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
 
 // ---------------------------------------------------------------- menus
 const MAC = process.platform === 'darwin';
@@ -2635,9 +2654,10 @@ app.whenReady().then(async () => {
   pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
   setupBlocker();
   startThumbs();
-  // The door is shut, but the port still answers, so that an AI tool that tries
-  // is told why in words and Cue can say so on screen - better than a silence
-  // nobody can explain.
+  // His switch, as he left it. When it is off the port still answers, so that an
+  // AI tool that tries is told why in words and Cue can say so on screen - better
+  // than a silence nobody can explain.
+  doorOpen = settings().aiDoor === true;
   if (settings().agentPort !== false) {
     startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
       .catch((e) => logAgent({ tool: 'port', error: e.message }));

@@ -1,5 +1,5 @@
 // The AI port: a local, token-protected door that lets Claude Code, Codex and other AI tools
-// drive Cue. The door starts shut at every launch and is opened by hand, for one run of Cue:
+// drive Cue. The door is his own switch and stays as he left it, across restarts:
 // the token file can be read by anything running as you, so the token is not the permission. Agents read any normal tab, but may only click, type or run scripts in tabs they
 // opened themselves or tabs you marked "Let AI agents use this tab". Private tabs, Vanish tabs
 // and the tab that is on air are always off limits. Every call is logged.
@@ -126,6 +126,8 @@ async function startAgentPort({ port, tokenFile, api }) {
     fullpage: async (a) => { const t = api.get(a.id); need(t, false); return api.fullPage(t); },
     alert: async (a) => { api.alert(a); return { ok: true }; },
     bills: async () => api.bills(),
+    // One call, one answer in plain lines. No snapshot, no picture, no tab juggling.
+    whatsapp: async (a) => api.whatsapp(a),
     // ---- the teaching rig (Stream Deck pedal, OBS). These change what a
     // CLASS is looking at, so they are the rig's tools, not an AI agent's:
     // never call them to get a page in front of yourself.
@@ -154,7 +156,7 @@ async function startAgentPort({ port, tokenFile, api }) {
     // as Cue is open.
     if (!api.doorOpen()) {
       api.knock(String(req.headers['x-agent'] || 'An AI tool').slice(0, 40));
-      return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays open until you close Cue.' });
+      return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays on until he switches it off.' });
     }
     const m = req.url.match(/^\/tool\/(\w+)$/);
     if (!m || req.method !== 'POST' || !tools[m[1]]) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
