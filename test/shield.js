@@ -90,6 +90,22 @@ module.exports = async function run(c) {
     && !shield.matches('https://rr3---sn-x.googlevideo.com/videoplayback', 'https://www.youtube.com/', 'media'));
   check('ads: the school\'s own sites are never touched', !shield.matches('https://learning-portal.nathanielschool.com/x.js', 'https://learning-portal.nathanielschool.com/', 'script'));
 
+  // Instagram's own address, on Instagram. The privacy lists stop instagram.com/ajax/bz, which
+  // is where Meta plants the mid and datr device cookies, and without them signing in reaches
+  // the code sent by text and then fails every time. This is the check that caught it.
+  const onIG = 'https://www.instagram.com/accounts/login/';
+  check('Meta: Instagram can reach its own addresses',
+    !shield.matches('https://www.instagram.com/ajax/bz', onIG, 'xhr')
+    && !shield.matches('https://www.instagram.com/logging_client_events', onIG, 'xhr'));
+  check('Meta: the Meta sign-in step is reachable from Instagram',
+    !shield.matches('https://www.facebook.com/security/twofactor/', onIG, 'document'));
+  check('Meta: Facebook can reach its own addresses',
+    !shield.matches('https://www.facebook.com/ajax/bz', 'https://www.facebook.com/', 'xhr'));
+  // ...and Meta watching from someone else's page is still stopped, which is the point.
+  check('Meta: the pixel on another site is still blocked',
+    shield.matches('https://www.facebook.com/tr/?id=1', 'https://www.cnn.com/', 'image')
+    && shield.matches('https://connect.facebook.net/en_US/fbevents.js', 'https://shop.example/', 'script'));
+
   // Allowing one site must not loosen anything anywhere else.
   shield.setAllowed(['example.com']);
   check('ads: allowed by hand on one site', !shield.matches(adHosts[0], 'https://example.com/', 'script'));

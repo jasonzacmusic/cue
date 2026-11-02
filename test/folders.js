@@ -119,6 +119,61 @@ module.exports = async (c) => {
   check('move: it is built in the new folder\'s cookie jar', moved && moved.view && moved.view.webContents.session === c.sessionFor('school'));
   check('move: nothing moved on its own', c.tabs.filter((t) => t.identity === 'personal').length === 0);
 
+  // ---- switching folders keeps you on the same job
+  // He switches Personal -> School while looking at WhatsApp and expects the
+  // school's WhatsApp, not whatever the school touched last.
+  const pWa = c.openTab({ url: 'https://web.whatsapp.com/', identity: 'personal' });
+  const sWa = c.openTab({ url: 'https://web.whatsapp.com/', identity: 'school' });
+  const sOther = c.openTab({ url: 'https://example.com/', identity: 'school' });
+  await sleep(600);
+  c.activate(sOther.id); await sleep(200);   // the school's most recent is NOT WhatsApp
+  c.setFolder('personal'); c.activate(pWa.id); await sleep(200);
+  c.setFolder('school'); await sleep(300);
+  check('switch: the same app opens in the other folder',
+    c.getState().activeId === sWa.id, `${c.getState().activeId} wanted ${sWa.id}`);
+
+  // and when the other folder has nothing of that site, it still lands somewhere sane
+  c.setFolder('personal'); c.activate(pWa.id); await sleep(200);
+  c.closeTab(sWa.id); await sleep(300);
+  c.setFolder('school'); await sleep(300);
+  check('switch: with no match it still lands in the folder',
+    (c.byId(c.getState().activeId) || {}).identity === 'school',
+    (c.byId(c.getState().activeId) || {}).identity);
+
+  // ---- a pinned app opens as whoever the folder is
+  c.setFolder('school'); await sleep(200);
+  const n0 = c.tabs.length;
+  c.command('app-open', { url: 'https://web.whatsapp.com/' }); await sleep(700);
+  const opened = c.byId(c.getState().activeId);
+  check('pins: the app opens in the folder you are in',
+    opened && opened.identity === 'school' && /web\.whatsapp\.com/.test(opened.url),
+    opened && `${opened.identity} ${opened.url}`);
+  check('pins: it opened one tab, not a pile', c.tabs.length === n0 + 1, `${n0} -> ${c.tabs.length}`);
+  const sWa2 = c.getState().activeId;
+  c.setFolder('personal'); await sleep(200);
+  c.command('app-open', { url: 'https://web.whatsapp.com/' }); await sleep(500);
+  check('pins: the same click in the other folder goes to that account',
+    c.getState().activeId === pWa.id, `${c.getState().activeId} wanted ${pWa.id}`);
+  c.setFolder('school'); await sleep(200);
+  c.command('app-open', { url: 'https://web.whatsapp.com/' }); await sleep(500);
+  check('pins: clicking again reuses the tab it made', c.getState().activeId === sWa2);
+
+  // ---- Gmail opens the folder's own mailbox, not whichever account answers first
+  c.setSetting('label.school', 'music@nathanielschool.com');
+  c.setSetting('label.personal', 'jasonzac@gmail.com');
+  await sleep(200);
+  c.setFolder('school'); await sleep(150);
+  const gTab = c.openTab({ url: 'https://example.com/', identity: 'school' }); await sleep(400);
+  c.activate(gTab.id); await sleep(150);
+  c.command('navigate', { text: 'https://mail.google.com/' }); await sleep(600);
+  check('gmail: the school folder opens the school mailbox',
+    (c.byId(gTab.id) || {}).url.includes('music%40nathanielschool.com')
+    || (c.byId(gTab.id) || {}).url.includes('music@nathanielschool.com'),
+    (c.byId(gTab.id) || {}).url);
+  c.command('navigate', { text: 'https://mail.google.com/mail/u/2/' }); await sleep(400);
+  check('gmail: a mailbox he named himself is left alone',
+    (c.byId(gTab.id) || {}).url.includes('/mail/u/2/'), (c.byId(gTab.id) || {}).url);
+
   fs.writeFileSync(path.join(OUT, 'folders.json'), JSON.stringify(results, null, 2));
   const fails = results.filter((x) => !x.ok);
   console.log(`[cue-folders] DONE ${results.length - fails.length}/${results.length} passed`);

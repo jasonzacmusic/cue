@@ -43,6 +43,18 @@ const NEVER_TOUCH = [
   // CNN's player asks for this settings file about 3,000 times a second if it is refused, which
   // costs far more than the file. The ads it would lead to are still blocked.
   '@@||cdn-media.brightline.tv/config/$xmlhttprequest,domain=cnn.com',
+  // Meta's sites, on Meta's sites only. The privacy lists stop
+  // instagram.com/ajax/bz, which is one of Instagram's OWN addresses and the one
+  // that plants the mid and datr device cookies. Without those, signing in gets
+  // as far as the code sent by text and then answers "there was a problem with
+  // your request" forever. The $domain= on each rule is what keeps this honest:
+  // Meta watching you from someone else's page is still blocked, which is the
+  // tracking that matters.
+  '@@||instagram.com^$domain=instagram.com|threads.net',
+  '@@||facebook.com^$domain=facebook.com|instagram.com|threads.net',
+  '@@||threads.net^$domain=threads.net|instagram.com',
+  '@@||whatsapp.com^$domain=whatsapp.com',
+  '@@||cdninstagram.com^', '@@||fbcdn.net^',
 ];
 const COSMETIC_OFF = /^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|nathanielschool\.com)\//;
 

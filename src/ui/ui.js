@@ -429,7 +429,19 @@ function renderPins() {
     const id = Number(e.dataTransfer.getData('text/cue-tab'));
     if (id) send('pin', { id, on: true });
   };
-  for (const t of S.tabs.filter((x) => x.pinned && here(x))) {
+  // An app pinned in any folder shows in every folder. Pinning WhatsApp once
+  // used to make it vanish the moment he switched to the school, which is the
+  // opposite of what a pin is for: the strip is the apps he uses, and the
+  // folder decides whose account opens.
+  const byHost = new Map();
+  for (const x of S.tabs.filter((y) => y.pinned)) {
+    const key = hostOf(x.url) || `tab:${x.id}`;
+    const seen = byHost.get(key);
+    // This folder's own tab is the one to draw: its icon, its unread dot, and
+    // clicking it is a plain activate rather than an open.
+    if (!seen || (here(x) && !here(seen))) byHost.set(key, x);
+  }
+  for (const t of byHost.values()) {
     const p = el('div', 'pin');
     p.draggable = true;
     p.ondragstart = (e) => { e.dataTransfer.setData('text/cue-tab', String(t.id)); p.classList.add('dragging'); };
@@ -441,7 +453,8 @@ function renderPins() {
       const id = Number(e.dataTransfer.getData('text/cue-tab'));
       if (id && id !== t.id) send('reorder', { id, beforeId: t.id });
     };
-    tip(p, shortName(t), hostOf(t.url) || '');
+    tip(p, shortName(t), here(t) ? (hostOf(t.url) || '')
+      : `Opens as ${(S.identities[S.folder] || {}).name || 'this folder'}`);
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
     const letter = () => p.prepend(el('i', 'ltr', esc((shortName(t)[0] || '?').toUpperCase())));
@@ -451,7 +464,8 @@ function renderPins() {
     else if (srcs.length) p.append(iconImg(srcs, letter));
     else letter();
     if (offLogin(t)) { const d = el('span', 'dot'); d.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); p.append(d); }
-    p.onclick = () => send('activate', { id: t.id });
+    if (!here(t)) p.classList.add('elsewhere');
+    p.onclick = () => (here(t) ? send('activate', { id: t.id }) : send('app-open', { url: t.url }));
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
     box.append(p);
   }

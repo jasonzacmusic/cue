@@ -79,6 +79,21 @@ browser per phone, so there is no second session to make — these tabs are it.
 - Clicks are dispatched in the page, never aimed at x,y: these tabs live in the background with
   no geometry, and a mouse sent at a tab nobody can see hits nothing.
 
+## Meta's sites need Meta's own addresses
+EasyPrivacy stops `instagram.com/ajax/bz` and `logging_client_events`. Those are Instagram's OWN
+addresses, and `/ajax/bz` is where Meta plants the `mid` and `datr` device cookies. Without them a
+sign-in reaches the code sent by text and then answers "there was a problem with your request"
+forever, with nothing in the console to show for it. `NEVER_TOUCH` in `shield.js` now allows Meta's
+sites on Meta's sites, scoped with `$domain=` so the pixel on someone else's page is still blocked.
+`test/shield.js` holds both halves. Symptom to recognise: `document.cookie` on instagram.com has
+`csrftoken` but no `mid` and no `datr`; Chrome's jar has `datr, mid, ig_did, sessionid`.
+
+## Gmail when one Chrome profile holds both accounts
+His Chrome keeps BOTH Google accounts signed in to one profile, so carrying the sign-in over brings
+both. `googleForFolder()` pins each folder's Gmail to its own address with `/mail/u/<address>/`,
+or School opens Personal's inbox and the folders stop meaning anything. A mailbox he names himself
+is left alone.
+
 ## WhatsApp markup moves under us
 WhatsApp renamed its chat rows from `role="listitem"` to `role="row"` (seen live 2-Nov-2026, which
 is what 0.6.2 fixes). Anything that walks the chat list lists BOTH roles. The test serves one

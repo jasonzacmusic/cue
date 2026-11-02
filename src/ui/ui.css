@@ -280,6 +280,11 @@ body[data-space="Build"] { --wash: #BFE0D3; --wash-2: #DCEBDD; --tone: #17695A; 
 .pin { width: 44px; height: 44px; border-radius: 13px; background: var(--raised); box-shadow: 0 1px 4px -1px var(--shadow); display: grid; place-items: center;
   position: relative; cursor: pointer; transition: transform .12s, box-shadow .12s; }
 .pin:hover { transform: translateY(-1px); box-shadow: 0 4px 10px -4px var(--shadow); }
+/* An app this folder has not opened yet: there to click, visibly not yet open. */
+.pin.elsewhere { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.pin.elsewhere img, .pin.elsewhere svg { opacity: .55; }
+.pin.elsewhere:hover { background: var(--raised); box-shadow: 0 4px 10px -4px var(--shadow); }
+.pin.elsewhere:hover img, .pin.elsewhere:hover svg { opacity: 1; }
 .pin img { width: 26px; height: 26px; border-radius: 7px; object-fit: contain; }
 .pin .ltr { font: 700 15px/1 -apple-system, system-ui, sans-serif; font-style: normal; color: var(--muted); }
 .pin.active { box-shadow: 0 0 0 2px var(--tone); }

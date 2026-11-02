@@ -303,4 +303,4 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
   };
 }
 
-module.exports = { makeWhatsApp, WHO };
+module.exports = { makeWhatsApp, WHO, WA_HOST };

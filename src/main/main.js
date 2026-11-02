@@ -26,7 +26,7 @@ const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
-const { makeWhatsApp } = require('./whatsapp');
+const { makeWhatsApp, WA_HOST } = require('./whatsapp');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
@@ -529,13 +529,33 @@ function followFolder(t) {
   if (!t || !isFolder(t.identity) || store.data.folder === t.identity) return;
   store.data.folder = t.identity;
 }
+// The pinned strip holds the same handful of apps in every folder, so clicking
+// one means "this app, as whoever I am right now": his own WhatsApp in Personal,
+// the school's in School. It goes to the tab this folder already has for that
+// site, and only opens one when the folder has none.
+function openApp(url) {
+  const who = store.data.folder;
+  const host = hostOf(url);
+  const mine = (t) => t.identity === who && t.id !== programId && hostOf(t.url) === host;
+  const inSpace = spaceOrder().filter(mine).sort((a, b) => b.lastActive - a.lastActive)[0];
+  const anywhere = tabs.filter(mine).sort((a, b) => b.lastActive - a.lastActive)[0];
+  const best = inSpace || anywhere;
+  if (best) activate(best.id); else openTab({ url: googleForFolder(url, who), identity: who });
+}
+
 function setFolder(name) {
   if (!isFolder(name) || store.data.folder === name) return;
+  // What he is looking at as he switches. Going from his WhatsApp to the
+  // school's should land on the school's WhatsApp, not on whatever the school
+  // happened to touch last: the folder changes, the job does not.
+  const leaving = byId(activeId);
+  const site = leaving && !leaving.url.startsWith('cue://') ? hostOf(leaving.url) : '';
   store.data.folder = name;
   // Land on something that is actually in this folder, in this Space, so the
   // page in front of you matches the folder you just opened.
   const here = spaceOrder().filter((t) => t.identity === name && t.id !== programId);
-  const first = here.sort((a, b) => b.lastActive - a.lastActive)[0];
+  const recent = here.sort((a, b) => b.lastActive - a.lastActive);
+  const first = (site && recent.find((t) => hostOf(t.url) === site)) || recent[0];
   if (first) activate(first.id); else { layout(); pushState(); persist(); }
 }
 
@@ -662,6 +682,23 @@ async function carryFromChrome(identity, hostRe, origins = []) {
 }
 
 const googleFromChrome = (identity) => carryFromChrome(identity, GOOGLE_LOGIN_HOST, GOOGLE_ORIGINS);
+
+// His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
+// carried over arrives holding both. Google's own answer to that is the account
+// in the path: /mail/u/<address>/ opens that mailbox whoever else is signed in.
+// Without it, School opened Personal's inbox and the folders stopped meaning
+// anything. An identity with no address on it is left exactly as it was.
+function googleForFolder(url, identity) {
+  const who = String(settings().identityLabels[identity] || '').trim();
+  if (!who || !/@/.test(who)) return url;
+  try {
+    const u = new URL(url);
+    if (!/^mail\.google\.[a-z.]+$/i.test(u.hostname)) return url;
+    if (/^\/mail\/u\/[^/]+/.test(u.pathname)) return url; // he already named one
+    u.pathname = `/mail/u/${encodeURIComponent(who)}${u.pathname === '/' ? '/' : u.pathname}`;
+    return u.toString();
+  } catch { return url; }
+}
 
 // For a site that will not let you sign in inside Cue - Google is the one that always refuses -
 // this carries the sign-in you already have in Chrome across to the tab you are looking at.
@@ -1239,9 +1276,13 @@ function resolveInput(text, engine) {
 
 function navigate({ text, engine, newTab, identity }) {
   const typed = resolveInput(text, engine);
-  const url = (settings().httpsFirst !== false && secureVersion(typed)) || typed;
+  const secure = (settings().httpsFirst !== false && secureVersion(typed)) || typed;
   const t = byId(activeId);
-  if (newTab || !t) return openTab({ url, identity: identity || (t ? t.identity : undefined) });
+  if (newTab || !t) {
+    const who = identity || (t ? t.identity : undefined);
+    return openTab({ url: googleForFolder(secure, who || store.data.folder), identity: who });
+  }
+  const url = googleForFolder(secure, t.identity);
   ensureView(t);
   t.url = url;
   if (url !== typed) t.httpsFrom = typed;
@@ -1490,6 +1531,7 @@ function uiCommand(cmd, a = {}) {
   switch (cmd) {
     case 'navigate': navigate(a); break;
     case 'activate': activate(a.id); break;
+    case 'app-open': openApp(a.url); break;
     case 'close': closeTab(a.id); break;
     case 'new-tab':
       if (!a.identity && vanish.focused()) { vanish.add(); break; }
@@ -2035,7 +2077,7 @@ const internal = {
     const r = await googleFromChrome(t.identity);
     if (r.count) {
       sendEvent('toast', `Your Google sign-in came over from Chrome (${r.from}).`);
-      t.view.webContents.loadURL('https://mail.google.com/').catch(() => {});
+      t.view.webContents.loadURL(googleForFolder('https://mail.google.com/', t.identity)).catch(() => {});
     }
     return r;
   },
@@ -2300,10 +2342,17 @@ const agentApi = {
     const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent';
     // One tab per site, not one per instruction. An agent sent to WhatsApp six
     // times used to leave six WhatsApp tabs behind; now it goes back to the one
-    // it already has open for that site and navigates it.
+    // it already has open for that site and navigates it. A tab Jason has handed
+    // over counts as that one tab: opening WhatsApp used to build a twin beside
+    // his own linked tab, which left two of everything in the sidebar.
+    // His own handed-over tab is never navigated away from the page he left it
+    // on: it is reused only when it already sits on the address asked for.
+    // Anything that needs a different page goes to the agent's own tab.
     if (!newTab) {
       const host = hostOf(target);
-      const reuse = tabs.find((t) => t.agent && t.identity === who && t.id !== programId && hostOf(t.url) === host);
+      const mine = (t) => t.agent && t.identity === who && t.id !== programId && hostOf(t.url) === host;
+      const his = (t) => agentCanAct(t) && !t.agent && t.identity === who && t.url === target;
+      const reuse = tabs.find(his) || tabs.find(mine);
       if (reuse) {
         ensureView(reuse);
         if (reuse.url !== target) reuse.view.webContents.loadURL(target);
@@ -2364,7 +2413,9 @@ function hiddenFromAI(t) { return t.private || t.id === programId; }
 // WhatsApp is the one site Jason handed over on purpose: the agents answer for him there, in
 // the tab his phone is linked to, because a second linked browser is not a thing WhatsApp
 // allows. Everything else still has to be a tab an agent opened, or one he ticked himself.
-const HANDED_OVER = (t) => hostOf(t.url) === 'web.whatsapp.com' && (t.identity === 'personal' || t.identity === 'school');
+// The host comes from whatsapp.js so there is one answer to "is this WhatsApp", not two
+// that drift apart the day either side changes.
+const HANDED_OVER = (t) => hostOf(t.url) === WA_HOST() && (t.identity === 'personal' || t.identity === 'school');
 function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
 
 // ---------------------------------------------------------------- menus

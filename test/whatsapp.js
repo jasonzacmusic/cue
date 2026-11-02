@@ -101,7 +101,7 @@ module.exports = async ({ app, agentApi, tabs, openTab }) => {
     process.env.CUE_WA_HOST = '127.0.0.1';
     process.env.CUE_WA_URL = `${base}/personal`;
 
-    openTab({ url: `${base}/personal`, identity: 'personal', background: true });
+    const jasonTab = openTab({ url: `${base}/personal`, identity: 'personal', background: true });
     openTab({ url: `${base}/school`, identity: 'school', background: true });
     await sleep(1500);
 
@@ -169,8 +169,22 @@ module.exports = async ({ app, agentApi, tabs, openTab }) => {
 
     // ---- the one site he handed over, and nothing else
     const mayAct = (url, identity) => agentApi.canAct({ id: 999, url, identity, private: false });
-    check('agents may work in his linked WhatsApp tab', mayAct('https://web.whatsapp.com/', 'personal') && mayAct('https://web.whatsapp.com/', 'school'));
-    check('and in nothing else of his', !mayAct('https://mail.google.com/', 'personal') && !mayAct('https://web.whatsapp.com/', 'vanish'));
+    // The address comes from the same place the app reads it, so this still checks the real
+    // rule rather than a copy of it that the stand-in host would quietly falsify.
+    const waUrl = `${base}/personal`;
+    check('agents may work in his linked WhatsApp tab', mayAct(waUrl, 'personal') && mayAct(waUrl, 'school'));
+    check('and in nothing else of his', !mayAct('https://mail.google.com/', 'personal') && !mayAct(waUrl, 'vanish'));
+
+    // ---- opening a site he already has open must not build a twin beside it
+    const before = tabs.length;
+    const again = agentApi.open({ url: `${base}/personal`, identity: 'personal' });
+    check('opening his WhatsApp again goes to the tab he already has',
+      again.id === jasonTab.id && tabs.length === before, `${again.id} vs ${jasonTab.id}, ${tabs.length} tabs`);
+
+    // but it must never drag his tab off the page he left it on
+    const elsewhere = agentApi.open({ url: `${base}/blank`, identity: 'personal' });
+    check('a different page gets its own tab, his stays put',
+      elsewhere.id !== jasonTab.id && jasonTab.url === `${base}/personal`, jasonTab.url);
 
     // ---- the deliberate failure, so a silent pass is never mistaken for a run
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
