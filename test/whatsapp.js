@@ -53,9 +53,16 @@ function page(which) {
       const main = document.getElementById('main');
       main.hidden = false;
       main.querySelector('header span').setAttribute('title', name);
+      // Today's real WhatsApp markup, not 2024's. The .message-in / .message-out classes are GONE
+      // from the live page (checked 2-Nov-2026: zero matches, while [data-pre-plain-text] matched
+      // every message), so a stub that marks his own messages only by that class tests a browser
+      // nobody has. Direction is carried the way WhatsApp carries it now: a row, the stamp, and on
+      // his own messages the bubble tail plus a delivery state.
       document.getElementById('thread').innerHTML = (thread[name] || []).map((m) =>
-        '<div class="' + (m.out ? 'message-out' : 'message-in') + '">' +
+        '<div role="row">' +
         '<div data-pre-plain-text="[' + m.when + ', 2/11/2026] ' + (m.out ? 'You' : m.who) + ': "></div>' +
+        '<span data-icon="' + (m.out ? 'tail-out' : 'tail-in') + '"></span>' +
+        (m.out ? '<span aria-label="Read"></span>' : '') +
         '<span class="selectable-text">' + m.text + '</span></div>').join('');
     }
     document.getElementById('pane-side').addEventListener('click', (e) => {
