@@ -1118,10 +1118,17 @@ function openSettings() {
     // seen before. Chrome on this Mac is already signed in to all of them, and
     // its cookies are the way in that needs no password. One button per folder,
     // because which folder it lands in is the whole question.
-    sh.append(el('div', 'note', 'Google and Instagram will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those sign-ins straight across instead. They go into the one folder you choose and nothing leaves this Mac. Chrome is left exactly as it is.'));
+    sh.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder.'));
+    const goog = el('div', 'row');
+    for (const k of ['personal', 'school']) {
+      const g = el('button', 'btn', `Sign in to Google as ${S.identities[k].name}`);
+      g.onclick = () => { send('signin.google', { identity: k }); closeModal(); };
+      goog.append(g);
+    }
+    sh.append(goog);
     const carry = el('div', 'row');
     for (const k of ['personal', 'school']) {
-      const b = el('button', 'btn', `Bring sign-ins into ${S.identities[k].name}`);
+      const b = el('button', 'btn', `Bring Instagram and Facebook into ${S.identities[k].name}`);
       // It says what it is doing, then goes back to being a button. Left
       // disabled, it reads as though the carry is still running forever.
       b.onclick = () => {

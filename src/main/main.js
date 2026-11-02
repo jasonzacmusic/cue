@@ -691,15 +691,29 @@ async function carryFromChrome(identity, hostRe, origins = []) {
 const googleFromChrome = (identity) => carryFromChrome(identity, GOOGLE_LOGIN_HOST, GOOGLE_ORIGINS);
 const metaFromChrome = (identity) => carryFromChrome(identity, META_LOGIN_HOST, META_ORIGINS);
 
-// One folder, every sign-in Chrome has. Each family is carried on its own so a
-// locked keychain or an empty jar for one of them never costs the other.
+// Only Meta's sign-ins are carried. Google's are NOT, and must not be: Google ties a session to
+// the one browser it was made in, so a copied jar is revoked within the hour and takes the
+// original down with it - on 2-Nov-2026 that signed both folders out and left them on
+// accounts.google.com/CookieMismatch while Chrome itself stayed fine. Worse, his Chrome keeps
+// BOTH his Google accounts in a single profile, so the copy arrived holding both and the two
+// folders stopped meaning anything. Google gets signed into inside Cue, once per folder.
 async function carryAllFromChrome(identity) {
   const out = [];
-  for (const [name, run] of [['Google', googleFromChrome], ['Instagram and Facebook', metaFromChrome]]) {
+  for (const [name, run] of [['Instagram and Facebook', metaFromChrome]]) {
     const r = await run(identity).catch((e) => ({ error: e.message }));
     out.push({ name, ...r });
   }
   return out;
+}
+
+// Google's own sign-in page, in the folder that asked, with the folder's address already filled in
+// so he never lands on the wrong account's inbox.
+function googleSignIn(identity) {
+  const who = String(settings().identityLabels[identity] || '').trim();
+  const u = new URL('https://accounts.google.com/AccountChooser');
+  u.searchParams.set('continue', 'https://mail.google.com/mail/u/0/');
+  if (/@/.test(who)) u.searchParams.set('Email', who);
+  return openTab({ url: u.toString(), identity });
 }
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
@@ -1654,6 +1668,7 @@ function uiCommand(cmd, a = {}) {
     // Reachable from Settings as well as from Cue's own pages: the sidebar and
     // the cue:// pages speak to two different tables.
     case 'signin.carry-all': internal['signin.carry-all'](a); break;
+    case 'signin.google': internal['signin.google'](a); break;
     case 'move-folder': moveToFolder({ id: a.id, to: a.to }); break;
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
@@ -2100,17 +2115,14 @@ const internal = {
   'library.history.clear': () => lib.clearHistory(),
   'signin.from-chrome': async (_a, t) => {
     if (!t) return { error: 'This page is not in a tab.' };
-    const r = await googleFromChrome(t.identity);
-    if (r.count) {
-      sendEvent('toast', `Your Google sign-in came over from Chrome (${r.from}).`);
-      t.view.webContents.loadURL(googleForFolder('https://mail.google.com/', t.identity)).catch(() => {});
-    }
-    return r;
+    googleSignIn(t.identity);
+    return { signin: true };
   },
+  'signin.google': (a) => { googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder); },
   'signin.close': (_a, t) => { if (t) closeTab(t.id); },
-  // Every sign-in Chrome has, into one folder, from the folder's own row in
-  // Settings. Google and Meta both refuse a browser they have not seen before,
-  // and this is the way past that does not need his password.
+  // Meta's sign-ins, into one folder, from the folder's own row in Settings.
+  // Instagram and Facebook accept a carried jar; Google does not - see
+  // carryAllFromChrome for what copying Google's cookies actually did.
   'signin.carry-all': async (a) => {
     const who = isFolder(a.identity) ? a.identity : store.data.folder;
     const name = (IDENTITIES[who] || {}).name || who;

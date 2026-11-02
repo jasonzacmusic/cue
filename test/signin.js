@@ -13,7 +13,7 @@ const until = async (fn, ms = 40000) => { const end = Date.now() + ms; while (Da
 
 const NOBODY = 'cue.browser.check@gmail.com'; // a made-up address: no account, no password, no risk
 
-module.exports = async ({ app, openTab, byId, internal, sessionFor }) => {
+module.exports = async ({ app, tabs, openTab, byId, internal, sessionFor, setSetting }) => {
   try {
     const t = openTab({ url: 'https://accounts.google.com/ServiceLogin?service=mail', identity: 'personal' });
     const wc = t.view.webContents;
@@ -42,7 +42,7 @@ module.exports = async ({ app, openTab, byId, internal, sessionFor }) => {
       const text = await until(() => wc.executeJavaScript('document.body.innerText'));
       check('it says what happened, in plain English', /would not sign you in/i.test(text) && !/secure browser/i.test(text), String(text).slice(0, 90));
       const btn = await wc.executeJavaScript(`(()=>{const b=document.getElementById('bring');return b&&!b.hidden?b.textContent:null})()`);
-      check('it offers to bring the sign-in over from Chrome', /Chrome/.test(btn || ''), btn);
+      check('it offers Google\u2019s own sign-in page', /Google/.test(btn || '') && !/Chrome/.test(btn || ''), btn);
       check('the tab is still the one you opened', byId(t.id) === t);
     }
 
@@ -75,6 +75,22 @@ module.exports = async ({ app, openTab, byId, internal, sessionFor }) => {
     await sleep(3000);
     const jars = await Promise.all(['personal', 'school'].map(async (id) => (await sessionFor(id).cookies.get({ domain: 'web.whatsapp.com' })).length));
     check('WhatsApp: personal and the school keep separate jars', sessionFor('personal') !== sessionFor('school'), jars);
+
+    // Google's cookies must never be carried from Chrome again. Copying them revoked both folders'
+    // sign-ins on 2-Nov-2026 and left them on accounts.google.com/CookieMismatch, and because his
+    // Chrome holds both his Google accounts in one profile, the copy made the two folders identical.
+    const carrySrc = String(require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8'));
+    const carryBlock = (carrySrc.match(/async function carryAllFromChrome[\s\S]*?\n}/) || [''])[0];
+    check('Google is not in the Chrome carry', carryBlock.length > 0 && !/googleFromChrome/.test(carryBlock), carryBlock.slice(0, 200));
+    check('Meta is still carried', /metaFromChrome/.test(carryBlock), carryBlock.slice(0, 200));
+
+    // A folder must be able to sign in to Google for real, on Google's own page, as itself.
+    setSetting('label.school', 'music@nathanielschool.com');
+    internal['signin.google']({ identity: 'school' });
+    const gTab = tabs.filter((t) => /accounts\.google\.com/.test(t.url || '')).pop();
+    const gUrl = gTab ? gTab.url : '';
+    check('a folder can open Google\u2019s own sign-in page', /accounts\.google\.com/.test(gUrl), gUrl);
+    check('it arrives as the folder\u2019s own address', /Email=/.test(gUrl), gUrl);
 
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
   } catch (e) {

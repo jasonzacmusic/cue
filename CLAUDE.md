@@ -187,3 +187,23 @@ Helium installed and report the numbers.
 - Chrome extensions: simple ones work. Ones that need Chrome's toolbar APIs may not, until Stage 2.
 - Windows passwords and sign-ins can't be moved in, because Chrome locks them to itself there.
 - The bill reader works from each page's wording, so a redesigned billing page may need a new phrase in `bills.js`.
+
+## Google sign-ins cannot be carried from Chrome (2-Nov-2026)
+
+0.6.2 shipped a Settings button that copied Chrome's cookies into a folder. For Instagram and
+Facebook that works. For Google it does not, and it did real damage: Google ties a session to the
+one browser it was made in, so within the hour it revoked the copies AND the original, and both
+folders landed on `accounts.google.com/CookieMismatch` reading "Signed out". Chrome itself was
+untouched, which is what made it look like a Cue bug rather than a Google one.
+
+There was a second fault underneath. `carryFromChrome` picks the Chrome profile holding the most
+cookies for the site. His Chrome keeps BOTH Google accounts in one profile, so Personal and School
+each received the same jar holding both accounts - the folders stopped meaning anything. The
+`?authuser=` routing added the same day was papering over exactly that.
+
+So: `carryAllFromChrome` carries Meta only. Google is signed into inside Cue, once per folder,
+through `googleSignIn(identity)`, which opens Google's own AccountChooser with the folder's address
+in `Email=`. Google accepts Cue's sign-in form now (the client-hints work in `chromeHints`), and
+when it asks to "verify it's you" that is the account asking, not Google rejecting the browser.
+`test/signin.js` pins both halves: Google must not appear in the carry, and a folder must be able
+to open Google's own page as itself.
