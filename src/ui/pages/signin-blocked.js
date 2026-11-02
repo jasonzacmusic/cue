@@ -1,6 +1,7 @@
 'use strict';
 // Shown instead of Google's dead end when Google refuses to sign you in inside Cue. The one button
-// asks Cue's main side to carry the Google sign-in over from Chrome; this page never sees a cookie.
+// asks Cue's main side to empty this folder's Google cookies and reopen Google's own sign-in; this
+// page never sees a cookie itself.
 (() => {
   const $ = (id) => document.getElementById(id);
   const said = $('said');
@@ -10,20 +11,14 @@
   bring.onclick = async () => {
     bring.disabled = true;
     said.className = 'said';
-    said.textContent = 'Reading Chrome’s sign-ins… say yes if your Mac asks for the key.';
+    said.textContent = 'Clearing this folder\u2019s old Google cookies\u2026';
     try {
       const r = await window.cueInternal.invoke('signin.from-chrome', {});
       if (r && r.error) { said.className = 'said bad'; said.textContent = r.error; bring.disabled = false; return; }
-      if (!r || !r.count) {
-        said.className = 'said bad';
-        said.textContent = 'Chrome had no Google sign-in to bring over. Sign in to Google in Chrome first, then try this again.';
-        bring.disabled = false;
-        return;
-      }
-      said.textContent = `Brought over from ${r.from}. Opening Gmail…`;
+      said.textContent = 'Cleared. Google\u2019s sign-in is opening \u2014 enter this folder\u2019s password there.';
     } catch {
       said.className = 'said bad';
-      said.textContent = 'Cue could not read Chrome just now. Try again in a moment.';
+      said.textContent = 'Cue could not do that just now. Try again in a moment.';
       bring.disabled = false;
     }
   };

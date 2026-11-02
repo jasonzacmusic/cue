@@ -1118,7 +1118,7 @@ function openSettings() {
     // seen before. Chrome on this Mac is already signed in to all of them, and
     // its cookies are the way in that needs no password. One button per folder,
     // because which folder it lands in is the whole question.
-    sh.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder.'));
+    sh.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder — the button empties that folder’s old Google cookies first, which is what Google was actually refusing, and then opens Google’s own form for you to type the password into.'));
     const goog = el('div', 'row');
     for (const k of ['personal', 'school']) {
       const g = el('button', 'btn', `Sign in to Google as ${S.identities[k].name}`);

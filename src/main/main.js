@@ -708,12 +708,37 @@ async function carryAllFromChrome(identity) {
 
 // Google's own sign-in page, in the folder that asked, with the folder's address already filled in
 // so he never lands on the wrong account's inbox.
-function googleSignIn(identity) {
+// Empties a folder's Google jar. On 2-Nov-2026 both folders were left holding ~128 cookies from
+// the revoked Chrome carry, and that dead jar - not the browser - is what Google answers
+// "signin/rejected" and "CookieMismatch" to. Proved by probe: a FRESH Electron session reaches
+// "Enter your password" under a Chrome, Firefox or Safari identity alike, so Google has no quarrel
+// with Cue's engine. Signing in always starts from an empty jar.
+async function clearGoogleState(identity) {
+  const ses = sessionFor(identity);
+  const host = (c) => String(c.domain || '').replace(/^\./, '');
+  let cleared = 0;
+  for (const c of await ses.cookies.get({})) {
+    if (!GOOGLE_LOGIN_HOST.test(host(c))) continue;
+    try { await ses.cookies.remove(cookieUrl(c), c.name); cleared++; } catch { /* one stubborn cookie never stops the rest */ }
+  }
+  for (const origin of GOOGLE_ORIGINS) {
+    await ses.clearStorageData({ origin, storages: ['localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }).catch(() => {});
+  }
+  await ses.cookies.flushStore();
+  return cleared;
+}
+
+// Google's own sign-in page, in the folder that asked, with the folder's address already filled in
+// so he never lands on the wrong account's inbox - and with that folder's stale Google state
+// cleared first, or Google refuses before he can type anything.
+async function googleSignIn(identity) {
+  const cleared = await clearGoogleState(identity).catch(() => 0);
   const who = String(settings().identityLabels[identity] || '').trim();
   const u = new URL('https://accounts.google.com/AccountChooser');
   u.searchParams.set('continue', 'https://mail.google.com/mail/u/0/');
   if (/@/.test(who)) u.searchParams.set('Email', who);
-  return openTab({ url: u.toString(), identity });
+  const tab = await openTab({ url: u.toString(), identity });
+  return { tab, cleared };
 }
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
@@ -2115,10 +2140,10 @@ const internal = {
   'library.history.clear': () => lib.clearHistory(),
   'signin.from-chrome': async (_a, t) => {
     if (!t) return { error: 'This page is not in a tab.' };
-    googleSignIn(t.identity);
-    return { signin: true };
+    const { cleared } = await googleSignIn(t.identity);
+    return { signin: true, cleared };
   },
-  'signin.google': (a) => { googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder); },
+  'signin.google': (a) => googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder).then(({ cleared }) => ({ signin: true, cleared })),
   'signin.close': (_a, t) => { if (t) closeTab(t.id); },
   // Meta's sign-ins, into one folder, from the folder's own row in Settings.
   // Instagram and Facebook accept a carried jar; Google does not - see

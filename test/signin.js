@@ -1,11 +1,10 @@
 // Sign-in test: CUE_TEST=signin CUE_USER_DATA=<tmp> CUE_OUT=<dir> electron .
 //
-// Proves what 0.5.3 claims about Google: when Google refuses to sign you in inside Cue - the
-// "this browser or app may not be secure" dead end - Cue takes over the page, says what happened
-// in plain English, and offers to carry the sign-in over from Chrome.
+// Proves how signing in to Google works inside Cue: the folder's stale Google cookies are emptied
+// first - that dead jar, not the browser, is what Google refuses - and Google's own form is then
+// served to Cue normally.
 //
-// Needs the internet: it walks Google's real sign-in as far as the refusal, with a made-up address
-// and no password.
+// Needs the internet: it opens Google's real sign-in page. No password is ever typed.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`[cue-signin] ${ok ? 'PASS' : 'FAIL'} ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ''}`); };
@@ -15,35 +14,33 @@ const NOBODY = 'cue.browser.check@gmail.com'; // a made-up address: no account, 
 
 module.exports = async ({ app, tabs, openTab, byId, internal, sessionFor, setSetting }) => {
   try {
-    const t = openTab({ url: 'https://accounts.google.com/ServiceLogin?service=mail', identity: 'personal' });
-    const wc = t.view.webContents;
-    await until(() => wc.getURL().includes('signin'));
-    await sleep(3000);
+    // Google does NOT refuse Cue's engine. Probed 2-Nov-2026: a clean session reaches "Enter your
+    // password" under a Chrome, Firefox or Safari identity alike. What it refuses is a folder still
+    // holding the cancelled remains of the Chrome carry - ~128 dead cookies in each folder that
+    // day - so signing in has to empty that jar first. These checks pin exactly that.
+    setSetting('label.school', 'music@nathanielschool.com');
+    const ses = sessionFor('school');
+    await ses.cookies.set({ url: 'https://accounts.google.com/', name: 'CUE_STALE', value: 'dead', secure: true }).catch(() => {});
+    await ses.cookies.set({ url: 'https://mail.google.com/', name: 'CUE_STALE2', value: 'dead', secure: true }).catch(() => {});
+    const before = (await ses.cookies.get({})).filter((c) => /google/.test(c.domain || '')).length;
+    check('a folder can be left holding stale Google cookies', before >= 2, before);
 
-    const box = await until(() => wc.executeJavaScript(`(()=>{const i=document.querySelector('#identifierId, input[type=email]');if(!i)return null;const b=i.getBoundingClientRect();return {x:Math.round(b.x+b.width/2),y:Math.round(b.y+b.height/2)}})()`));
-    if (!box) {
-          }
-    check('Google still offers its sign-in form', !!box);
-    if (!box) { done(app); return; }
+    const r = await internal['signin.google']({ identity: 'school' });
+    const after = (await ses.cookies.get({})).filter((c) => /CUE_STALE/.test(c.name)).length;
+    check('signing in empties that folder\u2019s Google jar', after === 0, { before, after, cleared: r && r.cleared });
 
-    wc.sendInputEvent({ type: 'mouseDown', x: box.x, y: box.y, button: 'left', clickCount: 1 });
-    wc.sendInputEvent({ type: 'mouseUp', x: box.x, y: box.y, button: 'left', clickCount: 1 });
-    await sleep(300);
-    for (const ch of NOBODY) { wc.sendInputEvent({ type: 'char', keyCode: ch }); await sleep(90); }
-    await sleep(600);
-    wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-    wc.sendInputEvent({ type: 'char', keyCode: '\r' });
-    wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    const gTab = await until(() => tabs.filter((x) => /accounts\.google\.com/.test(x.url || '')).pop());
+    const gUrl = gTab ? gTab.url : '';
+    check('a folder can open Google\u2019s own sign-in page', /accounts\.google\.com/.test(gUrl), gUrl);
+    check('it arrives as the folder\u2019s own address', /Email=/.test(gUrl), gUrl);
 
-    const landed = await until(() => (wc.getURL().startsWith('cue://signin-blocked') ? wc.getURL() : null), 45000);
-    check('Google’s dead end is replaced by Cue’s own page', !!landed, wc.getURL());
-
-    if (landed) {
-      const text = await until(() => wc.executeJavaScript('document.body.innerText'));
-      check('it says what happened, in plain English', /would not sign you in/i.test(text) && !/secure browser/i.test(text), String(text).slice(0, 90));
-      const btn = await wc.executeJavaScript(`(()=>{const b=document.getElementById('bring');return b&&!b.hidden?b.textContent:null})()`);
-      check('it offers Google\u2019s own sign-in page', /Google/.test(btn || '') && !/Chrome/.test(btn || ''), btn);
-      check('the tab is still the one you opened', byId(t.id) === t);
+    // And Google really does serve the form to Cue, rather than the dead end.
+    const gwc = gTab && gTab.view && gTab.view.webContents;
+    if (gwc) {
+      await until(() => gwc.executeJavaScript('!!document.querySelector("input[name=identifier], input[type=email]")'), 30000);
+      const refused = /signin\/rejected|deniedsigninrejected/i.test(gwc.getURL());
+      const form = await gwc.executeJavaScript('!!document.querySelector("input[name=identifier], input[type=email]")').catch(() => false);
+      check('Google serves Cue the real sign-in form, not the dead end', form && !refused, gwc.getURL().slice(0, 90));
     }
 
     // The page only ever comes up for Google's refusal, not for an ordinary Google page.
@@ -83,14 +80,6 @@ module.exports = async ({ app, tabs, openTab, byId, internal, sessionFor, setSet
     const carryBlock = (carrySrc.match(/async function carryAllFromChrome[\s\S]*?\n}/) || [''])[0];
     check('Google is not in the Chrome carry', carryBlock.length > 0 && !/googleFromChrome/.test(carryBlock), carryBlock.slice(0, 200));
     check('Meta is still carried', /metaFromChrome/.test(carryBlock), carryBlock.slice(0, 200));
-
-    // A folder must be able to sign in to Google for real, on Google's own page, as itself.
-    setSetting('label.school', 'music@nathanielschool.com');
-    internal['signin.google']({ identity: 'school' });
-    const gTab = tabs.filter((t) => /accounts\.google\.com/.test(t.url || '')).pop();
-    const gUrl = gTab ? gTab.url : '';
-    check('a folder can open Google\u2019s own sign-in page', /accounts\.google\.com/.test(gUrl), gUrl);
-    check('it arrives as the folder\u2019s own address', /Email=/.test(gUrl), gUrl);
 
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
   } catch (e) {

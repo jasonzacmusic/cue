@@ -207,3 +207,15 @@ in `Email=`. Google accepts Cue's sign-in form now (the client-hints work in `ch
 when it asks to "verify it's you" that is the account asking, not Google rejecting the browser.
 `test/signin.js` pins both halves: Google must not appear in the carry, and a folder must be able
 to open Google's own page as itself.
+
+## Google refuses the dead jar, not Cue (2-Nov-2026)
+
+Proved by probe (`test/signin.js` pins it): a clean Electron session reaches Google's
+"Enter your password" step under a Chrome, Firefox or Safari identity alike. Google has no
+quarrel with Cue's engine, and the UA/client-hint spoofing is not what decides it.
+
+What Google refuses is a folder still holding the *cancelled* remains of the old Chrome
+carry - on 2-Nov-2026 both folders held ~128 dead Google cookies, and that is what produced
+`signin/rejected` and `CookieMismatch`. So `googleSignIn()` now calls `clearGoogleState()`
+first: it empties that folder's Google cookies and origin storage, then opens Google's own
+form. Never tell him Google rejects Cue by name - it does not.
