@@ -66,18 +66,48 @@ const FIRE = `const fire = (el) => {
 // redesigns; everything else is read off the row's own text, bottom to top.
 // WhatsApp renamed the chat rows from role=listitem to role=row (seen 2-Nov-2026). Both are
 // listed so the code keeps working whichever markup the page ships that week.
+const ROW_READER = `const readRow = (row) => {
+  const titled = [...row.querySelectorAll('span[title]')];
+  const name = (titled[0] && (titled[0].getAttribute('title') || titled[0].innerText) || '').trim();
+  const lines = (row.innerText || '').split('\\n').map((s) => s.trim()).filter(Boolean);
+  const unreadEl = row.querySelector('[aria-label*="unread" i]');
+  const badge = unreadEl ? (unreadEl.innerText || unreadEl.getAttribute('aria-label') || '').match(/\\d+/) : null;
+  const when = lines[1] || '';
+  const last = (titled[1] && (titled[1].getAttribute('title') || titled[1].innerText) || lines.slice(2).join(' ') || '').trim();
+  return { name, when, last: last.slice(0, 120), unread: badge ? Number(badge[0]) : (unreadEl ? 1 : 0) };
+};
+const visibleRows = () => [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
+  .filter((r) => r.offsetParent !== null);`;
+
+// Every chat, not just the ones drawn right now. WhatsApp only renders the rows in view, so the
+// pane is scrolled to the bottom and back, collecting names as they appear. This is what the
+// search action uses, because WhatsApp's own search cannot be driven from a script (see SEARCH).
+const WALK_ROWS = (cap) => `(async () => {
+  ${ROW_READER}
+  const pane = document.querySelector('#pane-side');
+  if (!pane) return [];
+  const seen = new Map();
+  const grab = () => { for (const row of visibleRows()) { const r = readRow(row); if (r.name && !seen.has(r.name)) seen.set(r.name, r); } };
+  const was = pane.scrollTop;
+  pane.scrollTop = 0;
+  await new Promise((r) => setTimeout(r, 250));
+  grab();
+  let before = -1;
+  for (let i = 0; i < 60 && seen.size !== before && seen.size < ${Number(cap) || 400}; i++) {
+    before = seen.size;
+    pane.scrollTop = pane.scrollTop + Math.max(300, pane.clientHeight - 100);
+    await new Promise((r) => setTimeout(r, 350));
+    grab();
+    if (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 5) { await new Promise((r) => setTimeout(r, 450)); grab(); break; }
+  }
+  pane.scrollTop = was;
+  return [...seen.values()];
+})()`;
+
 const ROWS = `(() => {
-  const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')].filter((r) => r.offsetParent !== null);
-  return rows.slice(0, 60).map((row) => {
-    const titled = [...row.querySelectorAll('span[title]')];
-    const name = (titled[0] && (titled[0].getAttribute('title') || titled[0].innerText) || '').trim();
-    const lines = (row.innerText || '').split('\\n').map((s) => s.trim()).filter(Boolean);
-    const unreadEl = row.querySelector('[aria-label*="unread" i]');
-    const badge = unreadEl ? (unreadEl.innerText || unreadEl.getAttribute('aria-label') || '').match(/\\d+/) : null;
-    const when = lines[1] || '';
-    const last = (titled[1] && (titled[1].getAttribute('title') || titled[1].innerText) || lines.slice(2).join(' ') || '').trim();
-    return { name, when, last: last.slice(0, 120), unread: badge ? Number(badge[0]) : (unreadEl ? 1 : 0) };
-  }).filter((r) => r.name);
+  ${ROW_READER}
+  const rows = visibleRows();
+  return rows.slice(0, 60).map(readRow).filter((r) => r.name);
 })()`;
 
 // The open conversation. data-pre-plain-text is WhatsApp's own "[time, date] Name:" stamp, which
@@ -85,9 +115,17 @@ const ROWS = `(() => {
 // .message-in / .message-out classes (checked live 2-Nov-2026: zero matches, while
 // [data-pre-plain-text] matched every message), it is now the anchor for finding messages at all.
 //
-// Direction comes from the bubble's tail icon, tail-in or tail-out. Runs of messages from the same
-// person only draw a tail on the first, so a message with no tail falls back to the delivery ticks,
-// which only ever appear on something he sent himself.
+// Direction takes three tries, because no single mark is on every message he sent (all measured
+// live 2-Nov-2026 against a 27-message conversation):
+//   - aria-label "You:" is on most of his rows, but not all of them;
+//   - a delivery state - "Read", "Delivered", "Sent", "Pending" - appears on his and only his,
+//     and covers the ones with no "You:" at all;
+//   - tail-out, and the msg-check ticks, catch what is left.
+// One message of the 27 had only the delivery state, so reading "You:" alone called it hers.
+//
+// A reply that QUOTES him carries his words inside her row, which is how the same sentence can
+// appear twice and the second copy be attributed to the wrong person. The quoted block announces
+// itself with aria-label "Quoted message", so it is lifted out before the text is read.
 const READ = (limit) => `(() => {
   ${CHAT_NAME_FN}
   const chat = CHAT_NAME();
@@ -97,13 +135,15 @@ const READ = (limit) => `(() => {
     const meta = stamp.getAttribute('data-pre-plain-text') || '';
     const m = meta.match(/^\\[([^,\\]]+)[^\\]]*\\]\\s*(.*?):\\s*$/);
     const icons = [...n.querySelectorAll('[data-icon]')].map((e) => e.getAttribute('data-icon') || '');
-    // Every row he sent carries aria-label "You:", whether or not it drew a tail (checked live
-    // 2-Nov-2026 against a conversation of 29 messages). The tail and the delivery ticks stay on
-    // as a fallback: they are right when they are there, just missing mid-run.
-    const labels = [...n.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label') || '');
-    const mine = labels.some((l) => /^you:/i.test(l.trim()))
+    const labels = [...n.querySelectorAll('[aria-label]')].map((e) => (e.getAttribute('aria-label') || '').trim());
+    const mine = labels.some((l) => /^you:/i.test(l))
+      || labels.some((l) => /^(read|delivered|sent|pending)$/i.test(l))
       || icons.some((i) => i === 'tail-out' || /^msg-(check|dblcheck|time)/.test(i));
-    const body = stamp.querySelector('.selectable-text') || n.querySelector('.selectable-text');
+    // Drop any quoted message first, so his words quoted back at him are not read as hers.
+    const quoted = [...n.querySelectorAll('[aria-label="Quoted message"]')];
+    const skip = (el) => quoted.some((q) => q.contains(el));
+    const bodies = [...n.querySelectorAll('.selectable-text')].filter((el) => !skip(el));
+    const body = bodies[bodies.length - 1] || null;
     let text = (body ? body.innerText : n.innerText || '').trim();
     if (!text) {
       const kind = icons.find((i) => i && !/^tail-/.test(i) && !/^msg-/.test(i));
@@ -140,45 +180,19 @@ const SEND_IT = `(() => {
   return 'enter';
 })()`;
 
-// WhatsApp's chat-list search is a real <input aria-label="Search or start a new chat"> now, NOT a
-// contenteditable div (checked live 2-Nov-2026). Looking for the old div found nothing, so every
-// search silently searched the unfiltered list - which is why a control search for a chat that was
-// plainly visible came back empty. An <input> React owns only believes the native value setter
-// followed by an 'input' event; assigning .value does nothing.
+// WHATSAPP'S OWN SEARCH CANNOT BE DRIVEN FROM A SCRIPT. The box is easy to find - it is a real
+// <input aria-label="Search or start a new chat"> now, not the old contenteditable div - and the
+// text goes in: box.value reads back what was typed and the box has focus. WhatsApp still never
+// filters. Measured on the live page 2-Nov-2026: fourteen different terms each left the list at
+// all 26 rows, unfiltered and identical. Three ways of typing were tried and all three failed -
+// the native value setter followed by an 'input' event, a per-character run of keydown,
+// beforeinput, input and keyup with InputEvent and inputType, and execCommand('insertText') on
+// the focused input.
 //
-// The box also vanishes for a moment while a chat opens, so it is waited for rather than assumed.
-const FIND_SEARCH = `
-  const findBox = () => document.querySelector('input[aria-label*="Search" i], #side input[type="text"]')
-    || document.querySelector('#side div[contenteditable="true"]');
-  const typeIn = (box, text) => {
-    box.focus();
-    if (box.tagName === 'INPUT') {
-      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      set.call(box, text);
-      box.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-    document.execCommand('selectAll', false, null);
-    if (text) document.execCommand('insertText', false, text);
-    else document.execCommand('delete', false, null);
-  };
-`;
-
-const SEARCH = (q) => `(async () => {
-  ${FIND_SEARCH}
-  let box = null;
-  for (let i = 0; i < 20 && !box; i++) { box = findBox(); if (!box) await new Promise((r) => setTimeout(r, 250)); }
-  if (!box) return 'no-box';
-  typeIn(box, ${JSON.stringify(q)});
-  return 'ok';
-})()`;
-
-const CLEAR_SEARCH = `(() => {
-  ${FIND_SEARCH}
-  const box = findBox();
-  if (box) { typeIn(box, ''); box.blur(); }
-  return 'ok';
-})()`;
+// This mattered more than a missing selector, because a search that quietly returns everything
+// cannot be caught by a control search: the control passes too, and the answer looks right. So
+// nothing here asks WhatsApp to search any more. Cue walks its own chat list and filters it
+// itself - see WALK_ROWS - and the box is left alone.
 
 // Click the row for a chat. Matching is exact first, then "starts with", then "contains", so
 // "Jatin" never lands on "Jatin's Parents" while an exact match exists.
@@ -297,27 +311,24 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
 
     let hit = await js(wc, CLICK_ROW(want));
     if (!hit.found) {
-      // Not on screen: ask WhatsApp's own search, which also finds chats far down the list.
-      if ((await js(wc, SEARCH(want))) !== 'ok') throw new Error('WhatsApp\'s search box is not there. The page may still be loading.');
-      const end = Date.now() + 6000;
-      while (Date.now() < end) { await sleep(300); hit = await js(wc, CLICK_ROW(want)); if (hit.found) break; }
+      // Not among the rows WhatsApp has drawn. Walking the list scrolls the rest into existence,
+      // which is the only way left to reach a chat far down it now that search is a dead end.
+      await js(wc, WALK_ROWS(400));
+      hit = await js(wc, CLICK_ROW(want));
     }
     if (!hit.found) {
-      // Say what IS there. After a search that found nothing the list is empty, so put it back
-      // before looking, or the message would helpfully offer no names at all.
-      await js(wc, CLEAR_SEARCH);
-      await sleep(500);
-      const near = (await js(wc, ROWS)).slice(0, 5).map((r) => r.name);
-      throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp.${near.length ? ` Nearest: ${near.join(', ')}.` : ''}`);
+      // Say what IS there, by name, so the mistake is obvious: a typo, or the wrong account.
+      const all = await js(wc, WALK_ROWS(400));
+      const near = all.map((r) => r.name).filter((n) => sameChat(n, want)).slice(0, 5);
+      const some = (near.length ? near : all.slice(0, 5).map((r) => r.name));
+      throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp, among ${all.length} chat${all.length === 1 ? '' : 's'}.${some.length ? ` Nearest: ${some.join(', ')}.` : ''}`);
     }
     // The click already waited for the header and reported what actually opened. Trust that, and
     // insist on the whole name: matching the first twelve characters would accept "Satish Rao" for
     // "Satish Kumar", and reading, or writing, in the wrong chat is the one failure that matters.
     if (hit.mismatch) {
-      await js(wc, CLEAR_SEARCH);
       throw new Error(`Cue clicked “${hit.name}” but WhatsApp opened “${hit.opened || 'nothing'}” instead. Nothing was read or sent.`);
     }
-    await js(wc, CLEAR_SEARCH);
     return hit.opened || hit.name;
   }
 
@@ -325,7 +336,8 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
   const actions = {
     async chats({ identity, unreadOnly, limit }) {
       const { wc } = await ready(identity);
-      let rows = await js(wc, ROWS);
+      let rows = await js(wc, WALK_ROWS(400));
+      if (!rows.length) rows = await js(wc, ROWS);
       if (unreadOnly) rows = rows.filter((r) => r.unread > 0);
       rows = rows.slice(0, Math.min(Number(limit) || 15, 60));
       if (!rows.length) return { text: unreadOnly ? `${label(identity)}: nothing unread.` : `${label(identity)}: no chats on screen yet.` };
@@ -366,16 +378,23 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
       throw new Error(`Cue typed the message to ${name} but could not see it sent. Look at the WhatsApp tab in ${identity === 'personal' ? 'Personal' : 'School'} before sending it again.`);
     },
 
+    // Cue's own search over Cue's own list. It looks at every chat's NAME and the one line of
+    // last message the list shows - not the whole conversation, which only WhatsApp's own search
+    // could reach and which cannot be driven from a script. That limit is said out loud in the
+    // answer, because a search that quietly looks at less than you think is the whole reason this
+    // was rewritten.
     async search({ identity, query }) {
       const { wc } = await ready(identity);
       const q = String(query || '').trim();
       if (!q) throw new Error('Say what to look for.');
-      if ((await js(wc, SEARCH(q))) !== 'ok') throw new Error('WhatsApp\'s search box is not there yet.');
-      await sleep(900);
-      const rows = await js(wc, ROWS);
-      await js(wc, CLEAR_SEARCH);
-      if (!rows.length) return { text: `${label(identity)}: nothing matches “${q}”.` };
-      return { text: `${label(identity)} · matches for “${q}”\n${rows.slice(0, 10).map((r) => r.name).join('\n')}` };
+      const all = await js(wc, WALK_ROWS(400));
+      if (!all.length) return { text: `${label(identity)}: no chats to look through yet.` };
+      const needle = plainName(q);
+      const hits = all.filter((r) => plainName(r.name).includes(needle) || plainName(r.last).includes(needle));
+      const scope = `Looked at ${all.length} chat${all.length === 1 ? '' : 's'} by name and last message only, not inside the conversations.`;
+      if (!hits.length) return { text: `${label(identity)}: nothing matches “${q}”. ${scope}` };
+      const lines = hits.slice(0, 15).map((r) => `${r.unread ? `(${r.unread}) ` : ''}${r.name}${r.last ? ` · ${r.last}` : ''}`);
+      return { text: `${label(identity)} · ${hits.length} match${hits.length === 1 ? '' : 'es'} for “${q}”\n${lines.join('\n')}\n${scope}` };
     },
 
     // Only for the one-time link, and when something looks wrong: this is the single action
