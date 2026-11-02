@@ -1,7 +1,7 @@
 // WhatsApp test: CUE_TEST=whatsapp CUE_USER_DATA=<tmp> electron .
 //
 // WhatsApp Web cannot be logged into by a test, so this drives the real code against a stand-in
-// page that copies the markup the code actually reaches for: #pane-side with role=listitem rows,
+// page that copies the markup the code actually reaches for: #pane-side with chat rows,
 // span[title] names, unread badges, #main with data-pre-plain-text stamps, the two contenteditable
 // boxes. If WhatsApp ever changes those, this test keeps passing and the live thing breaks — so
 // the checks that matter here are the ones about behaviour: the right account, the right chat,
@@ -26,8 +26,11 @@ const CHATS = {
 };
 
 function page(which) {
+  // WhatsApp shipped role=row in place of role=listitem (2-Nov-2026). The two accounts serve
+  // one shape each, so a selector that only knows one of them fails this suite.
+  const role = which === 'school' ? 'row' : 'listitem';
   const rows = CHATS[which].map((c) => `
-    <div role="listitem"><div role="gridcell" style="height:56px">
+    <div role="${role}"><div role="gridcell" style="height:56px">
       <span title="${c.name}">${c.name}</span>
       <div>${c.when}</div>
       <span title="${c.last}">${c.last}</span>
@@ -56,7 +59,7 @@ function page(which) {
         '<span class="selectable-text">' + m.text + '</span></div>').join('');
     }
     document.getElementById('pane-side').addEventListener('click', (e) => {
-      const row = e.target.closest('[role=listitem]');
+      const row = e.target.closest('[role=listitem], [role=row]');
       if (row) draw(row.querySelector('span[title]').getAttribute('title'));
     });
     // The compose box behaves like WhatsApp's: Enter sends what is in it, and only then does
@@ -75,7 +78,7 @@ function page(which) {
     // Searching narrows the list, as WhatsApp's does.
     document.getElementById('search').addEventListener('input', (e) => {
       const q = (e.currentTarget.innerText || '').trim().toLowerCase();
-      for (const row of document.querySelectorAll('#pane-side [role=listitem]')) {
+      for (const row of document.querySelectorAll('#pane-side [role=listitem], #pane-side [role=row]')) {
         const n = row.querySelector('span[title]').getAttribute('title').toLowerCase();
         row.style.display = !q || n.includes(q) ? '' : 'none';
       }

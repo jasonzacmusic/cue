@@ -51,8 +51,10 @@ const FIRE = `const fire = (el) => {
 
 // One row of the chat list. The name carries a title attribute, which survives WhatsApp's
 // redesigns; everything else is read off the row's own text, bottom to top.
+// WhatsApp renamed the chat rows from role=listitem to role=row (seen 2-Nov-2026). Both are
+// listed so the code keeps working whichever markup the page ships that week.
 const ROWS = `(() => {
-  const rows = [...document.querySelectorAll('#pane-side [role="listitem"]')].filter((r) => r.offsetParent !== null);
+  const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')].filter((r) => r.offsetParent !== null);
   return rows.slice(0, 60).map((row) => {
     const titled = [...row.querySelectorAll('span[title]')];
     const name = (titled[0] && (titled[0].getAttribute('title') || titled[0].innerText) || '').trim();
@@ -136,7 +138,7 @@ const CLEAR_SEARCH = `(() => {
 const CLICK_ROW = (name) => `(() => {
   ${FIRE}
   const want = ${JSON.stringify(String(name).trim().toLowerCase())};
-  const rows = [...document.querySelectorAll('#pane-side [role="listitem"]')]
+  const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
     .filter((r) => r.offsetParent !== null);
   const named = rows.map((row) => {
     const t = row.querySelector('span[title]');

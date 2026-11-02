@@ -79,6 +79,13 @@ browser per phone, so there is no second session to make — these tabs are it.
 - Clicks are dispatched in the page, never aimed at x,y: these tabs live in the background with
   no geometry, and a mouse sent at a tab nobody can see hits nothing.
 
+## WhatsApp markup moves under us
+WhatsApp renamed its chat rows from `role="listitem"` to `role="row"` (seen live 2-Nov-2026, which
+is what 0.6.2 fixes). Anything that walks the chat list lists BOTH roles. The test serves one
+account in each shape on purpose, so a selector that only knows one of them fails the suite.
+The anchors that have held so far: `#pane-side`, `span[title]`, `data-pre-plain-text`,
+`.message-in` / `.message-out`, `.selectable-text`, and the two `div[contenteditable="true"]`.
+
 ## The AI door
 
 It is remembered now, not reset at every launch (`settings().aiDoor`), because an agent
