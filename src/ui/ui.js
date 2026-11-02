@@ -1122,7 +1122,14 @@ function openSettings() {
     const carry = el('div', 'row');
     for (const k of ['personal', 'school']) {
       const b = el('button', 'btn', `Bring sign-ins into ${S.identities[k].name}`);
-      b.onclick = () => { b.disabled = true; b.textContent = 'Bringing them over\u2026'; send('signin.carry-all', { identity: k }); };
+      // It says what it is doing, then goes back to being a button. Left
+      // disabled, it reads as though the carry is still running forever.
+      b.onclick = () => {
+        const was = b.textContent;
+        b.disabled = true; b.textContent = 'Bringing them over\u2026';
+        send('signin.carry-all', { identity: k });
+        setTimeout(() => { b.disabled = false; b.textContent = was; }, 6000);
+      };
       carry.append(b);
     }
     sh.append(carry);
