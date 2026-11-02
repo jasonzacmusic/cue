@@ -29,6 +29,16 @@ function whoOf(name) {
 }
 const label = (identity) => (identity === 'personal' ? 'Jason' : 'Nathaniel');
 
+// The same normalising the page scripts do, for the comparisons that happen out here: WhatsApp's
+// header text drops emoji, so "Manoj 💼 Crio Recruitment" and "Manoj  Crio Recruitment" are one
+// chat spelled two ways.
+const plainName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const sameChat = (a, b) => {
+  const x = plainName(a), y = plainName(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(y) || y.startsWith(x);
+};
+
 // ---------------------------------------------------------------- page scripts
 // All of these run inside the WhatsApp tab. They return plain data, never HTML.
 
@@ -42,8 +52,11 @@ const LINKED = `(() => {
 })()`;
 
 const FIRE = `const fire = (el) => {
-  const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0 };
-  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+  // detail:1 says "one real click", and the hover pair comes first because a chat row only arms
+  // its handler once the pointer is over it: on 2-Nov-2026 a plain .click(), and a focus followed
+  // by Enter, both left the chat closed, while this sequence opened it.
+  const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, detail: 1 };
+  for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
     const E = type.startsWith('pointer') && window.PointerEvent ? PointerEvent : MouseEvent;
     el.dispatchEvent(new E(type, o));
   }
@@ -68,22 +81,35 @@ const ROWS = `(() => {
 })()`;
 
 // The open conversation. data-pre-plain-text is WhatsApp's own "[time, date] Name:" stamp, which
-// is the cheapest honest source for who said what and when.
+// is the cheapest honest source for who said what and when - and, since WhatsApp dropped the
+// .message-in / .message-out classes (checked live 2-Nov-2026: zero matches, while
+// [data-pre-plain-text] matched every message), it is now the anchor for finding messages at all.
+//
+// Direction comes from the bubble's tail icon, tail-in or tail-out. Runs of messages from the same
+// person only draw a tail on the first, so a message with no tail falls back to the delivery ticks,
+// which only ever appear on something he sent himself.
 const READ = (limit) => `(() => {
-  const head = document.querySelector('#main header span[title]');
-  const chat = head ? (head.getAttribute('title') || head.innerText || '').trim() : '';
-  const nodes = [...document.querySelectorAll('#main .message-in, #main .message-out')].slice(-${Number(limit) || 20});
-  const out = nodes.map((n) => {
-    const stamp = n.querySelector('[data-pre-plain-text]');
-    const meta = stamp ? stamp.getAttribute('data-pre-plain-text') : '';
+  ${CHAT_NAME_FN}
+  const chat = CHAT_NAME();
+  const stamps = [...document.querySelectorAll('#main [data-pre-plain-text]')].slice(-${Number(limit) || 20});
+  const out = stamps.map((stamp) => {
+    const n = stamp.closest('[role="row"]') || stamp.parentElement || stamp;
+    const meta = stamp.getAttribute('data-pre-plain-text') || '';
     const m = meta.match(/^\\[([^,\\]]+)[^\\]]*\\]\\s*(.*?):\\s*$/);
-    const body = n.querySelector('.selectable-text');
+    const icons = [...n.querySelectorAll('[data-icon]')].map((e) => e.getAttribute('data-icon') || '');
+    // Every row he sent carries aria-label "You:", whether or not it drew a tail (checked live
+    // 2-Nov-2026 against a conversation of 29 messages). The tail and the delivery ticks stay on
+    // as a fallback: they are right when they are there, just missing mid-run.
+    const labels = [...n.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label') || '');
+    const mine = labels.some((l) => /^you:/i.test(l.trim()))
+      || icons.some((i) => i === 'tail-out' || /^msg-(check|dblcheck|time)/.test(i));
+    const body = stamp.querySelector('.selectable-text') || n.querySelector('.selectable-text');
     let text = (body ? body.innerText : n.innerText || '').trim();
     if (!text) {
-      const kind = n.querySelector('[data-icon]');
-      text = kind ? '(' + kind.getAttribute('data-icon').replace(/-/g, ' ') + ')' : '(no text)';
+      const kind = icons.find((i) => i && !/^tail-/.test(i) && !/^msg-/.test(i));
+      text = kind ? '(' + kind.replace(/-/g, ' ') + ')' : '(no text)';
     }
-    return { out: n.classList.contains('message-out'), when: m ? m[1] : '', who: m ? m[2] : '', text: text.replace(/\\s+/g, ' ').slice(0, 400) };
+    return { out: mine, when: m ? m[1] : '', who: m ? m[2] : '', text: text.replace(/\\s+/g, ' ').slice(0, 400) };
   });
   return { chat, messages: out };
 })()`;
@@ -114,18 +140,43 @@ const SEND_IT = `(() => {
   return 'enter';
 })()`;
 
-const SEARCH = (q) => `(() => {
-  const box = document.querySelector('#side div[contenteditable="true"]');
+// WhatsApp's chat-list search is a real <input aria-label="Search or start a new chat"> now, NOT a
+// contenteditable div (checked live 2-Nov-2026). Looking for the old div found nothing, so every
+// search silently searched the unfiltered list - which is why a control search for a chat that was
+// plainly visible came back empty. An <input> React owns only believes the native value setter
+// followed by an 'input' event; assigning .value does nothing.
+//
+// The box also vanishes for a moment while a chat opens, so it is waited for rather than assumed.
+const FIND_SEARCH = `
+  const findBox = () => document.querySelector('input[aria-label*="Search" i], #side input[type="text"]')
+    || document.querySelector('#side div[contenteditable="true"]');
+  const typeIn = (box, text) => {
+    box.focus();
+    if (box.tagName === 'INPUT') {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      set.call(box, text);
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    document.execCommand('selectAll', false, null);
+    if (text) document.execCommand('insertText', false, text);
+    else document.execCommand('delete', false, null);
+  };
+`;
+
+const SEARCH = (q) => `(async () => {
+  ${FIND_SEARCH}
+  let box = null;
+  for (let i = 0; i < 20 && !box; i++) { box = findBox(); if (!box) await new Promise((r) => setTimeout(r, 250)); }
   if (!box) return 'no-box';
-  box.focus();
-  document.execCommand('selectAll', false, null);
-  document.execCommand('insertText', false, ${JSON.stringify(q)});
+  typeIn(box, ${JSON.stringify(q)});
   return 'ok';
 })()`;
 
 const CLEAR_SEARCH = `(() => {
-  const box = document.querySelector('#side div[contenteditable="true"]');
-  if (box) { box.focus(); document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); box.blur(); }
+  ${FIND_SEARCH}
+  const box = findBox();
+  if (box) { typeIn(box, ''); box.blur(); }
   return 'ok';
 })()`;
 
@@ -135,8 +186,10 @@ const CLEAR_SEARCH = `(() => {
 // The click is dispatched in the page, not sent as a mouse event at x,y: these tabs sit in the
 // background with no geometry on screen, and a pointer aimed at a tab nobody can see hits
 // nothing. A full pointer-and-mouse sequence is what React listens for.
-const CLICK_ROW = (name) => `(() => {
+const CLICK_ROW = (name) => `(async () => {
   ${FIRE}
+  ${SAME_NAME_FN}
+  ${CHAT_NAME_FN}
   const want = ${JSON.stringify(String(name).trim().toLowerCase())};
   const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
     .filter((r) => r.offsetParent !== null);
@@ -149,15 +202,58 @@ const CLICK_ROW = (name) => `(() => {
     || named.find((r) => low(r.name).startsWith(want))
     || named.find((r) => low(r.name).includes(want));
   if (!hit) return { found: false, offered: named.slice(0, 8).map((r) => r.name) };
-  const el = hit.row.querySelector('[role="gridcell"]') || hit.row;
+  // The row's gridcell ignores a click; the div that carries the name takes it (measured on the
+  // live page 2-Nov-2026). The gridcell, then the row itself, stay behind it as fallbacks.
+  const titled = hit.row.querySelector('span[title]');
+  const el = (titled && titled.closest('div')) || hit.row.querySelector('[role="gridcell"]') || hit.row;
   el.scrollIntoView({ block: 'center' });
   fire(el);
-  return { found: true, name: hit.name };
+  // Then CONFIRM, because a click on the chat list is not a promise. On 2-Nov-2026 a click aimed
+  // at a Satish row opened a large broadcast list instead: the list had re-rendered under it. The
+  // header is the only honest answer to "which chat am I in", so it is read back, and a mismatch
+  // is reported rather than passed off as success - reading, or worse writing, in the wrong chat.
+  const opened = await (async () => {
+    for (let i = 0; i < 24; i++) {
+      const n = CHAT_NAME();
+      if (n && sameName(n, hit.name)) return n;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return CHAT_NAME();
+  })();
+  if (!sameName(opened, hit.name)) return { found: true, name: hit.name, opened, mismatch: true };
+  return { found: true, name: hit.name, opened };
 })()`;
 
+// Which conversation is open. WhatsApp took the title attribute off the conversation header
+// (checked live 2-Nov-2026: zero span[title] in #main header, while the name was plainly the
+// header's first line of text). On a group the old selector was worse than useless - it answered
+// with the entire member list, hundreds of numbers long. The first line of the header is what a
+// person reads as the name, so that is what this reads, with the old selector kept behind it.
+// Comparing two spellings of the same chat. innerText drops emoji, so the row's
+// "Manoj (briefcase) Crio Recruitment" reaches the header as "Manoj  Crio Recruitment" with a gap
+// where the emoji was - which is why comparing a prefix of one against the other failed on every
+// chat with an emoji in its name (checked live 2-Nov-2026). Keep letters, digits and single
+// spaces, drop everything else, and the two spellings meet.
+const SAME_NAME_FN = `const plain = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\\s+/g, ' ').trim();
+const sameName = (a, b) => {
+  const x = plain(a), y = plain(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(y) || y.startsWith(x);
+};`;
+
+const CHAT_NAME_FN = `const CHAT_NAME = () => {
+  const h = document.querySelector('#main header');
+  if (!h) return '';
+  const titled = h.querySelector('span[title]');
+  const t = titled ? (titled.getAttribute('title') || '').trim() : '';
+  // A member list, not a name: commas and a pile of numbers.
+  if (t && !(t.split(',').length > 3)) return t;
+  return ((h.innerText || '').split('\\n')[0] || '').trim();
+};`;
+
 const OPEN_CHAT_NAME = `(() => {
-  const h = document.querySelector('#main header span[title]');
-  return h ? (h.getAttribute('title') || h.innerText || '').trim() : '';
+  ${CHAT_NAME_FN}
+  return CHAT_NAME();
 })()`;
 
 // ---------------------------------------------------------------- the engine
@@ -197,7 +293,7 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
     const want = String(name || '').trim();
     if (!want) throw new Error('Name the chat to open.');
     const already = await js(wc, OPEN_CHAT_NAME);
-    if (already && already.toLowerCase() === want.toLowerCase()) return already;
+    if (sameChat(already, want)) return already;
 
     let hit = await js(wc, CLICK_ROW(want));
     if (!hit.found) {
@@ -214,14 +310,15 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
       const near = (await js(wc, ROWS)).slice(0, 5).map((r) => r.name);
       throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp.${near.length ? ` Nearest: ${near.join(', ')}.` : ''}`);
     }
-    const end = Date.now() + 8000;
-    while (Date.now() < end) {
-      const open = await js(wc, OPEN_CHAT_NAME);
-      if (open && open.toLowerCase().includes(hit.name.toLowerCase().slice(0, 12))) { await js(wc, CLEAR_SEARCH); return open; }
-      await sleep(250);
+    // The click already waited for the header and reported what actually opened. Trust that, and
+    // insist on the whole name: matching the first twelve characters would accept "Satish Rao" for
+    // "Satish Kumar", and reading, or writing, in the wrong chat is the one failure that matters.
+    if (hit.mismatch) {
+      await js(wc, CLEAR_SEARCH);
+      throw new Error(`Cue clicked “${hit.name}” but WhatsApp opened “${hit.opened || 'nothing'}” instead. Nothing was read or sent.`);
     }
     await js(wc, CLEAR_SEARCH);
-    throw new Error(`Cue clicked “${hit.name}” but WhatsApp did not open it.`);
+    return hit.opened || hit.name;
   }
 
   // ---- the five things anyone actually wants
