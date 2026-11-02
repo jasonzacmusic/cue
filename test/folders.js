@@ -166,13 +166,28 @@ module.exports = async (c) => {
   const gTab = c.openTab({ url: 'https://example.com/', identity: 'school' }); await sleep(400);
   c.activate(gTab.id); await sleep(150);
   c.command('navigate', { text: 'https://mail.google.com/' }); await sleep(600);
-  check('gmail: the school folder opens the school mailbox',
-    (c.byId(gTab.id) || {}).url.includes('music%40nathanielschool.com')
-    || (c.byId(gTab.id) || {}).url.includes('music@nathanielschool.com'),
+  check('gmail: the school folder asks for the school mailbox by name',
+    /authuser=music(%40|@)nathanielschool\.com/.test((c.byId(gTab.id) || {}).url),
     (c.byId(gTab.id) || {}).url);
   c.command('navigate', { text: 'https://mail.google.com/mail/u/2/' }); await sleep(400);
   check('gmail: a mailbox he named himself is left alone',
-    (c.byId(gTab.id) || {}).url.includes('/mail/u/2/'), (c.byId(gTab.id) || {}).url);
+    (c.byId(gTab.id) || {}).url.includes('/mail/u/2/')
+    && !/authuser/.test((c.byId(gTab.id) || {}).url), (c.byId(gTab.id) || {}).url);
+  // YouTube is the same account question, and the school's channel lives on the
+  // school's login.
+  c.command('navigate', { text: 'https://www.youtube.com/' }); await sleep(400);
+  check('youtube: the school folder asks for the school account',
+    /authuser=music(%40|@)nathanielschool\.com/.test((c.byId(gTab.id) || {}).url),
+    (c.byId(gTab.id) || {}).url);
+  // and nothing else on the web gets an address stapled to it
+  c.command('navigate', { text: 'https://example.com/plain' }); await sleep(300);
+  check('nothing else is touched', !/authuser/.test((c.byId(gTab.id) || {}).url),
+    (c.byId(gTab.id) || {}).url);
+  // an agent opening Gmail lands in the same place he would
+  const aTab = c.agentApi.open({ url: 'https://mail.google.com/', identity: 'school' });
+  await sleep(300);
+  check('gmail: an agent opens the folder\'s mailbox too',
+    /authuser=music(%40|@)nathanielschool\.com/.test(aTab.url || ''), aTab.url);
 
   // ---- bringing the sign-ins over from Chrome
   // The tests run on a mock keychain, so nothing real can be decrypted here.

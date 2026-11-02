@@ -104,9 +104,12 @@ sites on Meta's sites, scoped with `$domain=` so the pixel on someone else's pag
 
 ## Gmail when one Chrome profile holds both accounts
 His Chrome keeps BOTH Google accounts signed in to one profile, so carrying the sign-in over brings
-both. `googleForFolder()` pins each folder's Gmail to its own address with `/mail/u/<address>/`,
-or School opens Personal's inbox and the folders stop meaning anything. A mailbox he names himself
-is left alone.
+both, and `/mail/u/0/` is then whichever one Google feels like. `googleForFolder()` adds
+`?authuser=<address>` — Google's own parameter, and it works for Gmail, Calendar, Drive and YouTube
+alike. **The address does not go in the path**: `/mail/u/<address>/` answers `Temporary Error (404)`,
+which is the trap I fell into first. A mailbox he names himself, or an existing `authuser`, is left
+alone, and nothing outside Google's own hosts is touched. Applied in `navigate`, in `openApp` and in
+`agentApi.open`, because all three open pages.
 
 ## WhatsApp markup moves under us
 WhatsApp renamed its chat rows from `role="listitem"` to `role="row"` (seen live 2-Nov-2026, which

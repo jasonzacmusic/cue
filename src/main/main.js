@@ -703,21 +703,25 @@ async function carryAllFromChrome(identity) {
 }
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
-// carried over arrives holding both. Google's own answer to that is the account
-// in the path: /mail/u/<address>/ opens that mailbox whoever else is signed in.
-// Without it, School opened Personal's inbox and the folders stopped meaning
-// anything. An identity with no address on it is left exactly as it was.
+// carried over arrives holding both, and /mail/u/0/ is then simply whichever one
+// Google answers with — School opened Personal's inbox and the folders stopped
+// meaning anything. ?authuser=<address> is Google's own answer to that, and it
+// works across Gmail, Calendar, Drive and YouTube alike. Note that the address
+// does NOT go in the path: /mail/u/<address>/ answers 404.
+const GOOGLE_PER_ACCOUNT = /^(mail|calendar|drive|docs|contacts|photos|keep|groups)\.google\.[a-z.]+$|^(www|studio|music)\.youtube\.[a-z.]+$/i;
 function googleForFolder(url, identity) {
   const who = String(settings().identityLabels[identity] || '').trim();
   if (!who || !/@/.test(who)) return url;
   try {
     const u = new URL(url);
-    if (!/^mail\.google\.[a-z.]+$/i.test(u.hostname)) return url;
-    if (/^\/mail\/u\/[^/]+/.test(u.pathname)) return url; // he already named one
-    u.pathname = `/mail/u/${encodeURIComponent(who)}${u.pathname === '/' ? '/' : u.pathname}`;
+    if (!GOOGLE_PER_ACCOUNT.test(u.hostname)) return url;
+    if (u.searchParams.has('authuser')) return url;        // he named one himself
+    if (/^\/mail\/u\/\d+\//.test(u.pathname)) return url;  // so did this
+    u.searchParams.set('authuser', who);
     return u.toString();
   } catch { return url; }
 }
+
 
 // For a site that will not let you sign in inside Cue - Google is the one that always refuses -
 // this carries the sign-in you already have in Chrome across to the tab you are looking at.
@@ -2399,7 +2403,7 @@ const agentApi = {
         return reuse;
       }
     }
-    return openTab({ url: target, identity: who, background, agent: true });
+    return openTab({ url: googleForFolder(target, who), identity: who, background, agent: true });
   },
   safeUrl: (url) => {
     const target = resolveInput(url);
