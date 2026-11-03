@@ -528,6 +528,7 @@ function folderForNewTab(space) {
 function followFolder(t) {
   if (!t || !isFolder(t.identity) || store.data.folder === t.identity) return;
   store.data.folder = t.identity;
+  buildMenu(); // the nine belong to the folder, so the accelerators move with it
 }
 // The pinned strip holds the same handful of apps in every folder, so clicking
 // one means "this app, as whoever I am right now": his own WhatsApp in Personal,
@@ -551,6 +552,8 @@ function setFolder(name) {
   const leaving = byId(activeId);
   const site = leaving && !leaving.url.startsWith('cue://') ? hostOf(leaving.url) : '';
   store.data.folder = name;
+  buildMenu(); // this folder's own nine
+
   // Land on something that is actually in this folder, in this Space, so the
   // page in front of you matches the folder you just opened.
   const here = spaceOrder().filter((t) => t.identity === name && t.id !== programId);
@@ -620,12 +623,155 @@ function secureVersion(url) {
 // fail the same way over http, so dropping the padlock would gain nothing.
 const NO_SECURE_DOOR = new Set([-100, -101, -102, -107, -113, -118, -200, -201, -202, -207, -324]);
 
+// ---------------------------------------------------------------- what a tab is called
+// Page titles are written for search engines, not for a sidebar. His own history is full of
+// "(20+) Facebook", "(1) WhatsApp Business", "Inbox (1) - music@nathanielschool.com - Nathaniel
+// School of Music Mail" and "Pitara: piano, tuner, metronome, tanpura and music theory on one desk
+// | Nathaniel School of Music". The unread count belongs in the badge Cue already draws, and the
+// rest is noise. These are the sites his history actually shows him using.
+const SITE_NAMES = [
+  [/^web\.whatsapp\.com$/i, 'WhatsApp'],
+  [/^mail\.google\.com$/i, 'Gmail'],
+  [/^calendar\.google\.com$/i, 'Calendar'],
+  [/^drive\.google\.com$/i, 'Drive'],
+  [/^docs\.google\.com$/i, 'Docs'],
+  [/^accounts\.google\.com$/i, 'Google sign-in'],
+  [/^workspace\.google\.com$/i, 'Google Workspace'],
+  [/^(www\.)?google\.[a-z.]+$/i, 'Google'],
+  [/^studio\.youtube\.com$/i, 'YouTube Studio'],
+  [/^(www|m)?\.?youtube\.com$/i, 'YouTube'],
+  [/(^|\.)instagram\.com$/i, 'Instagram'],
+  [/(^|\.)facebook\.com$/i, 'Facebook'],
+  [/(^|\.)threads\.net$/i, 'Threads'],
+  [/(^|\.)linkedin\.com$/i, 'LinkedIn'],
+  [/(^|\.)pinterest\.[a-z.]+$/i, 'Pinterest'],
+  [/(^|\.)github\.com$/i, 'GitHub'],
+  [/(^|\.)claude\.ai$/i, 'Claude'],
+  [/(^|\.)chatgpt\.com$/i, 'ChatGPT'],
+  [/(^|\.)(espncricinfo|cricinfo)\.com$/i, 'ESPNcricinfo'],
+  [/^learning-portal\.nathanielschool\.com$/i, 'Learning Portal'],
+  [/^students\.nathanielschool\.com$/i, 'Students'],
+  [/^leads\.nathanielschool\.com$/i, 'Leads'],
+  [/^labs\.nathanielschool\.com$/i, 'Nathaniel Labs'],
+];
+
+// Sites whose own logo is missing or poor. pitara.nathanielschool.com answers 404 for
+// /favicon.ico, so without this the tab falls back to a bare letter.
+// Most specific first: the generic NSM mark must not answer for the Learning Portal.
+const SITE_LOGOS = [
+  [/^learning-portal\.nathanielschool\.com$/i, 'learning-portal.png'],
+  [/^chord-trees\.nathanielschool\.com$/i, 'chord-trees.svg'],
+  [/^mail\.google\.com$/i, 'gmail.png'],
+  [/^studio\.youtube\.com$/i, 'youtube-studio.png'],
+  [/(^|\.)youtube\.com$/i, 'youtube.png'],
+  [/(^|\.)instagram\.com$/i, 'instagram.png'],
+  [/(^|\.)pinterest\.[a-z.]+$/i, 'pinterest.png'],
+  [/(^|\.)github\.com$/i, 'github.svg'],
+  [/(^|\.)claude\.ai$/i, 'claude.png'],
+  [/(^|\.)chatgpt\.com$/i, 'chatgpt.png'],
+  [/(^|\.)nathanielschool\.com$/i, 'nsm-apps.png'],
+];
+
+const pick = (table, host) => { for (const [re, v] of table) if (re.test(host)) return v; return null; };
+
+// An NSM app is called by its own name, from the one list Cue already keeps, so a tab says
+// "Pitara" rather than that app's whole sales sentence.
+const nsmAppName = (host) => {
+  const hit = NSM_APPS.find((a) => { try { return new URL(a.url).hostname.toLowerCase() === host; } catch { return false; } });
+  if (!hit) return null;
+  return String(hit.name).split(/\s+[\u2014\u2013(]/)[0].trim(); // "Lipi \u2014 Notation Studio" -> "Lipi"
+};
+
+// Strips what a page title adds for search engines: the leading unread count the badge already
+// shows, the site's own name tacked on after a separator, and the sales sentence after a colon
+// ("Pitara: piano, tuner, metronome, tanpura and music theory on one desk" -> "Pitara").
+const TITLE_TAIL = /\s+[|\u00b7\u2022\u2013\u2014]\s+|\s+-\s+/;
+function tidyTitle(title) {
+  let t = String(title || '').replace(/^\s*\(\d+\+?\)\s*/, '').trim();
+  t = t.replace(/\s*[|\u00b7\u2013\u2014-]\s*Nathaniel School of Music\s*$/i, '').trim();
+  const head = t.split(TITLE_TAIL)[0].trim();
+  if (head.length >= 3) t = head;
+  const colon = t.match(/^([^:]{2,28}):\s+\S/);
+  if (colon) t = colon[1].trim();
+  return t;
+}
+
+// What the sidebar should call this tab. A name he typed himself always wins.
+// Named tabName, not siteName: there is already a siteName(url) further down that answers a bare
+// host for the "you are leaving a protected site" notice, and two functions of one name meant the
+// later one won and every tab in the sidebar came out blank.
+function tabName(t) {
+  if (t.name) return t.name;
+  const host = String(hostOf(t.url) || '').toLowerCase().replace(/^www\./, '');
+  if (!host) return tidyTitle(t.title) || 'New tab';
+  // What HE calls it comes before what the app list calls it: the app list says "Classroom LMS
+  // (Learning Portal)", and he says Learning Portal. The app list is next, so an NSM app is named
+  // by its own name rather than by the school.
+  return pick(SITE_NAMES, host) || nsmAppName(host) || tidyTitle(t.title)
+    || (/(^|\.)nathanielschool\.com$/i.test(host) ? 'Nathaniel School of Music' : host);
+}
+
+// A logo Cue ships, used only when the site's own favicon does not arrive - several NSM apps
+// answer 404 for /favicon.ico, and a bare letter is not a logo.
+const siteLogo = (t) => {
+  const host = String(hostOf(t.url) || '').toLowerCase();
+  if (!host || t.identity === 'vanish') return null;
+  return pick(SITE_LOGOS, host);
+};
+
+// ---------------------------------------------------------------- the number keys
+// Cmd+1 to Cmd+9. His list, 2-Nov-2026: WhatsApp, Email, Instagram, then the Nathaniel apps, and
+// 9 is a brand new tab. Each one goes to that site's tab in the folder he has open, and opens it
+// only if it is not already there - so Cmd+1 in School is the school's WhatsApp and Cmd+1 in
+// Personal is his own, from the same key. Every slot is his to change in Settings.
+const QUICK_KEYS = [
+  { key: '1', name: 'WhatsApp', url: 'https://web.whatsapp.com/' },
+  { key: '2', name: 'Email', url: 'https://mail.google.com/' },
+  { key: '3', name: 'Instagram', url: 'https://www.instagram.com/' },
+  { key: '4', name: 'Codex', url: 'https://chatgpt.com/codex' },
+  { key: '5', name: 'Pitara', url: 'https://pitara.nathanielschool.com' },
+  { key: '6', name: 'Prima Vista', url: 'https://sightsinging.nathanielschool.com' },
+  { key: '7', name: 'Lipi', url: 'https://lipi.nathanielschool.com' },
+  { key: '8', name: 'Learning Portal', url: 'https://learning-portal.nathanielschool.com' },
+  { key: '9', name: 'New tab', url: '' }, // empty means a new tab, not a site
+];
+
+// The nine are PER FOLDER. Command-1 is his own WhatsApp in Personal and the
+// school's in School, and that was already true of where a key landed - but the
+// key itself was one list for the whole browser, so he could not put the leads
+// board on Command-4 at school and keep his bank there at home. Each folder now
+// keeps its own nine. A flat list from an older Cue is read as every folder's
+// starting point, so nothing he has already set is lost.
+const quickKeysFor = (folder) => {
+  const saved = settings().quickKeys;
+  const mine = Array.isArray(saved) ? saved : (saved && isFolder(folder) ? saved[folder] : null);
+  if (!Array.isArray(mine) || mine.length !== 9) return QUICK_KEYS;
+  return QUICK_KEYS.map((d, i) => {
+    const x = mine[i] || {};
+    return { key: d.key, name: String(x.name || d.name), url: typeof x.url === 'string' ? x.url : d.url };
+  });
+};
+const quickKeys = (folder) => quickKeysFor(isFolder(folder) ? folder : openFolder());
+
 // Where Google lands you when it refuses the browser: "Couldn't sign you in. This browser or app
 // may not be secure."
 const GOOGLE_REFUSED = /^https:\/\/accounts\.google\.[a-z.]+\/.*(signin\/rejected|deniedsigninrejected)/i;
 
+// Not a refusal. Gmail answers this when the account slot in the address does not
+// match what the cookie jar holds - the sign-in was fine, the address was not.
+const GOOGLE_MISMATCH = /^https:\/\/accounts\.google\.[a-z.]+\/CookieMismatch/i;
+
 // The sign-ins worth carrying over for a Google account, and nothing else.
 const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com)$/i;
+
+// Clearing has to reach wider than carrying. A Chrome carry also drags in the ad and
+// measurement crumbs - googleadservices, doubleclick and the rest - and those are not
+// sign-ins, so the narrow list above walked straight past them. Personal was left holding
+// eleven of them after every "Clear and sign in again", which is why that folder kept being
+// refused while the untouched AI agent folder, holding the same three real cookies and none
+// of the ad ones, reached the password step every time. Sign-in starts from an empty jar or
+// it does not start.
+const GOOGLE_WIPE_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com|googleadservices\.com|googlesyndication\.com|googletagmanager\.com|google-analytics\.com|doubleclick\.net|withgoogle\.com|googleapis\.com)$/i;
 
 // Where a Google sign-in lives, and the pages that keep their own copy of it.
 const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com', 'https://www.google.com',
@@ -708,12 +854,44 @@ async function carryAllFromChrome(identity) {
 
 // Google's own sign-in page, in the folder that asked, with the folder's address already filled in
 // so he never lands on the wrong account's inbox.
-function googleSignIn(identity) {
+// Empties a folder's Google jar. On 2-Nov-2026 both folders were left holding ~128 cookies from
+// the revoked Chrome carry, and that dead jar - not the browser - is what Google answers
+// "signin/rejected" and "CookieMismatch" to. Proved by probe: a FRESH Electron session reaches
+// "Enter your password" under a Chrome, Firefox or Safari identity alike, so Google has no quarrel
+// with Cue's engine. Signing in always starts from an empty jar.
+async function clearGoogleState(identity) {
+  const ses = sessionFor(identity);
+  const host = (c) => String(c.domain || '').replace(/^\./, '');
+  let cleared = 0;
+  for (const c of await ses.cookies.get({})) {
+    if (!GOOGLE_WIPE_HOST.test(host(c))) continue;
+    try { await ses.cookies.remove(cookieUrl(c), c.name); cleared++; } catch { /* one stubborn cookie never stops the rest */ }
+  }
+  for (const origin of GOOGLE_ORIGINS) {
+    await ses.clearStorageData({ origin, storages: ['localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }).catch(() => {});
+  }
+  await ses.cookies.flushStore();
+  return cleared;
+}
+
+// Google's own sign-in page, in the folder that asked, with the folder's address already filled in
+// so he never lands on the wrong account's inbox - and with that folder's stale Google state
+// cleared first, or Google refuses before he can type anything.
+async function googleSignIn(identity) {
+  const cleared = await clearGoogleState(identity).catch(() => 0);
   const who = String(settings().identityLabels[identity] || '').trim();
   const u = new URL('https://accounts.google.com/AccountChooser');
-  u.searchParams.set('continue', 'https://mail.google.com/mail/u/0/');
+  // NOT /mail/u/0/. The /u/<n>/ index is a SLOT in whatever list of accounts the
+  // jar happens to hold, not an account, so slot 0 is only his inbox when his is
+  // the first one Google lists. Sign-in then succeeds and Gmail still answers
+  // CookieMismatch, because the slot points at an account whose session is gone.
+  // YouTube keeps working throughout, which is what makes this look like "Gmail
+  // is broken": YouTube has no /u/<n>/ in its address, so it never picks a slot.
+  // ?authuser=<the address> names the account outright and cannot drift.
+  u.searchParams.set('continue', googleForFolder('https://mail.google.com/mail/', identity));
   if (/@/.test(who)) u.searchParams.set('Email', who);
-  return openTab({ url: u.toString(), identity });
+  const tab = await openTab({ url: u.toString(), identity });
+  return { tab, cleared };
 }
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
@@ -833,11 +1011,24 @@ function wireTab(t) {
   });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
   wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; if (shield) shield.reset(wc.id); });
-  // Google will not sign you in inside a browser built the way Cue is, whatever Cue calls itself.
-  // Instead of leaving you on Google's dead end, Cue says so and offers the way through.
+  // Google's dead end is almost always a folder holding cancelled cookies, not Cue's engine
+  // (probed 2-Nov-2026: a clean session reaches the password step). Cue says so and offers the
+  // one cure - empty this folder's Google jar and start again.
   // Google's sign-in is one page that rewrites itself, so the refusal arrives without a page load.
+  // CookieMismatch is a different animal from a refusal, and it was being left to
+  // rot: the sign-in WORKED, and Gmail then threw the session away because the
+  // /u/<n>/ slot in the address pointed at an account this jar no longer holds.
+  // Sending the tab to the same inbox named by its address clears it without
+  // touching a single cookie. Once per tab, so a mismatch that is really about
+  // something else cannot put the tab in a loop.
+  let mismatchFixed = false;
   const googleGate = (u) => {
-    if (GOOGLE_REFUSED.test(u) && t.identity !== 'vanish') wc.loadURL('cue://signin-blocked').catch(() => {});
+    if (t.identity === 'vanish') return;
+    if (GOOGLE_REFUSED.test(u)) { wc.loadURL('cue://signin-blocked').catch(() => {}); return; }
+    if (!mismatchFixed && GOOGLE_MISMATCH.test(u) && isFolder(t.identity)) {
+      const back = googleForFolder('https://mail.google.com/mail/', t.identity);
+      if (back !== 'https://mail.google.com/mail/') { mismatchFixed = true; wc.loadURL(back).catch(() => {}); }
+    }
   };
   wc.on('did-navigate', (_e, u) => { googleGate(u); sayProtected(u); });
   wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) googleGate(u); });
@@ -868,7 +1059,7 @@ function wireTab(t) {
     const from = t.from && Date.now() - t.openedAt < FRESH_TAB ? byId(t.from) : null;
     t.from = null;
     const handover = from && from.playing && from.id !== programId && !from.holdAwake;
-    if (handover && t.id !== activeId) activate(t.id);
+    if (handover && t.id !== activeId) activate(t.id, 'auto');
     if (settings().onePlayer || handover) {
       for (const o of tabs) {
         const together = sharesSplit(t) && sharesSplit(o);
@@ -981,6 +1172,19 @@ function placeTab(t, from) {
   else t.order = (beside.order + next.order) / 2;
 }
 
+// Go to the tab already showing this site in the folder he has open, rather than piling up a
+// second WhatsApp. A blank url means he asked for a new tab.
+function jumpTo(url) {
+  if (!url) { openTab({}); return; }
+  let want = '';
+  try { want = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { want = ''; }
+  const folder = store.data.folder;
+  const here = tabs.find((t) => !t.private && t.identity === folder
+    && String(hostOf(t.url) || '').toLowerCase().replace(/^www\./, '') === want);
+  if (here) { activate(here.id); return; }
+  openTab({ url, identity: folder });
+}
+
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
@@ -992,15 +1196,22 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
     tabs.splice(i + 1, 0, t);
   } else tabs.push(t);
   ensureView(t);
-  if (!background) activate(t.id);
+  if (!background) activate(t.id, agent ? 'agent' : 'user');
   pushState(); persist();
   return t;
 }
 
-function activate(id) {
+// `by` is who asked. Only HE moves the folder he has open. An agent reading
+// Personal's mail while he works in School used to swap the sidebar to Personal
+// mid-sentence, which greyed out every tab he had and sent the next Google
+// sign-in into the wrong folder. Automation may bring a tab forward inside the
+// folder he is already in; a tab in another folder is left in the background,
+// where an agent can work in it perfectly well without taking his window.
+function activate(id, by = 'user') {
   const t = byId(id); if (!t) return;
+  if (by !== 'user' && isFolder(t.identity) && t.identity !== openFolder()) return;
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
-  if (t.id !== programId) followFolder(t);
+  if (t.id !== programId && by === 'user') followFolder(t);
   activeId = id; t.lastActive = Date.now();
   if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
@@ -1455,6 +1666,7 @@ function sendState() {
   uiView.webContents.send('ui:state', {
     tabs: sidebarOrder().map((t) => ({
       id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, name: t.name || null, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
+      siteName: tabName(t), siteLogo: siteLogo(t),
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
       aiAllowed: t.aiAllowed, playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
@@ -1616,6 +1828,9 @@ function uiCommand(cmd, a = {}) {
     case 'side-reveal': setSideReveal(a.on); break;
     case 'ai-width': settings().aiWidth = a.w; store.save(); layout(); pushState(); break;
     case 'split-size': resizeSplit(a); break;
+    // Double-click the divider to put the panes back to equal, the way
+    // double-clicking a column edge in a spreadsheet does.
+    case 'split-even': { const sp = store.data.split; delete sp.fr; delete sp.fx; delete sp.fy; layout(); pushState(); persist(); break; }
     case 'clear-cache': clearCaches(); break;
     // Some sites genuinely break when their ads are blocked. This lets that one
     // site through and leaves every other site alone.
@@ -1805,6 +2020,26 @@ function setSetting(key, value) {
   else if (key.startsWith('label.')) { s.identityLabels[key.slice(6)] = value; }
   else if (key.startsWith('kit.')) { s.kits[key.slice(4)] = !!value; buildMenu(); if (key === 'kit.music' && !value) stripOpen = false; layout(); }
   else if (key.startsWith('spaceLogin.')) { s.spaceLogins[key.slice(11)] = value; }
+  // quick.<slot>.name / quick.<slot>.url - a number key he has re-pointed. The menu carries the
+  // accelerators, so it has to be rebuilt or the key would still go to the old site.
+  else if (key.startsWith('quick.')) {
+    // quick.<slot>.<field> edits the folder in front of you; quick.<folder>.<slot>.<field>
+    // names the folder outright, which is what the Settings page sends.
+    const parts = key.split('.');
+    const who = isFolder(parts[1]) ? parts[1] : openFolder();
+    const [slot, field] = isFolder(parts[1]) ? [parts[2], parts[3]] : [parts[1], parts[2]];
+    const list = quickKeysFor(who).map((q) => ({ ...q }));
+    const i = Number(slot) - 1;
+    if (list[i] && (field === 'name' || field === 'url')) {
+      list[i][field] = String(value || '').trim();
+      // An older flat list becomes a folder each, once, the first time one is edited.
+      const was = s.quickKeys;
+      const box = Array.isArray(was) || !was ? Object.fromEntries(FOLDERS.map((f) => [f, quickKeysFor(f)])) : { ...was };
+      box[who] = list;
+      s.quickKeys = box;
+      buildMenu();
+    }
+  }
   else s[key] = value;
   if (key === 'githubUser') loadRepos();
   store.save();
@@ -2115,10 +2350,10 @@ const internal = {
   'library.history.clear': () => lib.clearHistory(),
   'signin.from-chrome': async (_a, t) => {
     if (!t) return { error: 'This page is not in a tab.' };
-    googleSignIn(t.identity);
-    return { signin: true };
+    const { cleared } = await googleSignIn(t.identity);
+    return { signin: true, cleared };
   },
-  'signin.google': (a) => { googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder); },
+  'signin.google': (a) => googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder).then(({ cleared }) => ({ signin: true, cleared })),
   'signin.close': (_a, t) => { if (t) closeTab(t.id); },
   // Meta's sign-ins, into one folder, from the folder's own row in Settings.
   // Instagram and Facebook accept a carried jar; Google does not - see
@@ -2411,7 +2646,7 @@ const agentApi = {
       if (reuse) {
         ensureView(reuse);
         if (reuse.url !== target) reuse.view.webContents.loadURL(target);
-        if (!background) activate(reuse.id);
+        if (!background) activate(reuse.id, 'agent');
         return reuse;
       }
     }
@@ -2523,6 +2758,14 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => { const t = byId(activeId); if (t && t.view) t.view.webContents.print(); } },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => { if (vanish.focused()) vanish.closeTab(vanish.activeId()); else closeTab(activeId); } },
+        { type: 'separator' },
+        // His own nine. The label says where each key goes, so the menu is also the reminder.
+        ...quickKeys().map((q) => ({
+          label: q.url ? `Go to ${q.name}` : q.name,
+          accelerator: `CmdOrCtrl+${q.key}`,
+          click: () => jumpTo(q.url),
+        })),
+        { type: 'separator' },
         { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: () => moveTab({ id: activeId, dir: -1 }) },
         { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: () => moveTab({ id: activeId, dir: 1 }) },
       ],
@@ -2686,6 +2929,18 @@ function createMain() {
   });
   mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
+  // Leaving full screen by the green button, Escape or a Mac swipe tells the WINDOW
+  // but never told the PAGE, so the video stayed in its full-screen layout inside a
+  // normal window - controls off the bottom, the picture the wrong shape. The Vanish
+  // window has always done this; the main one had not. Now both let the page know.
+  mainWin.on('leave-full-screen', () => {
+    const t = byId(activeId);
+    if (!t || !t.fullscreen) return;
+    t.fullscreen = false; layout(); pushState();
+    if (t.view && !t.view.webContents.isDestroyed()) {
+      t.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+    }
+  });
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
 
   const saved = store.data.tabs || [];
@@ -2723,7 +2978,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch' }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -2792,7 +3047,7 @@ app.whenReady().then(async () => {
   if (settings().obs.autoConnect) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

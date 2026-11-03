@@ -764,6 +764,15 @@ const GOOGLE_MISMATCH = /^https:\/\/accounts\.google\.[a-z.]+\/CookieMismatch/i;
 // The sign-ins worth carrying over for a Google account, and nothing else.
 const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com)$/i;
 
+// Clearing has to reach wider than carrying. A Chrome carry also drags in the ad and
+// measurement crumbs - googleadservices, doubleclick and the rest - and those are not
+// sign-ins, so the narrow list above walked straight past them. Personal was left holding
+// eleven of them after every "Clear and sign in again", which is why that folder kept being
+// refused while the untouched AI agent folder, holding the same three real cookies and none
+// of the ad ones, reached the password step every time. Sign-in starts from an empty jar or
+// it does not start.
+const GOOGLE_WIPE_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com|googleadservices\.com|googlesyndication\.com|googletagmanager\.com|google-analytics\.com|doubleclick\.net|withgoogle\.com|googleapis\.com)$/i;
+
 // Where a Google sign-in lives, and the pages that keep their own copy of it.
 const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com', 'https://www.google.com',
   'https://drive.google.com', 'https://calendar.google.com', 'https://www.youtube.com'];
@@ -855,7 +864,7 @@ async function clearGoogleState(identity) {
   const host = (c) => String(c.domain || '').replace(/^\./, '');
   let cleared = 0;
   for (const c of await ses.cookies.get({})) {
-    if (!GOOGLE_LOGIN_HOST.test(host(c))) continue;
+    if (!GOOGLE_WIPE_HOST.test(host(c))) continue;
     try { await ses.cookies.remove(cookieUrl(c), c.name); cleared++; } catch { /* one stubborn cookie never stops the rest */ }
   }
   for (const origin of GOOGLE_ORIGINS) {
