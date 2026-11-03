@@ -746,6 +746,10 @@ const quickKeys = () => {
 // may not be secure."
 const GOOGLE_REFUSED = /^https:\/\/accounts\.google\.[a-z.]+\/.*(signin\/rejected|deniedsigninrejected)/i;
 
+// Not a refusal. Gmail answers this when the account slot in the address does not
+// match what the cookie jar holds - the sign-in was fine, the address was not.
+const GOOGLE_MISMATCH = /^https:\/\/accounts\.google\.[a-z.]+\/CookieMismatch/i;
+
 // The sign-ins worth carrying over for a Google account, and nothing else.
 const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com)$/i;
 
@@ -857,7 +861,14 @@ async function googleSignIn(identity) {
   const cleared = await clearGoogleState(identity).catch(() => 0);
   const who = String(settings().identityLabels[identity] || '').trim();
   const u = new URL('https://accounts.google.com/AccountChooser');
-  u.searchParams.set('continue', 'https://mail.google.com/mail/u/0/');
+  // NOT /mail/u/0/. The /u/<n>/ index is a SLOT in whatever list of accounts the
+  // jar happens to hold, not an account, so slot 0 is only his inbox when his is
+  // the first one Google lists. Sign-in then succeeds and Gmail still answers
+  // CookieMismatch, because the slot points at an account whose session is gone.
+  // YouTube keeps working throughout, which is what makes this look like "Gmail
+  // is broken": YouTube has no /u/<n>/ in its address, so it never picks a slot.
+  // ?authuser=<the address> names the account outright and cannot drift.
+  u.searchParams.set('continue', googleForFolder('https://mail.google.com/mail/', identity));
   if (/@/.test(who)) u.searchParams.set('Email', who);
   const tab = await openTab({ url: u.toString(), identity });
   return { tab, cleared };
@@ -984,8 +995,20 @@ function wireTab(t) {
   // (probed 2-Nov-2026: a clean session reaches the password step). Cue says so and offers the
   // one cure - empty this folder's Google jar and start again.
   // Google's sign-in is one page that rewrites itself, so the refusal arrives without a page load.
+  // CookieMismatch is a different animal from a refusal, and it was being left to
+  // rot: the sign-in WORKED, and Gmail then threw the session away because the
+  // /u/<n>/ slot in the address pointed at an account this jar no longer holds.
+  // Sending the tab to the same inbox named by its address clears it without
+  // touching a single cookie. Once per tab, so a mismatch that is really about
+  // something else cannot put the tab in a loop.
+  let mismatchFixed = false;
   const googleGate = (u) => {
-    if (GOOGLE_REFUSED.test(u) && t.identity !== 'vanish') wc.loadURL('cue://signin-blocked').catch(() => {});
+    if (t.identity === 'vanish') return;
+    if (GOOGLE_REFUSED.test(u)) { wc.loadURL('cue://signin-blocked').catch(() => {}); return; }
+    if (!mismatchFixed && GOOGLE_MISMATCH.test(u) && isFolder(t.identity)) {
+      const back = googleForFolder('https://mail.google.com/mail/', t.identity);
+      if (back !== 'https://mail.google.com/mail/') { mismatchFixed = true; wc.loadURL(back).catch(() => {}); }
+    }
   };
   wc.on('did-navigate', (_e, u) => { googleGate(u); sayProtected(u); });
   wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) googleGate(u); });
