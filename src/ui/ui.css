@@ -349,6 +349,11 @@ body.rail .pin img { width: 22px; height: 22px; }
 .aigrip { position: fixed; top: var(--bar-h); bottom: 0; right: var(--ai-w); width: 8px; cursor: col-resize; z-index: 4; }
 .gutter { position: fixed; z-index: 4; border-radius: 4px; }
 .gutter.x { cursor: col-resize; } .gutter.y { cursor: row-resize; }
+/* The visible seam stays thin; the part you can actually grab reaches further,
+   so the divider does not have to be hunted for with the mouse. */
+.gutter::before { content: ''; position: absolute; }
+.gutter.x::before { inset: 0 -5px; }
+.gutter.y::before { inset: -5px 0; }
 .gutter:hover, .gutter.drag-on { background: var(--tone); }
 .edge { position: fixed; left: 0; top: 0; bottom: 0; width: 8px; z-index: 2; display: none; }
 

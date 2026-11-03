@@ -1808,6 +1808,9 @@ function uiCommand(cmd, a = {}) {
     case 'side-reveal': setSideReveal(a.on); break;
     case 'ai-width': settings().aiWidth = a.w; store.save(); layout(); pushState(); break;
     case 'split-size': resizeSplit(a); break;
+    // Double-click the divider to put the panes back to equal, the way
+    // double-clicking a column edge in a spreadsheet does.
+    case 'split-even': { const sp = store.data.split; delete sp.fr; delete sp.fx; delete sp.fy; layout(); pushState(); persist(); break; }
     case 'clear-cache': clearCaches(); break;
     // Some sites genuinely break when their ads are blocked. This lets that one
     // site through and leaves every other site alone.

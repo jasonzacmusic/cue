@@ -221,12 +221,32 @@ function applySide(width = S.sideWidth) {
   $('#sidehide').title = hidden ? 'Keep the sidebar open (⌘\\)' : 'Hide the sidebar (⌘\\)';
 }
 
+// A drag is a button held down, from the press to the release, and nothing else.
+// It used to listen on the handle itself, and the handle is thrown away and drawn
+// again on every state push - which a resize itself causes. The press was captured
+// on an element that no longer existed by the time the mouse moved, so the release
+// never arrived and the divider went on following the mouse with nothing held down.
+// The window outlives every redraw, so the whole gesture is tracked there, pinned
+// to the one finger or button that started it.
+let dragging = 0;
 function grip(handle, axis, onMove, onEnd) {
   handle.onpointerdown = (e) => {
-    e.preventDefault(); handle.setPointerCapture(e.pointerId); handle.classList.add('drag-on');
-    const move = (m) => onMove(axis === 'x' ? m.clientX : m.clientY);
-    const up = () => { handle.classList.remove('drag-on'); handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); if (onEnd) onEnd(); };
-    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up);
+    if (e.button !== 0 || dragging) return;   // left button only, one drag at a time
+    e.preventDefault(); handle.classList.add('drag-on');
+    const id = e.pointerId; dragging = id;
+    const move = (m) => { if (m.pointerId === id) onMove(axis === 'x' ? m.clientX : m.clientY); };
+    const up = (m) => {
+      if (m && m.pointerId !== id) return;
+      dragging = 0; handle.classList.remove('drag-on');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (onEnd) onEnd();
+      render();                                // redraw whatever was held back
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 }
 const snapSide = (x) => (x < 96 ? 64 : Math.min(420, Math.round(x)));
@@ -240,12 +260,15 @@ $('#side').onmouseenter = () => clearTimeout(hideTimer);
 $('#side').onmouseleave = () => { hideTimer = setTimeout(() => send('side-reveal', { on: false }), 280); };
 
 function renderGutters() {
+  // Never pull the divider out from under a drag in progress.
+  if (dragging) return;
   const box = $('#gutters'); box.innerHTML = '';
   for (const g of S.gutters) {
     const d = el('div', `gutter ${g.axis}`);
     Object.assign(d.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.width}px`, height: `${g.height}px` });
     d.setAttribute('role', 'separator'); d.title = 'Drag to resize';
     grip(d, g.axis, (pos) => send('split-size', { i: g.i, axis: g.axis, pos }));
+    d.ondblclick = () => send('split-even');
     box.append(d);
   }
   $('#aigrip').hidden = !S.ai;
