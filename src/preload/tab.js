@@ -267,9 +267,71 @@ function sayChrome() {
   Object.defineProperty(navigator, 'userAgentData', { configurable: true, get: () => patched });
 }
 
+// The name and the headers were never the whole question. Google's sign-in page also reaches for
+// window.chrome, and in a real Chrome that object carries loadTimes, csi, app and the three sync
+// encryption calls; in Electron it is there but EMPTY, with not one key on it. Measured side by
+// side on this Mac, that emptiness was the only difference left, and it is what makes Google turn a
+// personal gmail.com address away while it lets a Workspace one through. So Cue now wears the same
+// surface, functions that answer and read as native, nothing that does anything behind the page's
+// back.
+function wearChrome() {
+  const c = window.chrome;
+  if (!c || typeof c.loadTimes === 'function') return; // a real Chrome, or already dressed
+  const native = (name, body) => {
+    const f = body || function () {};
+    try {
+      Object.defineProperty(f, 'name', { value: name, configurable: true });
+      Object.defineProperty(f, 'toString', {
+        value: function toString() { return `function ${name}() { [native code] }`; }, configurable: true, writable: true,
+      });
+    } catch { /* a frozen function is still better than no function */ }
+    return f;
+  };
+  const t = () => performance.timeOrigin / 1000;
+  const nav = () => performance.getEntriesByType('navigation')[0] || {};
+  const put = (name, value) => {
+    try { Object.defineProperty(c, name, { value, configurable: true, writable: true, enumerable: true }); } catch { /* leave what is there */ }
+  };
+
+  put('loadTimes', native('loadTimes', () => {
+    const n = nav();
+    const s = (ms) => (ms ? t() + ms / 1000 : 0);
+    return {
+      requestTime: t(), startLoadTime: t(), commitLoadTime: s(n.responseStart),
+      finishDocumentLoadTime: s(n.domContentLoadedEventEnd), finishLoadTime: s(n.loadEventEnd),
+      firstPaintTime: s((performance.getEntriesByName('first-paint')[0] || {}).startTime),
+      firstPaintAfterLoadTime: 0, navigationType: 'Other',
+      wasFetchedViaSpdy: n.nextHopProtocol === 'h2' || n.nextHopProtocol === 'h3',
+      wasNpnNegotiated: false, npnNegotiatedProtocol: n.nextHopProtocol || 'unknown',
+      wasAlternateProtocolAvailable: false, connectionInfo: n.nextHopProtocol || 'unknown',
+    };
+  }));
+  put('csi', native('csi', () => {
+    const n = nav();
+    return { startE: Math.round(performance.timeOrigin), onloadT: Math.round(performance.timeOrigin + (n.loadEventEnd || 0)), pageT: performance.now(), tran: 15 };
+  }));
+  put('app', {
+    isInstalled: false,
+    getDetails: native('getDetails', () => null),
+    getIsInstalled: native('getIsInstalled', () => false),
+    installState: native('installState', (cb) => { if (typeof cb === 'function') setTimeout(() => cb('not_installed'), 0); }),
+    runningState: native('runningState', () => 'cannot_run'),
+    InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+    RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+  });
+  // Chrome only hangs these on Google's own sign-in host, and so does Cue: they are the calls the
+  // page uses to hand Chrome a sync key, and there is nothing here to hand one to.
+  if (/(^|\.)google\.[a-z.]+$/i.test(location.hostname)) {
+    for (const name of ['setSyncEncryptionKeys', 'setClientEncryptionKeys', 'addTrustedSyncEncryptionRecoveryMethod']) {
+      put(name, native(name, (cb) => { if (typeof cb === 'function') setTimeout(cb, 0); }));
+    }
+  }
+}
+
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
 contextBridge.executeInMainWorld({ func: sayChrome });
+contextBridge.executeInMainWorld({ func: wearChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
 if (init.ytAds && /^(www|m|music)\.youtube\.com$/.test(location.hostname)) contextBridge.executeInMainWorld({ func: quietYouTube });
 
