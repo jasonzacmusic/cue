@@ -1517,6 +1517,10 @@ function openStage() {
   stageWin = new BaseWindow({
     width: s.stageWidth, height: s.stageHeight, useContentSize: true, title: 'Cue Stage — On Air',
     backgroundColor: '#000000', enableLargerThanScreen: true, fullscreenable: true, show: false,
+    // No title bar. What OBS and Zoom capture is then the page and nothing
+    // else — no bar across the top of the class's screen. Cue opens, sizes and
+    // closes this window itself, so there is nothing on it to need dragging.
+    frame: false, movable: true,
   });
   stageWin.setContentSize(s.stageWidth, s.stageHeight);
   // It opens behind him, not over him. The Stage is what OBS and Zoom capture;
@@ -1527,10 +1531,57 @@ function openStage() {
   stageStandby.webContents.loadFile(STAGE_HTML);
   stageWin.on('resize', layout);
   stageWin.on('closed', () => { stageWin = null; stageStandby = null; if (live) setLive(false, true); });
+  // macOS hands OBS its list of capturable windows on a delay, so a window a
+  // second old is still "invalid" to it. Three goes, spread out, and the last
+  // one always lands.
+  obsAimAtStage().catch(() => {});
   layout();
 }
 
 function showStandby() { if (stageStandby) stageStandby.setVisible(true); }
+
+// OBS was set to capture Cue the APPLICATION, which hands the class every Cue
+// window there is — sidebar, address bar and all. What a class should see is
+// the Stage window and nothing else. The window's id changes every time the
+// Stage opens, which is why doing this by hand never stayed done, so Cue tells
+// OBS the new id itself: whenever the Stage opens, and again whenever OBS
+// reconnects. Any screen-capture source already pointed at Cue is re-aimed, so
+// his existing scenes keep working with no setting up.
+async function obsAimAtStage() {
+  if (!stageWin || stageWin.isDestroyed() || obs.status !== 'connected') return;
+  let window = 0;
+  try { window = Number(String(stageWin.getMediaSourceId()).split(':')[1]) || 0; } catch { return; }
+  if (!window) return;
+  let names = [];
+  try { names = await obs.inputs('screen_capture'); } catch { return; }
+  const ours = [];
+  for (const name of names) {
+    let was = null;
+    try { was = await obs.settings(name); } catch { continue; }
+    if (was && (was.application === 'com.jasonzac.cue' || /\bcue\b/i.test(name))) ours.push({ name, was });
+  }
+  if (!ours.length) return;
+
+  // Wait until OBS's own list of capturable windows has the Stage in it.
+  // Setting it before that leaves the source dark with "Invalid target window
+  // ID" in the log, and OBS ignores a second attempt with the same numbers, so
+  // guessing at delays never fixed it.
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  let known = false;
+  for (let i = 0; i < 12 && !known; i++) {
+    try { known = (await obs.propertyItems(ours[0].name, 'window')).some((x) => Number(x.itemValue) === window); } catch { return; }
+    if (!known) await wait(700);
+  }
+  if (!known) return;
+
+  for (const { name, was } of ours) {
+    // Unchanged numbers are a no-op to OBS, so land on something else first
+    // when the capture is already pointed here but showing nothing.
+    if (was && was.type === 1 && Number(was.window) === window) await obs.setSettings(name, { window: 0 });
+    await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
+  }
+  sendEvent('toast', `OBS is showing the Stage only${ours.length > 1 ? ` (${ours.length} sources)` : ''}.`);
+}
 
 function moveView(t, toWin, host) {
   if (!t.view) ensureView(t);
@@ -3341,7 +3392,11 @@ app.whenReady().then(async () => {
   vault.autoForOwnSites();
   store.data.settings.obs = { host: '127.0.0.1', port: 4455, password: '', ...(store.data.settings.obs || {}) };
   store.data.settings.identityLabels = { personal: '', school: '', agent: '', ...(store.data.settings.identityLabels || {}) };
-  obs.onStatus = () => pushState();
+  obs.onStatus = (st) => {
+    pushState();
+    // Reconnected mid-class: point it back at the Stage before anyone notices.
+    if (st === 'connected') setTimeout(() => { obsAimAtStage().catch(() => {}); }, 300);
+  };
   session.defaultSession.setDisplayMediaRequestHandler((_req, cb) => {
     const t = byId(recTabId);
     if (t && t.view) cb({ video: t.view.webContents.mainFrame, audio: t.view.webContents.mainFrame }); else cb({});

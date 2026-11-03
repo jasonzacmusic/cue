@@ -61,6 +61,27 @@ class OBS {
     return this.request('SetCurrentProgramScene', { sceneName });
   }
 
+  async inputs(kind) {
+    const r = await this.request('GetInputList', kind ? { inputKind: kind } : {});
+    return r && r.responseData ? r.responseData.inputs.map((i) => i.inputName) : [];
+  }
+
+  async settings(name) {
+    const r = await this.request('GetInputSettings', { inputName: name });
+    return r && r.responseData ? r.responseData.inputSettings : null;
+  }
+
+  setSettings(name, inputSettings) {
+    return this.request('SetInputSettings', { inputName: name, inputSettings, overlay: true });
+  }
+
+  // What OBS itself thinks it can capture right now. macOS hands it this list
+  // on a delay, so a window a second old is still missing from it.
+  async propertyItems(inputName, propertyName) {
+    const r = await this.request('GetInputPropertiesListPropertyItems', { inputName, propertyName });
+    return r && r.responseData ? r.responseData.propertyItems : [];
+  }
+
   async scenes() {
     const r = await this.request('GetSceneList');
     return r && r.responseData ? r.responseData.scenes.map((s) => s.sceneName) : [];
