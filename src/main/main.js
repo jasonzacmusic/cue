@@ -528,6 +528,7 @@ function folderForNewTab(space) {
 function followFolder(t) {
   if (!t || !isFolder(t.identity) || store.data.folder === t.identity) return;
   store.data.folder = t.identity;
+  buildMenu(); // the nine belong to the folder, so the accelerators move with it
 }
 // The pinned strip holds the same handful of apps in every folder, so clicking
 // one means "this app, as whoever I am right now": his own WhatsApp in Personal,
@@ -551,6 +552,8 @@ function setFolder(name) {
   const leaving = byId(activeId);
   const site = leaving && !leaving.url.startsWith('cue://') ? hostOf(leaving.url) : '';
   store.data.folder = name;
+  buildMenu(); // this folder's own nine
+
   // Land on something that is actually in this folder, in this Space, so the
   // page in front of you matches the folder you just opened.
   const here = spaceOrder().filter((t) => t.identity === name && t.id !== programId);
@@ -733,14 +736,22 @@ const QUICK_KEYS = [
   { key: '9', name: 'New tab', url: '' }, // empty means a new tab, not a site
 ];
 
-const quickKeys = () => {
+// The nine are PER FOLDER. Command-1 is his own WhatsApp in Personal and the
+// school's in School, and that was already true of where a key landed - but the
+// key itself was one list for the whole browser, so he could not put the leads
+// board on Command-4 at school and keep his bank there at home. Each folder now
+// keeps its own nine. A flat list from an older Cue is read as every folder's
+// starting point, so nothing he has already set is lost.
+const quickKeysFor = (folder) => {
   const saved = settings().quickKeys;
-  if (!Array.isArray(saved) || saved.length !== 9) return QUICK_KEYS;
+  const mine = Array.isArray(saved) ? saved : (saved && isFolder(folder) ? saved[folder] : null);
+  if (!Array.isArray(mine) || mine.length !== 9) return QUICK_KEYS;
   return QUICK_KEYS.map((d, i) => {
-    const x = saved[i] || {};
+    const x = mine[i] || {};
     return { key: d.key, name: String(x.name || d.name), url: typeof x.url === 'string' ? x.url : d.url };
   });
 };
+const quickKeys = (folder) => quickKeysFor(isFolder(folder) ? folder : openFolder());
 
 // Where Google lands you when it refuses the browser: "Couldn't sign you in. This browser or app
 // may not be secure."
@@ -2003,12 +2014,20 @@ function setSetting(key, value) {
   // quick.<slot>.name / quick.<slot>.url - a number key he has re-pointed. The menu carries the
   // accelerators, so it has to be rebuilt or the key would still go to the old site.
   else if (key.startsWith('quick.')) {
-    const [, slot, field] = key.split('.');
-    const list = quickKeys().map((q) => ({ ...q }));
+    // quick.<slot>.<field> edits the folder in front of you; quick.<folder>.<slot>.<field>
+    // names the folder outright, which is what the Settings page sends.
+    const parts = key.split('.');
+    const who = isFolder(parts[1]) ? parts[1] : openFolder();
+    const [slot, field] = isFolder(parts[1]) ? [parts[2], parts[3]] : [parts[1], parts[2]];
+    const list = quickKeysFor(who).map((q) => ({ ...q }));
     const i = Number(slot) - 1;
     if (list[i] && (field === 'name' || field === 'url')) {
       list[i][field] = String(value || '').trim();
-      s.quickKeys = list;
+      // An older flat list becomes a folder each, once, the first time one is edited.
+      const was = s.quickKeys;
+      const box = Array.isArray(was) || !was ? Object.fromEntries(FOLDERS.map((f) => [f, quickKeysFor(f)])) : { ...was };
+      box[who] = list;
+      s.quickKeys = box;
       buildMenu();
     }
   }
@@ -2901,6 +2920,18 @@ function createMain() {
   });
   mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
   mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
+  // Leaving full screen by the green button, Escape or a Mac swipe tells the WINDOW
+  // but never told the PAGE, so the video stayed in its full-screen layout inside a
+  // normal window - controls off the bottom, the picture the wrong shape. The Vanish
+  // window has always done this; the main one had not. Now both let the page know.
+  mainWin.on('leave-full-screen', () => {
+    const t = byId(activeId);
+    if (!t || !t.fullscreen) return;
+    t.fullscreen = false; layout(); pushState();
+    if (t.view && !t.view.webContents.isDestroyed()) {
+      t.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+    }
+  });
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
 
   const saved = store.data.tabs || [];

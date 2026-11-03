@@ -1139,15 +1139,36 @@ function openSettings() {
     // The number keys. Nine rows, each his to re-point, because the whole value of a shortcut is
     // that it goes where he expects without him thinking about it.
     sh.append(el('h3', '', 'The number keys'));
-    sh.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school\u2019s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Change any of them here: give it a name and a web address, or leave the address empty to make that key open a brand new tab.'));
-    const keys = Array.isArray(s.quickKeys) ? s.quickKeys : [];
-    for (let i = 0; i < 9; i++) {
-      const q = keys[i] || {};
-      const pair = el('div', 'row');
-      pair.append(text(`quick.${i + 1}.name`, q.name, 'What to call it'));
-      pair.append(text(`quick.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
-      sh.append(settingRow(`Command-${i + 1}`, pair));
+    sh.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school\u2019s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Each folder keeps its OWN nine, so School\u2019s Command-4 can be the leads board while Personal\u2019s is your bank. Pick the folder below, then give a key a name and a web address, or leave the address empty to make it open a brand new tab.'));
+    // Each folder keeps its own nine, so pick the folder first and the rows below
+    // are that folder's. Switching here changes nothing until a row is edited.
+    const picker = el('div', 'fpick');
+    const rows = el('div', '');
+    let editing = S.folder || 'personal';
+    const drawKeys = () => {
+      rows.innerHTML = '';
+      const box = s.quickKeys;
+      const mine = (Array.isArray(box) ? box : (box && box[editing])) || [];
+      for (let i = 0; i < 9; i++) {
+        const q = mine[i] || {};
+        const pair = el('div', 'row');
+        pair.append(text(`quick.${editing}.${i + 1}.name`, q.name, 'What to call it'));
+        pair.append(text(`quick.${editing}.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
+        rows.append(settingRow(`Command-${i + 1}`, pair));
+      }
+    };
+    for (const [id, name] of [['personal', 'Personal'], ['school', 'School'], ['agent', 'AI agent']]) {
+      const b = el('button', id === editing ? 'on' : '', name);
+      b.onclick = () => {
+        editing = id;
+        for (const c of picker.children) c.classList.toggle('on', c === b);
+        drawKeys();
+      };
+      picker.append(b);
     }
+    sh.append(settingRow('Shortcuts for', picker));
+    sh.append(rows);
+    drawKeys();
     sh.append(el('h3', '', 'Spaces'));
     sh.append(el('div', 'note', 'Double-click a Space in the sidebar to call it whatever you like. Its tabs, its layout and the login it opens with all come across with the name.'));
     sh.append(el('h3', '', 'Folders'));

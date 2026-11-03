@@ -446,3 +446,10 @@ body.rail .updatebar { display: none; }
 .spacename { width: 92px; min-width: 0; padding: 1px 5px; border: 1px solid var(--accent); border-radius: 6px;
   background: var(--side); color: var(--ink); font: italic 500 18px/1.2 ui-serif, Georgia, serif; outline: 0; }
 .spacerow .spacename { font: 500 12px/1.2 -apple-system, system-ui, sans-serif; width: 74px; }
+
+/* Which folder's nine you are editing. */
+.fpick { display: flex; gap: 6px; flex-wrap: wrap; }
+.fpick button { border: 0; cursor: pointer; font: 600 12px/1 -apple-system, system-ui, sans-serif;
+  padding: 7px 13px; border-radius: 999px; background: var(--raised); color: var(--muted); }
+.fpick button:hover { color: var(--ink); }
+.fpick button.on { background: var(--tone); color: var(--raised); }

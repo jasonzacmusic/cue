@@ -1,15 +1,33 @@
 // The Vanish window: a separate dark window with no sidebar, no history, no AI, no bookmarks.
 // Its tabs are kept here and never join Cue's own tab list, so nothing that saves, syncs or
 // shares tabs can reach them. Closing the window wipes its memory-only session.
-const { BaseWindow, WebContentsView, Menu, clipboard, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, clipboard, screen, dialog } = require('electron');
 const { whereToOpen, refuseOpen } = require('./signin');
-const { PICTURE_IN_PICTURE } = require('./video');
+const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 
 const BAR = 86; // tab strip + address bar
 const FRESH = 30000; // a new tab that starts playing this soon after opening is what the link was for
 
 function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
+  // Netflix and its like use protected video, which Cue cannot play yet. The main
+  // window has always said so rather than leaving a player spinning; in here it said
+  // nothing at all, which looked like Vanish being broken. Said once per site per
+  // window, and the window forgets it along with everything else when it closes.
+  const toldProtected = new Set();
+  const sayProtected = (url) => {
+    const name = protectedSite(url);
+    if (!name || toldProtected.has(name) || !win || process.env.CUE_TEST) return;
+    toldProtected.add(name);
+    dialog.showMessageBox(win, {
+      type: 'info', buttons: process.platform === 'darwin' ? ['Open in Safari', 'Stay Here'] : ['OK'],
+      defaultId: 0, cancelId: 1,
+      message: `${name} can't play its shows in Cue yet.`,
+      detail: "It uses protected video, which Cue can't play yet. Everything else on the site works. Opening it in Safari leaves nothing behind in here either.",
+    }).then((r) => {
+      if (process.platform === 'darwin' && r.response === 0) require('child_process').execFile('/usr/bin/open', ['-a', 'Safari', url], () => {});
+    });
+  };
   const tabs = [];
   const byId = (id) => tabs.find((t) => t.id === id);
 
@@ -102,7 +120,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const sync = () => { t.url = wc.getURL(); state(); };
     wc.on('page-title-updated', (_e, title) => { t.title = title; state(); });
     wc.on('page-favicon-updated', (_e, f) => { t.favicon = f[0] || null; state(); });
-    wc.on('did-navigate', () => { t.favicon = null; sync(); }); wc.on('did-navigate-in-page', sync);
+    wc.on('did-navigate', () => { t.favicon = null; sync(); sayProtected(wc.getURL()); }); wc.on('did-navigate-in-page', sync);
     wc.on('did-start-loading', () => { t.loading = true; state(); });
     wc.on('did-stop-loading', () => { t.loading = false; sync(); });
     wc.on('enter-html-full-screen', () => { full = true; fillScreen(true); });
