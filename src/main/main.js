@@ -1016,7 +1016,7 @@ function wireTab(t) {
     const from = t.from && Date.now() - t.openedAt < FRESH_TAB ? byId(t.from) : null;
     t.from = null;
     const handover = from && from.playing && from.id !== programId && !from.holdAwake;
-    if (handover && t.id !== activeId) activate(t.id);
+    if (handover && t.id !== activeId) activate(t.id, 'auto');
     if (settings().onePlayer || handover) {
       for (const o of tabs) {
         const together = sharesSplit(t) && sharesSplit(o);
@@ -1153,15 +1153,22 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
     tabs.splice(i + 1, 0, t);
   } else tabs.push(t);
   ensureView(t);
-  if (!background) activate(t.id);
+  if (!background) activate(t.id, agent ? 'agent' : 'user');
   pushState(); persist();
   return t;
 }
 
-function activate(id) {
+// `by` is who asked. Only HE moves the folder he has open. An agent reading
+// Personal's mail while he works in School used to swap the sidebar to Personal
+// mid-sentence, which greyed out every tab he had and sent the next Google
+// sign-in into the wrong folder. Automation may bring a tab forward inside the
+// folder he is already in; a tab in another folder is left in the background,
+// where an agent can work in it perfectly well without taking his window.
+function activate(id, by = 'user') {
   const t = byId(id); if (!t) return;
+  if (by !== 'user' && isFolder(t.identity) && t.identity !== openFolder()) return;
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
-  if (t.id !== programId) followFolder(t);
+  if (t.id !== programId && by === 'user') followFolder(t);
   activeId = id; t.lastActive = Date.now();
   if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
@@ -2585,7 +2592,7 @@ const agentApi = {
       if (reuse) {
         ensureView(reuse);
         if (reuse.url !== target) reuse.view.webContents.loadURL(target);
-        if (!background) activate(reuse.id);
+        if (!background) activate(reuse.id, 'agent');
         return reuse;
       }
     }
