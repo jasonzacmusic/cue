@@ -60,8 +60,12 @@ const STRIP = 44;
 // The four Spaces ship with these names and you can call them anything you
 // like. Renaming one has to carry every tab, login and layout filed under the
 // old name with it, which is why it happens in one place.
-const SPACES_DEFAULT = ['Teach', 'Create', 'Business', 'Build'];
-const spaces = () => (store && Array.isArray(store.data.spaces) && store.data.spaces.length === 4 ? store.data.spaces : SPACES_DEFAULT);
+const SPACES_DEFAULT = ['Teach', 'Create', 'Finance', 'Build'];
+const SPACES_MAX = 9;
+const spaces = () => {
+  const s = store && store.data.spaces;
+  return Array.isArray(s) && s.length ? s.slice(0, SPACES_MAX) : SPACES_DEFAULT;
+};
 const KITS = {
   teacher: { name: 'Teacher', what: 'On air, OBS and Safe-share' },
   music: { name: 'Music', what: 'Loop, transpose and speed for any video' },
@@ -70,7 +74,11 @@ const KITS = {
   video: { name: 'Video', what: 'Page capture, tab recording, GIFs, timestamps, frame grabs' },
   business: { name: 'Business', what: 'Bills radar and alert tray' },
 };
-const AI_HOME = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
+// The panel is for the two tools he actually works with, not their consumer chats: Claude Code and
+// Codex, the same pair he keeps in Chrome. It opens in whichever folder is open, so it arrives
+// already signed in instead of asking him to log in again inside a panel.
+const AI_HOME = { claudecode: 'https://claude.ai/code', codex: 'https://chatgpt.com/codex' };
+const AI_NAMES = { claudecode: 'Claude Code', codex: 'Codex' };
 // Links that belong to another app on the computer. These open straight away; anything else asks first.
 const EXTERNAL = /^(mailto|tel|sms|facetime|zoommtg|zoomus|msteams|slack|spotify|whatsapp|webcal|obsproject):/i;
 const TEAM_SITE = 'https://team.nathanielschool.com';
@@ -553,6 +561,7 @@ function setFolder(name) {
   const site = leaving && !leaving.url.startsWith('cue://') ? hostOf(leaving.url) : '';
   store.data.folder = name;
   buildMenu(); // this folder's own nine
+  if (aiView) openAI(aiWhich()); // Claude Code and Codex follow him into the folder he just opened
 
   // Land on something that is actually in this folder, in this Space, so the
   // page in front of you matches the folder you just opened.
@@ -591,6 +600,9 @@ function ensureView(t) {
     },
   });
   view.setBackgroundColor('#FFFFFF');
+  // Pinch on the trackpad to zoom the page, the way Safari and Chrome do.
+  // Electron ships with it switched off, which is why only Cmd+/Cmd- worked.
+  view.webContents.setVisualZoomLevelLimits(1, 5).catch(() => {});
   t.view = view; t.sleeping = false;
   wireTab(t);
   mainWin.contentView.addChildView(view);
@@ -1185,8 +1197,72 @@ function jumpTo(url) {
   openTab({ url, identity: folder });
 }
 
+// Some sites are one place, not many: your inbox, your WhatsApp, YouTube. Ten
+// Gmail tabs are ten copies of the same page and all the mess that follows.
+// Each folder keeps ONE tab for each of these and every later ask lands in it.
+const ONE_PER_FOLDER = [
+  /^mail\.google\.com$/i,
+  /^web\.whatsapp\.com$/i,
+  /^([a-z0-9-]+\.)?youtube\.com$/i,
+  /^studio\.youtube\.com$/i,
+  /^calendar\.google\.com$/i,
+  /^drive\.google\.com$/i,
+];
+// studio.youtube.com and youtube.com are two different jobs, so they keep one
+// tab each rather than fighting over a single YouTube tab.
+const oneKey = (url) => {
+  const h = hostOf(url);
+  if (!h) return '';
+  if (/^studio\.youtube\.com$/i.test(h)) return 'studio.youtube.com';
+  if (/youtube\.com$/i.test(h)) return 'youtube.com';
+  return ONE_PER_FOLDER.some((r) => r.test(h)) ? h.toLowerCase() : '';
+};
+// The tab this folder already keeps for that site, if it has one.
+function soleTab(url, who) {
+  const key = oneKey(url);
+  if (!key) return null;
+  return tabs.filter((t) => t.identity === who && t.id !== programId && oneKey(t.url) === key && !t.private)
+    .sort((a, b) => b.lastActive - a.lastActive)[0] || null;
+}
+
+// Tabs that were already piled up before the rule above existed. Keeps the one
+// used most recently in each folder and closes its copies. Pinned tabs are
+// never the one that goes.
+function mergeDupes() {
+  const keep = new Map();
+  const drop = [];
+  for (const t of [...tabs].sort((a, b) => (b.pinned - a.pinned) || (b.lastActive - a.lastActive))) {
+    if (!isFolder(t.identity) || t.private || t.id === programId || t.agent || t.pinned || isStart(t.url) || !t.url) continue;
+    // Either a site that is only ever one place, or the very same address open
+    // twice in the same folder — three Chord Trees tabs are three of one thing.
+    const key = oneKey(t.url) || t.url;
+    if (!key) continue;
+    const k = `${t.identity}|${key}`;
+    if (keep.has(k)) drop.push(t); else keep.set(k, t);
+  }
+  for (const t of drop) {
+    const i = tabs.indexOf(t);
+    if (i >= 0) tabs.splice(i, 1);
+    if (t.view) { try { t.view.webContents.close(); } catch {} }
+  }
+  return drop.length;
+}
+
 function openTab({ url, identity, background, after, agent, pinned } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
+  const who = IDENTITIES[identity] ? identity : folderForNewTab();
+  const only = url && isFolder(who) ? soleTab(url, who) : null;
+  if (only) {
+    // Go to the one that is already open, and take it where you asked to go.
+    ensureView(only);
+    if (url && hostOf(url) === hostOf(only.url) && url !== only.url) {
+      only.url = url;
+      only.view.webContents.loadURL(guardUrl(url)).catch(() => {});
+    }
+    if (!background) activate(only.id, agent ? 'agent' : 'user');
+    pushState();
+    return only;
+  }
   const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
   const t = makeTab({ url: safe || url || START_URL, identity, agent, pinned });
   if (safe) t.httpsFrom = url;
@@ -1229,6 +1305,7 @@ function closeTab(id) {
   if (t.fullscreen) { const w = hostWindow(t); if (w) w.setFullScreen(false); }
   if (recTabId === id) { sendEvent('rec-stop'); recTabId = null; }
   if (t.id === programId) { programId = null; showStandby(); }
+  if (cueIds.includes(t.id)) { cueIds = cueIds.filter((x) => x !== t.id); if (cueNextId === t.id) cueNextId = cueIds[0] || null; }
   destroyView(t);
   if (t.popout) { const w = t.popout; t.popout = null; w.destroy(); }
   tabs.splice(i, 1);
@@ -1256,6 +1333,7 @@ function serialize(t) {
 
 function persist() {
   store.data.tabs = tabs.filter((t) => t.identity !== 'vanish' && !t.agentTemp).map(serialize);
+  store.data.cue = cueTabs().map((t) => t.uid);
   const a = byId(activeId);
   store.data.activeIndex = a ? store.data.tabs.findIndex((s) => s.uid === a.uid) : 0;
   // Tab numbers change on every launch, so split views are saved by each tab's lasting id.
@@ -1349,8 +1427,16 @@ function layout() {
   }
   if (stageWin && !stageWin.isDestroyed()) {
     const [sw, sh] = stageWin.getContentSize();
-    const p = byId(programId);
-    if (p && p.view) p.view.setBounds({ x: 0, y: 0, width: sw, height: sh });
+    // One tab fills the stage; two or three share it in equal columns, which is
+    // how a class sees the app and the notation at the same time.
+    const up = stageTabs();
+    const n = Math.max(1, up.length);
+    up.forEach((t, i) => {
+      if (!t.view) return;
+      const x = Math.round((sw * i) / n);
+      const w = Math.round((sw * (i + 1)) / n) - x;
+      t.view.setBounds({ x, y: 0, width: w, height: sh });
+    });
     if (stageStandby) stageStandby.setBounds({ x: 0, y: 0, width: sw, height: sh });
   }
   for (const t of tabs) {
@@ -1430,9 +1516,12 @@ function openStage() {
   const s = settings();
   stageWin = new BaseWindow({
     width: s.stageWidth, height: s.stageHeight, useContentSize: true, title: 'Cue Stage — On Air',
-    backgroundColor: '#000000', enableLargerThanScreen: true, fullscreenable: true, show: true,
+    backgroundColor: '#000000', enableLargerThanScreen: true, fullscreenable: true, show: false,
   });
   stageWin.setContentSize(s.stageWidth, s.stageHeight);
+  // It opens behind him, not over him. The Stage is what OBS and Zoom capture;
+  // he carries on working in Cue's own window and never has to put it back.
+  stageWin.showInactive();
   stageStandby = new WebContentsView({ webPreferences: { contextIsolation: true, sandbox: true } });
   stageWin.contentView.addChildView(stageStandby);
   stageStandby.webContents.loadFile(STAGE_HTML);
@@ -1459,21 +1548,121 @@ function setLive(on, stageClosed) {
   tabs.forEach((t) => t.view && t.view.webContents.send('cue:hold', on));
   if (on) {
     heldCount = 0;
+    // Going live is the moment OBS has to be there. If it was shut when Cue
+    // started, try again now rather than fail quietly mid-class.
+    if (obs.status !== 'connected' && settings().obs.host) obs.connect(settings().obs);
     openStage();
   } else {
     if (heldCount) sendEvent('toast', `${heldCount} notification${heldCount === 1 ? '' : 's'} held during class. See Bills & alerts.`);
+    for (const t of stageIds.map(byId)) {
+      if (!t) continue;
+      t.view && t.view.webContents.send('cue:safe', false);
+      if (t.host === 'stage') moveView(t, mainWin, 'main');
+    }
     const p = byId(programId);
-    if (p) { p.view && p.view.webContents.send('cue:safe', false); moveView(p, mainWin, 'main'); }
-    programId = null;
+    if (p && p.host === 'stage') { p.view && p.view.webContents.send('cue:safe', false); moveView(p, mainWin, 'main'); }
+    programId = null; stageIds = [];
     if (!stageClosed && stageWin && !stageWin.isDestroyed()) stageWin.destroy();
     stageWin = null; stageStandby = null;
   }
   layout(); pushState();
 }
 
-function take() {
+// ---------------------------------------------------------------- the cue list
+// What is lined up to go on air, in his order, drag by drag. Before this, TAKE
+// put up whatever tab he happened to be looking at — which meant lining a class
+// up was the same as clicking through it. Now he drags the tabs he will use
+// into the box once, and from then on the class is TAKE, TAKE, TAKE.
+//
+// Every cued tab is kept awake and rendered, so going on air is a swap, not a
+// page load: that is what keeps the switch instant with nothing to catch up on.
+let cueIds = [];
+let cueNextId = null;
+// What is on the stage right now. Usually one tab; two or three when he has
+// asked for a side-by-side stage, which OBS and Zoom then capture as one
+// window with no sidebar and no address bar in it.
+let stageIds = [];
+const stageTabs = () => stageIds.map(byId).filter((t) => t && t.view && t.host === 'stage');
+const cueTabs = () => cueIds.map(byId).filter(Boolean);
+const CUE_MAX = 6;
+
+function cueWake() {
+  for (const t of cueTabs()) ensureView(t);
+}
+function cueAdd(id) {
+  const t = byId(id);
+  if (!t || t.private || t.identity === 'vanish') { sendEvent('toast', 'That tab never goes on air.'); return; }
+  if (cueIds.includes(id)) { cueNextId = id; pushState(); return; }
+  if (cueIds.length >= CUE_MAX) { sendEvent('toast', `Six is as many as the cue holds. Take one out first.`); return; }
+  cueIds.push(id);
+  if (!cueNextId) cueNextId = id;
+  ensureView(t);
+  pushState(); persist();
+  sendEvent('toast', `${t.title} is cued at ${cueIds.length}. Press TAKE to put it on air.`);
+}
+function cueRemove(id) {
+  cueIds = cueIds.filter((x) => x !== id);
+  if (cueNextId === id) cueNextId = cueIds[0] || null;
+  pushState(); persist();
+}
+function cueMove(id, to) {
+  const from = cueIds.indexOf(id);
+  if (from < 0) return;
+  cueIds.splice(from, 1);
+  cueIds.splice(Math.max(0, Math.min(to, cueIds.length)), 0, id);
+  pushState(); persist();
+}
+// Step to the one after whatever is on air. One key, all class long.
+function cueStep(d = 1) {
+  const list = cueTabs();
+  if (!list.length) return;
+  const at = list.findIndex((t) => t.id === programId);
+  const i = at < 0 ? 0 : (at + d + list.length) % list.length;
+  take(list[i].id);
+}
+
+// Two or three cued tabs on the stage at once, in cue order: the app beside the
+// notation, say. One is the ordinary stage, so n=1 goes back to a single tab.
+function stageSplit(n) {
+  const want = Math.max(1, Math.min(3, n));
+  const list = cueTabs().filter((t) => !t.private).slice(0, want);
+  if (!list.length) { sendEvent('toast', 'Nothing is cued yet. Drag a tab onto the On-air box first.'); return; }
+  if (!live) setLive(true);
+  // Anything up there that is not in the new set comes home first.
+  for (const t of stageIds.map(byId)) {
+    if (t && t.host === 'stage' && !list.includes(t)) { t.view && t.view.webContents.send('cue:safe', false); moveView(t, mainWin, 'main'); }
+  }
+  for (const t of list) {
+    ensureView(t);
+    if (t.host === 'popout' && t.popout) { const w = t.popout; t.popout = null; moveView(t, mainWin, 'main'); w.destroy(); }
+    if (t.host !== 'stage') moveView(t, stageWin, 'stage');
+    if (settings().safeShare) t.view.webContents.send('cue:safe', true);
+  }
+  stageIds = list.map((t) => t.id);
+  programId = stageIds[0];
+  if (stageStandby) stageStandby.setVisible(false);
+  const first = list[0];
+  if (first && first.obsScene) obs.setScene(first.obsScene);
+  // Never leave him looking at a tab that has gone to the stage.
+  if (stageIds.includes(activeId)) {
+    const other = spaceOrder().find((t) => !stageIds.includes(t.id));
+    if (other) { ensureView(other); activeId = other.id; }
+  }
+  layout(); pushState();
+  sendEvent('toast', want === 1 ? `${first.title} is on air.` : `${want} tabs are on air side by side.`);
+}
+
+// `id` lets a tab be put up straight from the cue list or dropped on the box:
+// that tab goes up, whatever is in front of him. With no id it is the one the
+// cue list has marked next, and only if the cue is empty does it fall back to
+// the tab he is looking at.
+function take(id) {
   if (!live) { setLive(true); }
-  const next = byId(activeId);
+  const cued = cueTabs();
+  const pick = id != null ? id
+    : (cued.find((t) => t.id === cueNextId) || cued.find((t) => t.id !== programId) || {}).id
+    ?? activeId;
+  const next = byId(pick);
   if (!next) return;
   if (next.private) { sendEvent('toast', `${next.title} is a private tab. It never goes on air.`); return; }
   if (next.id === programId) { sendEvent('toast', 'That tab is already on air.'); return; }
@@ -1483,6 +1672,7 @@ function take() {
   moveView(next, stageWin, 'stage');
   if (stageStandby) stageStandby.setVisible(false);
   programId = next.id;
+  stageIds = [next.id];
   if (settings().safeShare) next.view.webContents.send('cue:safe', true);
   if (prev) {
     prev.view && prev.view.webContents.send('cue:safe', false);
@@ -1494,6 +1684,11 @@ function take() {
     if (other) ensureView(other);
   }
   if (next.obsScene) obs.setScene(next.obsScene);
+  // The cue moves on by itself, so TAKE, TAKE, TAKE walks the class in order.
+  const list = cueTabs();
+  const at = list.findIndex((t) => t.id === next.id);
+  cueNextId = at >= 0 ? (list[(at + 1) % list.length] || {}).id || null : (list[0] || {}).id || null;
+  cueWake();
   layout(); pushState();
   sendEvent('toast', `${next.title} is on air${next.obsScene ? ` · OBS: ${next.obsScene}` : ''}.`);
 }
@@ -1668,18 +1863,29 @@ function sendState() {
       id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, name: t.name || null, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
       siteName: tabName(t), siteLogo: siteLogo(t),
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
-      aiAllowed: t.aiAllowed, playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
+      aiAllowed: t.aiAllowed, aiOk: agentCanAct(t), aiSite: handedOverSite(t),
+      // Handed over whether or not agents are paused, so the AI row can still
+      // show him what they have while they are on hold.
+      aiHanded: !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'),
+      playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
     space: store.data.space, spaces: spaces(), kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
-    ai: aiView ? { which: store.data.aiWhich } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
-    activeId, programId, live, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
-    folder: openFolder(), folders: FOLDERS, whose: store.data.whose || {},
+    ai: aiView ? { which: aiWhich(), names: AI_NAMES, folder: aiIdentity } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
+    activeId, programId, live, cue: cueIds.filter((id) => byId(id)), cueNext: cueNextId, stageIds, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
+    // The top row is the accounts that are HIS. The AI agent folder is no
+    // longer one of them: agents work in his folders now, so it only appears
+    // while it still holds tabs from before.
+    folder: openFolder(), folders: FOLDERS,
+    pickFolders: FOLDERS.filter((k) => k !== 'agent' || tabs.some((t) => t.identity === 'agent')),
+    aiPaused: aiPaused(), aiCount: aiTabs().length,
+    whose: store.data.whose || {},
     split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
     collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
-    agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: agentLog[agentLog.length - 1] || null },
+    agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: agentLog[agentLog.length - 1] || null,
+      sites: Object.entries(AGENT_SITES).map(([id, v]) => ({ id, name: v.name, what: v.what })) },
     update: updater ? updater.state() : null,
   });
 }
@@ -1800,7 +2006,14 @@ function uiCommand(cmd, a = {}) {
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
     case 'live': setLive(!!a.on); break;
-    case 'take': take(); break;
+    case 'take': take(a.id); break;
+    case 'cue-add': cueAdd(Number(a.id)); break;
+    case 'cue-remove': cueRemove(Number(a.id)); break;
+    case 'cue-next': cueNextId = Number(a.id); pushState(); break;
+    case 'cue-move': cueMove(Number(a.id), Number(a.to)); break;
+    case 'cue-step': cueStep(a.dir === -1 ? -1 : 1); break;
+    case 'stage-split': stageSplit(Number(a.n) || 1); break;
+    case 'cue-clear': cueIds = []; cueNextId = null; pushState(); persist(); break;
     case 'popout': popOut(t); break;
     case 'overlay': setOverlay(a.on); break;
     case 'collapse': store.data.collapsed[a.group] = !store.data.collapsed[a.group]; store.save(); pushState(); break;
@@ -1853,6 +2066,43 @@ function uiCommand(cmd, a = {}) {
       sendEvent('toast', `That Space is called ${to} now.`);
       break;
     }
+    case 'space-add': {
+      const list = [...spaces()];
+      if (list.length >= SPACES_MAX) { sendEvent('toast', `Nine Spaces is the most Cue keeps.`); break; }
+      const to = String(a.name || '').trim().slice(0, 18) || `Space ${list.length + 1}`;
+      if (list.includes(to)) { sendEvent('toast', `You already have a Space called ${to}.`); break; }
+      list.push(to);
+      store.data.spaces = list;
+      buildMenu(); store.save(); persist(); pushState();
+      sendEvent('toast', `${to} is ready. Click it in the sidebar to work there.`);
+      break;
+    }
+    // Removing a Space never throws tabs away: they move to the first Space,
+    // where he can find them again.
+    case 'space-remove': {
+      const list = [...spaces()];
+      const i = list.indexOf(a.name);
+      if (i < 0 || list.length <= 1) break;
+      list.splice(i, 1);
+      store.data.spaces = list;
+      const home = list[0];
+      let moved = 0;
+      for (const x of tabs) if (x.space === a.name) { x.space = home; moved++; }
+      for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, store.data.collapsed]) {
+        if (box) delete box[a.name];
+      }
+      if (settings().spaceLogins) delete settings().spaceLogins[a.name];
+      if (store.data.space === a.name) { store.data.space = home; }
+      buildMenu(); store.save(); persist(); layout(); pushState();
+      sendEvent('toast', moved ? `${a.name} is gone. Its ${moved} tab${moved === 1 ? '' : 's'} moved to ${home}.` : `${a.name} is gone.`);
+      break;
+    }
+    case 'tidy-dupes': {
+      const n = mergeDupes();
+      layout(); pushState(); persist();
+      sendEvent('toast', n ? `Closed ${n} duplicate${n === 1 ? '' : 's'}. One Gmail, one WhatsApp, one YouTube per folder.` : 'Nothing to tidy — you already have one of each.');
+      break;
+    }
     case 'ads-here': {
       if (!shield || !t) break;
       const host = shield.hostOf(t.url);
@@ -1888,6 +2138,8 @@ function uiCommand(cmd, a = {}) {
     case 'peek-close': closePeek(); break;
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
     case 'ai': toggleAI(a.which); break;
+    // One click on the AI badge in the sidebar, the same thing the right-click menu does.
+    case 'ai-tab': { const x = byId(a.id); if (x && !x.agent && x.identity !== 'vanish' && !x.private) { x.aiAllowed = !x.aiAllowed; pushState(); persist(); } break; }
     case 'ai-ask': askAboutPage(a.which); break;
     case 'strip': stripOpen = !stripOpen; layout(); pushState(); break;
     case 'music': if (wc) wc.send('cue:music', a.op, a.value); break;
@@ -2017,6 +2269,7 @@ function moveTab({ id, dir }) {
 function setSetting(key, value) {
   const s = settings();
   if (key.startsWith('obs.')) { s.obs[key.slice(4)] = key === 'obs.port' ? Number(value) || 4455 : value; }
+  else if (key.startsWith('agentSites.')) { s.agentSites = { ...s.agentSites, [key.slice(11)]: !!value }; }
   else if (key.startsWith('label.')) { s.identityLabels[key.slice(6)] = value; }
   else if (key.startsWith('kit.')) { s.kits[key.slice(4)] = !!value; buildMenu(); if (key === 'kit.music' && !value) stripOpen = false; layout(); }
   else if (key.startsWith('spaceLogin.')) { s.spaceLogins[key.slice(11)] = value; }
@@ -2199,35 +2452,48 @@ function closePeek() {
 }
 
 // ---------------------------------------------------------------- AI side panel
+// An older Cue stored "claude" or "chatgpt" here, which were the two consumer chats. Anything that
+// is not one of the two tools now becomes Claude Code.
+const aiWhich = () => (AI_HOME[store.data.aiWhich] ? store.data.aiWhich : 'claudecode');
+// The panel borrows the open folder's login, so Claude Code and Codex come up already signed in as
+// whoever he is working as. Switching folder reloads it as that account rather than leaving the
+// last one's session sitting in the panel.
+let aiIdentity = null;
 function toggleAI(which) {
-  if (aiView && (!which || which === store.data.aiWhich)) {
-    const v = aiView; aiView = null;
+  if (aiView && (!which || which === aiWhich())) {
+    const v = aiView; aiView = null; aiIdentity = null;
     try { mainWin.contentView.removeChildView(v); v.webContents.close(); } catch {}
-  } else openAI(which || store.data.aiWhich);
+  } else openAI(which || aiWhich());
   layout(); pushState();
 }
 function openAI(which, url) {
-  const id = settings().defaultIdentity;
-  store.data.aiWhich = which; store.save();
+  const id = isFolder(openFolder()) ? openFolder() : settings().defaultIdentity;
+  store.data.aiWhich = AI_HOME[which] ? which : aiWhich(); store.save();
+  if (aiView && aiIdentity !== id) {
+    const v = aiView; aiView = null;
+    try { mainWin.contentView.removeChildView(v); v.webContents.close(); } catch {}
+  }
   if (!aiView) {
+    aiIdentity = id;
     aiView = new WebContentsView({ webPreferences: { session: sessionFor(id), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
     aiView.setBackgroundColor('#FFFFFF');
     aiView.webContents.setWindowOpenHandler(({ url: u }) => { openTab({ url: u, identity: id }); return { action: 'deny' }; });
     mainWin.contentView.addChildView(aiView);
   }
-  aiView.webContents.loadURL(url || AI_HOME[which]).catch(() => {});
+  aiView.webContents.loadURL(url || AI_HOME[store.data.aiWhich]).catch(() => {});
   layout(); pushState();
 }
+// A question needs a surface that takes one in its address. Codex has no such address, so asking
+// about a page goes to Claude's chat whichever tool the panel is showing.
 function askAI(which, prompt) {
-  const base = which === 'chatgpt' ? 'https://chatgpt.com/?q=' : 'https://claude.ai/new?q=';
-  openAI(which, base + encodeURIComponent(prompt.slice(0, 6000)));
+  openAI(which, 'https://claude.ai/new?q=' + encodeURIComponent(prompt.slice(0, 6000)));
 }
 async function askAboutPage(which) {
   const t = byId(activeId);
-  if (!t || !t.view || t.identity === 'vanish' || isStart(t.url)) { openAI(which || store.data.aiWhich); return; }
+  if (!t || !t.view || t.identity === 'vanish' || isStart(t.url)) { openAI(which || aiWhich()); return; }
   const wc = t.view.webContents; let text = '';
   try { text = await wc.executeJavaScript('(getSelection().toString() || document.body.innerText).slice(0, 4000)', true); } catch {}
-  askAI(which || store.data.aiWhich, `I'm looking at this page: ${wc.getTitle()}\n${wc.getURL()}\n\n${text}\n\nWhat should I know about it?`);
+  askAI(which || aiWhich(), `I'm looking at this page: ${wc.getTitle()}\n${wc.getURL()}\n\n${text}\n\nWhat should I know about it?`);
 }
 
 // ---------------------------------------------------------------- alerts and bills
@@ -2277,7 +2543,7 @@ function archiveOldTabs() {
   const cutoff = Date.now() - days * 86400000;
   const inSplit = new Set(store.data.split.ids);
   for (const t of [...tabs]) {
-    if (t.pinned || t.id === activeId || t.id === programId || t.identity === 'vanish' || t.agent || t.playing || t.audible || mustStayAwake(t) || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
+    if (t.pinned || t.id === activeId || t.id === programId || cueIds.includes(t.id) || t.identity === 'vanish' || t.agent || t.playing || t.audible || mustStayAwake(t) || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
     store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
     destroyView(t); tabs.splice(tabs.indexOf(t), 1);
   }
@@ -2627,9 +2893,15 @@ const agentApi = {
   get: (id) => byId(Number(id)),
   canRead: (t) => !!t && t.identity !== 'vanish' && !hiddenFromAI(t) && !/^(cue|file):/.test(t.url), // your Library, Bills and own files stay yours
   canAct: (t) => agentCanAct(t),
-  open: ({ url, identity = 'agent', background = true, newTab = false }) => {
+  paused: () => aiPaused(),
+  open: ({ url, identity, background = true, newTab = false }) => {
     const target = agentApi.safeUrl(url);
-    const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : 'agent';
+    // An agent works in HIS accounts, in the folder he has open, not in a
+    // separate browser of its own. That is what stops a second WhatsApp and a
+    // second inbox appearing beside the ones he uses. The old AI agent folder
+    // is still there for anything already filed in it, but nothing new goes
+    // there unless an agent names it.
+    const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : openFolder();
     // One tab per site, not one per instruction. An agent sent to WhatsApp six
     // times used to leave six WhatsApp tabs behind; now it goes back to the one
     // it already has open for that site and navigates it. A tab Jason has handed
@@ -2668,7 +2940,10 @@ const agentApi = {
   // tabs, and that stays true; this tool can work in the pinned WhatsApp tabs because it can
   // do nothing else there — list chats, read one, send a message he asked for, and say whether
   // the account is linked. Private tabs, Vanish tabs and the tab on air are still off limits.
-  whatsapp: (a) => whatsapp(a),
+  whatsapp: (a) => {
+    if (aiPaused()) throw new Error('Jason has paused AI agents in Cue, WhatsApp included. Stop here and tell him — do not open WhatsApp another way.');
+    return whatsapp(a);
+  },
   setMuted, setVolume,
   // ---- the teaching rig's door (Stream Deck pedal + OBS), not an AI agent's.
   // OBS captures Cue as an application, so the class sees whatever tab is
@@ -2705,8 +2980,33 @@ function hiddenFromAI(t) { return t.private || t.id === programId; }
 // allows. Everything else still has to be a tab an agent opened, or one he ticked himself.
 // The host comes from whatsapp.js so there is one answer to "is this WhatsApp", not two
 // that drift apart the day either side changes.
-const HANDED_OVER = (t) => hostOf(t.url) === WA_HOST() && (t.identity === 'personal' || t.identity === 'school');
-function agentCanAct(t) { return !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
+// Two sites are handed over by the setting rather than tab by tab, because handing them over one
+// tab at a time is the thing nobody keeps up with. WhatsApp has to work this way - a second linked
+// browser is not a thing WhatsApp allows, so the agents answer in the tab his phone is linked to.
+// Gmail is here because he asked for it: the agents read and draft in the same inbox he has open,
+// in whichever folder it belongs to, instead of a second copy. Either can be switched off in
+// Settings, and neither reaches a private tab, a Vanish tab or the tab on air.
+const AGENT_SITES = {
+  whatsapp: { name: 'WhatsApp', what: 'Read and reply in the tab your phone is linked to', is: (h) => h === WA_HOST() },
+  gmail: { name: 'Gmail', what: 'Read and draft in the inbox you already have open', is: (h) => h === 'mail.google.com' },
+};
+const handedOverSite = (t) => {
+  if (t.identity !== 'personal' && t.identity !== 'school') return null;
+  const h = hostOf(t.url); const on = settings().agentSites || {};
+  const hit = Object.entries(AGENT_SITES).find(([k, v]) => on[k] !== false && v.is(h));
+  return hit ? hit[1].name : null;
+};
+const HANDED_OVER = (t) => !!handedOverSite(t);
+// One switch that stops every agent mid-job without taking anything away. The
+// tabs stay handed over, so resuming is one click and nothing has to be set up
+// again.
+const aiPaused = () => !!settings().aiPaused;
+function agentCanAct(t) { return !aiPaused() && !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
+// What the AI row in the sidebar counts: every tab an agent may work in, plus
+// any tab still sitting in the old AI agent folder. Paused or not — he needs to
+// see what is handed over even while it is on hold.
+const aiTabs = () => tabs.filter((t) => t.identity !== 'vanish' && !t.private && t.id !== programId
+  && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'));
 
 // ---------------------------------------------------------------- menus
 const MAC = process.platform === 'darwin';
@@ -2732,6 +3032,9 @@ function buildMenu() {
     ...(process.platform === 'darwin' ? [{
       label: app.name, submenu: [
         { role: 'about' },
+        // Where every Mac app keeps it, so it is findable without hunting for
+        // the cog at the foot of the sidebar.
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => sendEvent('open-settings') },
         { label: 'Check for Updates…', click: () => checkForUpdates() },
         { type: 'separator' },
         { role: 'services' },
@@ -2801,6 +3104,19 @@ function buildMenu() {
       label: 'Live', submenu: [
         { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: () => setLive(!live) },
         { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: () => take() },
+        { type: 'separator' },
+        { label: 'Cue This Tab', accelerator: 'CmdOrCtrl+Shift+C', click: () => cueAdd(activeId) },
+        { label: 'Stage: One Tab', click: () => stageSplit(1) },
+        { label: 'Stage: Two Side by Side', click: () => stageSplit(2) },
+        { label: 'Stage: Three Side by Side', click: () => stageSplit(3) },
+        { label: 'Next Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Right', click: () => cueStep(1) },
+        { label: 'Previous Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Left', click: () => cueStep(-1) },
+        { type: 'separator' },
+        // One key per slot, so a class is numbers, not hunting for a tab.
+        ...[1, 2, 3, 4, 5, 6].map((n) => ({
+          label: `On Air: Cue ${n}`, accelerator: `CmdOrCtrl+Shift+${n}`,
+          click: () => { const x = cueTabs()[n - 1]; if (x) take(x.id); else sendEvent('toast', `Nothing is cued at ${n} yet. Drag a tab onto the On-air box.`); },
+        })),
       ],
     }] : []),
     { label: 'Tools', submenu: toolMenu(cmd) },
@@ -2945,6 +3261,13 @@ function createMain() {
 
   const saved = store.data.tabs || [];
   for (const s of saved) tabs.push(makeTab(s));
+  // Deliberately NOT merged at launch. Closing his tabs for him, unasked, is
+  // the kind of help nobody wants: the rule in openTab stops new copies being
+  // made, and the button in Settings tidies the old ones when he says so.
+  // The cue survives a restart: the tabs he lined up for a class are still
+  // lined up tomorrow morning.
+  cueIds = (store.data.cue || []).map((u) => (tabs.find((t) => t.uid === u) || {}).id).filter(Boolean);
+  cueNextId = cueIds[0] || null;
   seedEveryday();
   if (!tabs.length) tabs.push(makeTab({ url: START_URL }));
   const first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
@@ -2971,17 +3294,33 @@ app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL
 app.whenReady().then(async () => {
   store = new Store(app.getPath('userData'), 'cue.json', {
     tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, savedSplit: null, savedSpaceSplit: {}, collapsed: {}, permissions: {},
-    space: 'Teach', spaceSplit: {}, folder: 'school', whose: {}, aiWhich: 'claude', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
+    space: 'Teach', spaceSplit: {}, folder: 'school', whose: {}, aiWhich: 'claudecode', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
     settings: {
       autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
       stageWidth: 1920, stageHeight: 1080, obs: { host: '127.0.0.1', port: 4455, password: '' },
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
-  store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Business: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Finance: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  // The Space called Business is the money one, so it says Finance. Done once;
+  // double-click it in the sidebar to call it anything else.
+  if (!store.data.financeNamed) {
+    store.data.financeNamed = true;
+    const list = Array.isArray(store.data.spaces) ? [...store.data.spaces] : [...SPACES_DEFAULT];
+    const i = list.indexOf('Business');
+    if (i >= 0 && !list.includes('Finance')) {
+      list[i] = 'Finance';
+      store.data.spaces = list;
+      for (const t of store.data.tabs || []) if (t.space === 'Business') t.space = 'Finance';
+      for (const box of [store.data.savedSpaceSplit, store.data.collapsed, store.data.settings.spaceLogins]) {
+        if (box && Object.prototype.hasOwnProperty.call(box, 'Business')) { box.Finance = box.Business; delete box.Business; }
+      }
+      if (store.data.space === 'Business') store.data.space = 'Finance';
+    }
+  }
   // Browsers that have been running since before folders existed have no folder
   // in the store. Open the one the tabs are actually in, not a guess.
   if (!FOLDERS.includes(store.data.folder)) {
@@ -3044,7 +3383,10 @@ app.whenReady().then(async () => {
     const v = updater.state().latest;
     if (updater.installOnQuit()) logAgent({ tool: 'update', note: `installed ${v} on quit` });
   });
-  if (settings().obs.autoConnect) obs.connect(settings().obs);
+  // Connect to OBS on its own. It used to wait for a button nobody knew was
+  // there, so a class would start with Cue and OBS not talking. OBS being shut
+  // costs one failed socket and nothing else.
+  if (settings().obs.autoConnect !== false && settings().obs.host) obs.connect(settings().obs);
   sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
   setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
   if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });

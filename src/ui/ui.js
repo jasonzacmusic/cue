@@ -152,7 +152,9 @@ const inSpace = (t) => t.space === S.space;
 // The two axes, kept apart on purpose: WHOSE account (the folder) and WHICH
 // job (the Space). A tab shows in the sidebar when it is in both.
 const inFolder = (t) => t.identity === S.folder;
-const here = (t) => inSpace(t) && inFolder(t);
+// With the AI row switched on, the two axes step aside: you are looking at
+// what the agents have, wherever it lives.
+const here = (t) => (aiFilter ? !!t.aiHanded : inSpace(t) && inFolder(t));
 
 // Typing a name into the sidebar is the one thing in this window that must not
 // be interrupted. The sidebar is rebuilt from scratch on every state push - a
@@ -192,7 +194,7 @@ function render() {
   document.body.dataset.space = S.space;
   applySide();
   lastSpace = S.space;
-  if (!editingName) { renderSpaces(); renderFolders(); renderPins(); renderGroups(); renderElsewhere(); }
+  if (!editingName) { renderSpaces(); renderFolders(); renderAI(); renderPins(); renderGroups(); renderElsewhere(); }
   renderUpdate();
   renderBar();
   renderContent();
@@ -286,7 +288,7 @@ function renderGutters() {
 // YouTube and WhatsApp — all three at once, nothing to toggle.
 function renderFolders() {
   const box = $('#folders'); box.innerHTML = '';
-  for (const id of S.folders) {
+  for (const id of (S.pickFolders || S.folders)) {
     const v = S.identities[id]; if (!v) continue;
     const mine = id === S.folder;
     const all = S.tabs.filter((t) => t.identity === id).length;
@@ -353,7 +355,7 @@ function renderFolders() {
 // names where the rest are and takes you there in one click.
 function renderElsewhere() {
   const box = $('#elsewhere'); box.innerHTML = '';
-  const others = S.folders
+  const others = (S.pickFolders || S.folders)
     .filter((id) => id !== S.folder)
     .map((id) => ({ id, n: S.tabs.filter((t) => t.space === S.space && t.identity === id).length }))
     .filter((x) => x.n);
@@ -447,6 +449,9 @@ function renderExtras() {
   $('#aihead').hidden = !S.ai;
   $('#aibtn').classList.toggle('on', !!S.ai);
   document.querySelectorAll('[data-ai]').forEach((b) => b.classList.toggle('on', !!S.ai && b.dataset.ai === S.ai.which));
+  // Say whose login the panel is using, so he is never guessing which account Claude Code or Codex
+  // came up as.
+  $('#aiwho').textContent = S.ai && S.ai.folder ? `as ${(S.identities[S.ai.folder] || {}).name || S.ai.folder}` : '';
   $('#peekbar').hidden = !S.peek;
   if (S.peek) $('#peektitle').textContent = S.peek.title;
   $('#recbtn').hidden = !S.recording;
@@ -565,7 +570,22 @@ function tabRow(t, splitIds) {
   if (S.live && t.id === S.programId) ctl.append(el('span', 'tally on', 'ON AIR'));
   else if (S.live && t.id === S.activeId) ctl.append(el('span', 'tally cue', 'CUED'));
   else if (t.private) ctl.append(el('span', 'tally priv', 'PRIVATE'));
-  else if (t.agent) ctl.append(el('span', 'tally ai', 'AI'));
+
+  // Handing a tab to Claude Code or Codex used to mean finding a checkbox three levels into a
+  // right-click menu, so nobody did it. It is a button on the row now: lit means agents may work
+  // in this tab, faint means only he can. A tab an agent opened itself is always lit and cannot be
+  // switched off from here - closing it is how you take it back.
+  if (!t.private && t.identity !== 'vanish' && !String(t.url || '').startsWith('cue://')) {
+    const fixed = t.agent || t.aiSite;
+    const ai = el('button', 'aitog' + (t.aiOk ? ' on' : ' idle'), 'AI');
+    tip(ai, t.agent ? 'An agent opened this tab, so it can work here'
+      : t.aiSite ? `${t.aiSite} is handed to agents for every folder \u00b7 change that in Settings`
+      : t.aiOk ? 'Claude Code and Codex may work in this tab \u00b7 click to take it back'
+               : 'Only you can use this tab \u00b7 click to hand it to Claude Code and Codex');
+    if (fixed) ai.disabled = true;
+    else ai.onclick = (e) => { e.stopPropagation(); send('ai-tab', { id: t.id }); };
+    ctl.append(ai);
+  }
 
   if (t.playing || t.audible) {
     const m = el('button', 'media', t.playing ? '❚❚' : '▶');
@@ -723,10 +743,89 @@ function renderContent() {
 
 function renderLive() {
   const box = $('#livebox');
-  box.hidden = !S.live;
+  // Always there, always ready. Off air it is a landing strip: drop a tab on it
+  // and that tab goes up, which is the whole gesture — no switch to find first.
+  box.hidden = false;
+  box.classList.toggle('off', !S.live);
   const p = S.tabs.find((t) => t.id === S.programId);
-  $('#lb-title').textContent = p ? p.title : 'Standby: press TAKE';
+  const cued = (S.cue || []).map((id) => S.tabs.find((t) => t.id === id)).filter(Boolean);
+  $('#lb-title').textContent = S.live ? (p ? p.title : 'Nothing up yet') : 'Off air';
+  $('#lb-end').hidden = !S.live;
+  // The picture is what the class is seeing. With nothing up there is nothing
+  // to show, and an empty black panel the height of the sidebar says nothing.
+  $('#lb-thumb').hidden = !p;
   if (!p) $('#lb-thumb').removeAttribute('src');
+
+  // The cue: the tabs he has lined up, in his order. Drag one in, press TAKE.
+  const list = $('#lb-cue'); list.innerHTML = '';
+  cued.forEach((t, i) => {
+    const row = el('div', 'cu' + (t.id === S.programId ? ' onair' : '') + (t.id === S.cueNext ? ' next' : ''));
+    row.append(el('b', 'cun', String(i + 1)));
+    row.append(el('span', 'cut', esc(shortName(t) || t.title)));
+    const x = el('button', 'cux', '×');
+    tip(x, 'Take it out of the cue', 'The tab stays open.');
+    x.onclick = (e) => { e.stopPropagation(); send('cue-remove', { id: t.id }); };
+    row.append(x);
+    tip(row, t.id === S.programId ? 'On air now' : `Cue ${i + 1} · ⇧⌘${i + 1}`,
+      t.id === S.programId ? '' : 'Click to put it on air. It is kept awake, so the switch is instant.');
+    row.onclick = () => send('take', { id: t.id });
+    row.draggable = true;
+    row.ondragstart = (e) => e.dataTransfer.setData('text/cue-tab', String(t.id));
+    list.append(row);
+  });
+  if (!cued.length) list.append(el('div', 'cuempty', 'Drag the tabs for this class in here, then press TAKE.'));
+  $('#lb-take').hidden = false;
+  $('#lb-take').disabled = !cued.length && !S.live;
+
+  // How many of the cued tabs share the stage. One is the ordinary stage;
+  // two or three put the app beside the notation for the class.
+  const lay = $('#lb-lay'); lay.innerHTML = '';
+  const on = (S.stageIds || []).length || 1;
+  [1, 2, 3].forEach((n) => {
+    const b = el('button', on === n && S.live ? 'on' : '', String(n));
+    tip(b, n === 1 ? 'One tab on air' : `${n} cued tabs side by side`,
+      n === 1 ? '' : `Cue ${Array.from({ length: n }, (_, i) => i + 1).join(', ')} go up together.`);
+    b.disabled = cued.length < n;
+    b.onclick = () => send('stage-split', { n });
+    lay.append(b);
+  });
+}
+
+// Dropping a tab on the On-air box puts that tab up, turning Live on if it is
+// off. The same box, live or not, so the gesture never changes.
+(() => {
+  const box = $('#livebox');
+  box.ondragover = (e) => { e.preventDefault(); box.classList.add('drop'); };
+  box.ondragleave = () => box.classList.remove('drop');
+  box.ondrop = (e) => {
+    e.preventDefault(); box.classList.remove('drop');
+    const id = Number(e.dataTransfer.getData('text/cue-tab'));
+    // Dropping CUES it. It does not go on air behind his back — TAKE is still
+    // the moment the class sees something, and it stays his to press.
+    if (id) send('cue-add', { id });
+  };
+})();
+
+// The AI row. Not a folder and not an account: a filter over the tabs agents
+// may work in, wherever they live, with one switch that stops them all.
+let aiFilter = false;
+function renderAI() {
+  const box = $('#airow');
+  const n = S.aiCount || 0;
+  box.innerHTML = '';
+  const b = el('button', 'aifilter' + (aiFilter ? ' on' : ''), '');
+  b.append(el('span', 'nm', 'AI agents'));
+  b.append(el('span', 'ct', String(n)));
+  tip(b, aiFilter ? 'Showing the tabs agents work in' : `${n} tab${n === 1 ? '' : 's'} handed to Claude Code and Codex`,
+    'Click to see just those tabs, wherever they live. They are your tabs — agents work in them beside you.');
+  b.onclick = () => { aiFilter = !aiFilter; render(); };
+  const p = el('button', 'aipause' + (S.aiPaused ? ' on' : ''), S.aiPaused ? 'Resume AI' : 'Pause AI');
+  tip(p, S.aiPaused ? 'Agents are on hold' : 'Stop every agent where it stands',
+    S.aiPaused ? 'Nothing was taken away. Resume and they carry on in the same tabs.'
+      : 'They stop at once and the tabs stay yours. Nothing has to be set up again when you resume.');
+  p.onclick = () => send('setting', { key: 'aiPaused', value: !S.aiPaused });
+  box.append(b, p);
+  box.hidden = !n && !S.aiPaused;
 }
 
 function renderDownloads() {
@@ -1214,8 +1313,33 @@ function openSettings() {
     S.spaces.forEach((n) => {
       const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
       pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
-      sh.append(settingRow(`${n} usually opens in`, pick));
+      const line = el('div', 'row');
+      line.append(pick);
+      if (S.spaces.length > 1) {
+        const rm = el('button', 'btn', 'Remove');
+        rm.title = `Remove ${n}. Its tabs move to ${S.spaces[0] === n ? S.spaces[1] : S.spaces[0]} — nothing is closed.`;
+        rm.onclick = () => { send('space-remove', { name: n }); closeModal(); };
+        line.append(rm);
+      }
+      sh.append(settingRow(`${n} usually opens in`, line));
     });
+    if (S.spaces.length < 9) {
+      const add = el('div', 'row');
+      const nm = el('input'); nm.type = 'text'; nm.placeholder = 'Finance, Church, Admin…'; nm.maxLength = 18;
+      const go = el('button', 'btn', 'Add this Space');
+      const run = () => { const v = nm.value.trim(); if (v) { send('space-add', { name: v }); closeModal(); } };
+      go.onclick = run;
+      nm.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+      add.append(nm, go);
+      sh.append(settingRow('A new Space', add, 'Up to nine. Each one keeps its own tabs, its own layout and the login it opens with.'));
+    }
+    sh.append(el('h3', '', 'One of each'));
+    sh.append(el('div', 'note', 'Gmail, WhatsApp, YouTube, YouTube Studio, Calendar and Drive are one place, not many, so each folder keeps a single tab for each of them and every later click lands in it. This clears up any copies left from before.'));
+    const tidy = el('div', 'row');
+    const tb = el('button', 'btn', 'Merge duplicate tabs');
+    tb.onclick = () => { send('tidy-dupes'); closeModal(); };
+    tidy.append(tb);
+    sh.append(tidy);
     sh.append(el('h3', '', 'Kits'));
     sh.append(el('div', 'note', 'Switch off what you don\'t use and it stays out of your way.'));
     Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
@@ -1329,6 +1453,13 @@ function openSettings() {
     door.onchange = () => send('ai-door', { on: door.checked });
     sh.append(settingRow('Let AI agents drive Cue', door,
       'Stays as you leave it, so an agent can answer WhatsApp or check a page while you teach. While it is off nothing can drive Cue but you, and an AI tool that tries is told why. Either way they never touch private tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it.'));
+    // The two sites that are handed over wholesale, because doing it tab by tab is the thing that
+    // never gets kept up. Both start on.
+    for (const site of (S.agent.sites || [])) {
+      sh.append(settingRow(`Let agents use ${site.name}`,
+        check(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false), site.what));
+    }
+    sh.append(el('div', 'note', 'Every other tab is yours until you hand it over: click the faint AI on its row in the sidebar, and click it again to take it back. A tab an agent opened for itself already carries one.'));
     const cp = el('button', 'btn', 'Copy AI setup'); cp.onclick = () => send('agent-copy');
     const r = el('div', 'row'); r.append(el('span', 'note', S.agent.last ? `Last: ${esc(S.agent.last.agent)} used ${esc(S.agent.last.tool)}` : 'No agent has connected yet.'), cp); sh.append(r);
     const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);
@@ -1371,6 +1502,7 @@ window.cue.onEvent((name, data) => {
   else if (name === 'save-password') credBar(data);
   else if (name === 'rec-start') startRecording();
   else if (name === 'rec-stop') stopRecording();
+  else if (name === 'open-settings') openSettings();
   else if (name === 'music-state' && data) {
     if (data.none) { toast('No video or audio on this page yet.'); return; }
     M.loop = !!data.loop; M.speed = Math.round(data.speed * 100); $('#m-speed').textContent = `${M.speed}%`;

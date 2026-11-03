@@ -44,6 +44,14 @@ button { font: inherit; color: inherit; }
 .tab:hover .close, .tab:hover .movet { display: grid; }
 .movet:focus-visible { display: grid; }
 .spk { position: relative; }
+/* The per-tab hand-over to Claude Code and Codex: same weight as the speaker, same place, so the
+   row never changes shape when a tab is handed over or taken back. */
+.aitog { border: 0; background: transparent; cursor: pointer; font: 600 9px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; padding: 3px 4px; border-radius: 5px; color: var(--muted); }
+.aitog.on { background: var(--agent-wash); color: var(--agent); }
+.aitog.idle { opacity: .28; }
+.tab:hover .aitog.idle, .tab.on .aitog.idle, .tab.active .aitog.idle { opacity: .6; }
+.aitog.idle:hover { opacity: 1; }
+.aitog:disabled { cursor: default; }
 /* A silent tab still shows its speaker, faded, so the control never moves. */
 .spk.idle { opacity: .28; }
 .tab:hover .spk.idle, .tab.on .spk.idle { opacity: .6; }
@@ -171,6 +179,7 @@ body.overlay #content { background: transparent; }
 .aihead { position: fixed; top: var(--bar-h); right: 0; width: var(--ai-w); height: 38px; background: var(--side); border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 4px; padding: 0 6px; z-index: 3; }
 .aihead [data-ai] { border: 0; background: transparent; padding: 4px 9px; border-radius: 6px; cursor: pointer; color: var(--muted); }
 .aihead [data-ai].on { background: var(--raised); color: var(--ink); font-weight: 600; }
+.aihead .aiwho { color: var(--muted); font-size: 11px; margin-left: 2px; white-space: nowrap; }
 .aihead .btn { margin-left: auto; padding: 4px 8px; font-size: 11.5px; }
 
 /* ---------- find anything ---------- */
@@ -453,3 +462,42 @@ body.rail .updatebar { display: none; }
   padding: 7px 13px; border-radius: 999px; background: var(--raised); color: var(--muted); }
 .fpick button:hover { color: var(--ink); }
 .fpick button.on { background: var(--tone); color: var(--raised); }
+
+/* The AI row: a filter over the tabs agents work in, plus one switch that
+   stops them. Deliberately not shaped like a folder — it is not an account. */
+.airow { flex: none; display: flex; align-items: center; gap: 6px; }
+.airow button { border: 1px solid var(--line); background: var(--raised); color: var(--muted); border-radius: 999px;
+  padding: 4px 9px; font: 600 11px/1 -apple-system, system-ui, sans-serif; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.airow button:hover { border-color: var(--muted); color: var(--ink); }
+.aifilter.on { background: var(--agent-wash); border-color: var(--agent); color: var(--agent); }
+.aifilter .ct { font-variant-numeric: tabular-nums; opacity: .75; }
+.aipause { margin-left: auto; }
+.aipause.on { background: var(--onair-wash); border-color: var(--onair); color: var(--onair); }
+
+/* Off air the box is a landing strip, not an alarm. */
+.livebox.off { border-style: dashed; border-color: var(--line); }
+.livebox.off .lb-head { color: var(--muted); }
+.livebox.off .lamp { background: var(--line); box-shadow: none; }
+.livebox.drop { border-style: solid; border-color: var(--onair); background: var(--onair-wash); }
+
+/* The cue: what is lined up, in his order. Small, quiet, always there. */
+.lb-cue { display: flex; flex-direction: column; gap: 3px; }
+.cu { display: flex; align-items: center; gap: 6px; padding: 3px 5px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; color: var(--ink); border: 1px solid transparent; min-width: 0; }
+.cu:hover { background: var(--hover); }
+.cu .cun { flex: none; width: 15px; text-align: center; font: 700 10px/15px -apple-system, system-ui, sans-serif;
+  color: var(--muted); background: var(--hover); border-radius: 4px; }
+.cu .cut { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cu .cux { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0; }
+.cu:hover .cux { opacity: 1; }
+.cu.next { border-color: var(--cued); }
+.cu.next .cun { background: var(--cued-wash); color: var(--cued); }
+.cu.onair { background: var(--onair-wash); }
+.cu.onair .cun { background: var(--onair); color: #fff; }
+.cuempty { font-size: 11px; line-height: 1.35; color: var(--muted); padding: 2px 1px; }
+.take:disabled { opacity: .4; cursor: default; }
+.lb-lay { display: flex; gap: 4px; }
+.lb-lay button { flex: 1; border: 1px solid var(--line); background: var(--raised); color: var(--muted);
+  border-radius: 6px; padding: 3px 0; font: 600 11px/1.3 -apple-system, system-ui, sans-serif; cursor: pointer; }
+.lb-lay button.on { background: var(--onair-wash); border-color: var(--onair); color: var(--onair); }
+.lb-lay button:disabled { opacity: .35; cursor: default; }

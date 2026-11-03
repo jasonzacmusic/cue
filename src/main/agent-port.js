@@ -56,6 +56,7 @@ async function startAgentPort({ port, tokenFile, api }) {
   const need = (t, act) => {
     if (!t) throw new Error('No tab with that id.');
     if (!api.canRead(t)) throw new Error('That tab is private or in a Vanish window. Agents cannot use it.');
+    if (act && api.paused && api.paused()) throw new Error('Jason has paused AI agents in Cue. He is working in these tabs himself. Stop here and say so — do not try another way in. He resumes them with the AI row in the sidebar.');
     if (act && !api.canAct(t)) throw new Error('Agents can only act in tabs they opened, or tabs marked "Let AI agents use this tab". Open your own tab with the open tool (it can use the Personal or School logins).');
     api.ensure(t);
     return t.view.webContents;

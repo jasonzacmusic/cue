@@ -13,6 +13,7 @@
     <button id="sidehide" class="icon nodrag" title="Hide the sidebar (⌘\\)" aria-label="Hide the sidebar"></button>
   </div>
   <div id="folders" class="folders" role="tablist" aria-label="Your folders"></div>
+  <div id="airow" class="airow" hidden></div>
   <div id="spaces" class="spaces" role="tablist" aria-label="Spaces"></div>
   <div class="newrow">
     <button id="newtab" class="newtab" title="New tab (⌘T)" aria-label="New tab"></button>
@@ -20,9 +21,11 @@
   <div id="pins" class="pins"></div>
   <div id="groups" class="groups"></div>
   <div id="elsewhere" class="elsewhere" hidden></div>
-  <div id="livebox" class="livebox" hidden>
+  <div id="livebox" class="livebox">
     <div class="lb-head"><span class="lamp"></span>On air <span id="lb-title" class="lb-title"></span></div>
     <img id="lb-thumb" class="lb-thumb" alt="What students see">
+    <div id="lb-cue" class="lb-cue"></div>
+    <div id="lb-lay" class="lb-lay" role="group" aria-label="How many tabs on air"></div>
     <div class="lb-row"><button id="lb-take" class="take">TAKE</button><button id="lb-end" class="btn">End live</button></div>
   </div>
   <div id="downloads" class="downloads" hidden></div>
@@ -88,8 +91,9 @@
   <button data-t="mark">Mark time</button><button data-t="frame">Grab frame</button>
 </div>
 <div id="aihead" class="aihead" hidden>
-  <button data-ai="claude">Claude</button><button data-ai="chatgpt">ChatGPT</button>
-  <button id="aiask" class="btn">Ask about this page</button>
+  <button data-ai="claudecode">Claude Code</button><button data-ai="codex">Codex</button>
+  <span id="aiwho" class="aiwho"></span>
+  <button id="aiask" class="btn">Ask Claude about this page</button>
   <button id="aiclose" class="icon" aria-label="Close AI panel">×</button>
 </div>
 
