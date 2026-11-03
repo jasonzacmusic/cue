@@ -67,3 +67,32 @@ input::placeholder { color: var(--muted); opacity: .8; }
 
 @media (max-width: 900px) { .page { padding: 20px 16px 44px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* History, read left to right: kind of thing, then website, then its pages.
+   Each column scrolls on its own so a long list never pushes the others away. */
+.miller { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 14px;
+  overflow: hidden; background: var(--raised); min-height: 340px; }
+.mcol { flex: 1 1 0; min-width: 0; padding: 12px 10px; overflow-y: auto; max-height: 64vh;
+  border-right: 1px solid var(--line); }
+.mcol.wide { flex: 1.9 1 0; border-right: 0; }
+.mcol h2 { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  margin: 2px 6px 10px; font-weight: 700; }
+.mhead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.mhead h2 { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--ink); }
+.picks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.pick { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  border: 0; background: transparent; border-radius: 9px; padding: 8px 10px; cursor: pointer;
+  font: inherit; color: var(--ink); text-align: left; }
+.pick:hover { background: var(--hover); }
+.pick.on { background: var(--ink); color: var(--raised); }
+.pick .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pick .ct { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pick.on .ct { color: var(--raised); opacity: .7; }
+.mcol .none { color: var(--muted); padding: 10px; list-style: none; }
+
+/* On a narrow window the three columns become three stacked shelves. */
+@media (max-width: 860px) {
+  .miller { flex-direction: column; min-height: 0; }
+  .mcol { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
+  .mcol.wide { border-bottom: 0; }
+}

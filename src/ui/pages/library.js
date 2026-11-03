@@ -57,11 +57,12 @@
 
   // ---- state ----
   const data = { bookmarks: [], history: [], sites: [], archived: [] };
-  const openSites = new Set(); // which sites you have opened up to see their pages
   const counts = {};
   let tab = 'bookmarks';
   let confirmClear = false;
   let histTimer = 0;
+  let histCat = null;  // which heading is open in the history columns
+  let histSite = null; // which website inside it
 
   const norm = (s) => String(s || '').toLowerCase();
   const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } };
@@ -114,66 +115,87 @@
     for (const [f, items] of folders) out.appendChild(group(f, items.map((b) => row(b, q, []))));
     return list.length;
   }
-  // History is a list of places, not a list of pages. One line per website,
-  // filed under the same headings the sidebar uses, and you open a site up to
-  // see the pages Cue has kept from it — or forget that site completely.
-  function siteEntry(s, q) {
-    const li = el('li', 'row');
-    li.appendChild(el('div', 'ic', (s.host[0] || '?').toUpperCase()));
-    const tx = el('div', 'tx');
-    const a = el('a'); a.href = 'https://' + s.host + '/';
-    hl(a, s.title && s.title !== s.host ? s.title : s.host, q);
-    a.addEventListener('click', (e) => { e.preventDefault(); open('https://' + s.host + '/'); });
-    const u = el('span', 'u'); hl(u, s.host, q);
-    tx.append(a, u); li.appendChild(tx);
 
-    const meta = el('div', 'meta');
-    meta.append(el('span', null, relative(s.lastVisit)), el('span', null, s.visits === 1 ? '1 visit' : s.visits + ' visits'));
-    const openUp = el('button', 'btn small quiet', '');
-    openUp.type = 'button';
-    const pages = el('li', 'pagelist'); pages.hidden = !openSites.has(s.host);
-    const label = () => {
-      openUp.textContent = !s.pages ? 'No pages kept'
-        : openSites.has(s.host) ? 'Hide pages' : (s.pages === 1 ? 'Show 1 page' : 'Show ' + s.pages + ' pages');
-      openUp.disabled = !s.pages;
-    };
-    label();
-    openUp.addEventListener('click', async () => {
-      if (openSites.has(s.host)) { openSites.delete(s.host); pages.hidden = true; label(); return; }
-      openSites.add(s.host); label();
-      pages.textContent = ''; pages.hidden = false;
-      let rows = [];
-      try { rows = (await call('library.pages', { host: s.host })) || []; } catch (e) { rows = []; }
-      if (!rows.length) { pages.appendChild(el('p', 'none', 'Nothing kept from this site yet.')); return; }
-      const ul = el('ul', 'rows');
-      rows.forEach((h) => ul.appendChild(row(h, q, [el('span', null, relative(h.lastVisit))])));
-      pages.appendChild(ul);
-    });
-    const forget = el('button', 'btn small danger', 'Forget');
-    forget.type = 'button';
-    forget.setAttribute('aria-label', 'Forget everything from ' + s.host);
-    let sure = false;
-    forget.addEventListener('click', async () => {
-      if (!sure) { sure = true; forget.textContent = 'Forget it all?'; forget.classList.add('sure'); setTimeout(() => { sure = false; forget.textContent = 'Forget'; forget.classList.remove('sure'); }, 4000); return; }
-      try { await call('library.forget', { host: s.host }); toast('Forgot ' + s.host); } catch (e) { toast('Could not forget that site.'); }
-      openSites.delete(s.host); await loadHistory(); counts.history = data.sites.length; render();
-    });
-    meta.append(openUp, forget);
-    li.appendChild(meta);
-    return [li, pages];
+  // History reads left to right, the way you actually look for something: the kind of
+  // thing it was, then which website, then the pages from it. A site with thirty tabs
+  // is one line in the middle column, not thirty lines buried in a day. Nothing opens
+  // until you ask for it, so the page never shows you everything at once.
+  function pickButton(label, count, on, q, onPick) {
+    const li = el('li');
+    const b = el('button', on ? 'pick on' : 'pick'); b.type = 'button';
+    const nm = el('span', 'nm'); hl(nm, label, q);
+    b.append(nm);
+    if (count != null) b.append(el('span', 'ct', String(count)));
+    b.addEventListener('click', onPick);
+    li.appendChild(b);
+    return li;
   }
 
   function renderHistory(q, out) {
-    const list = data.sites.slice().sort((a, b) => b.lastVisit - a.lastVisit);
-    if (!list.length) { out.appendChild(q ? empty('Nothing found', 'No website matches that.') : empty('No history', 'The websites you visit will show up here, one line each.')); return 0; }
+    const all = data.sites.slice().sort((a, b) => b.lastVisit - a.lastVisit);
+    if (!all.length) { out.appendChild(empty('No history', 'The websites you visit will show up here, filed by the kind of thing they are.')); return 0; }
+    const list = q ? all.filter((s) => norm((s.title || '') + ' ' + s.host).includes(q)) : all;
+    if (!list.length) { out.appendChild(empty('Nothing found', 'No website matches that.')); return 0; }
+
     const cats = new Map();
     for (const s of list) { const k = s.group || 'Everything else'; if (!cats.has(k)) cats.set(k, []); cats.get(k).push(s); }
     const ordered = [...cats.entries()].sort((a, b) => (a[1][0].rank ?? 98) - (b[1][0].rank ?? 98));
+    // A search can empty the category you were in, so land somewhere that exists.
+    if (!cats.has(histCat)) histCat = ordered[0][0];
+    const sites = cats.get(histCat) || [];
+    if (!sites.some((s) => s.host === histSite)) histSite = null;
+
+    const wrap = el('div', 'miller');
+
+    const c1 = el('div', 'mcol');
+    c1.appendChild(el('h2', null, 'Kind of thing'));
+    const u1 = el('ul', 'picks');
     for (const [k, items] of ordered) {
-      const rows = [];
-      items.forEach((s) => rows.push(...siteEntry(s, q)));
-      out.appendChild(group(k, rows));
+      u1.appendChild(pickButton(k, items.length, k === histCat, '', () => { histCat = k; histSite = null; render(); }));
     }
+    c1.appendChild(u1); wrap.appendChild(c1);
+
+    const c2 = el('div', 'mcol');
+    c2.appendChild(el('h2', null, histCat));
+    const u2 = el('ul', 'picks');
+    for (const s of sites) {
+      const name = s.title && s.title !== s.host ? s.title : s.host;
+      const li = pickButton(name, s.visits, s.host === histSite, q, () => { histSite = s.host; render(); });
+      li.firstChild.title = s.host + ' \u2014 last visited ' + relative(s.lastVisit);
+      u2.appendChild(li);
+    }
+    c2.appendChild(u2); wrap.appendChild(c2);
+
+    const c3 = el('div', 'mcol wide');
+    const site = sites.find((s) => s.host === histSite);
+    const head = el('div', 'mhead');
+    head.appendChild(el('h2', null, site ? site.host : 'Pages'));
+    if (site) {
+      const forget = el('button', 'btn small danger', 'Forget this site'); forget.type = 'button';
+      let sure = false;
+      forget.addEventListener('click', async () => {
+        if (!sure) { sure = true; forget.textContent = 'Forget it all?'; forget.classList.add('sure'); setTimeout(() => { sure = false; forget.textContent = 'Forget this site'; forget.classList.remove('sure'); }, 4000); return; }
+        try { await call('library.forget', { host: site.host }); toast('Forgot ' + site.host); } catch (e) { toast('Could not forget that site.'); }
+        histSite = null; await loadHistory(); counts.history = data.sites.length; render();
+      });
+      head.appendChild(forget);
+    }
+    c3.appendChild(head);
+    if (!site) c3.appendChild(el('p', 'none', 'Pick a website to see the pages Cue kept from it.'));
+    else {
+      const holder = el('ul', 'rows');
+      holder.appendChild(el('li', 'none', 'Reading\u2026'));
+      c3.appendChild(holder);
+      call('library.pages', { host: site.host }).then((rows) => {
+        holder.textContent = '';
+        if (!rows || !rows.length) { holder.appendChild(el('li', 'none', 'Nothing kept from this site yet.')); return; }
+        rows.slice().sort((a, b) => b.lastVisit - a.lastVisit)
+          .forEach((h) => holder.appendChild(row(h, q, [el('span', null, relative(h.lastVisit))])));
+      }).catch(() => { holder.textContent = ''; holder.appendChild(el('li', 'none', 'Could not read that site\u2019s pages.')); });
+    }
+    wrap.appendChild(c3);
+
+    out.appendChild(wrap);
     return list.length;
   }
   function renderArchived(q, out) {
@@ -237,7 +259,7 @@
     if (!confirmClear) { confirmClear = true; render(); setTimeout(() => { if (confirmClear) { confirmClear = false; render(); } }, 5000); return; }
     confirmClear = false;
     try { await call('library.history.clear'); toast('History cleared'); } catch (e) { toast('Could not clear history.'); }
-    $('q').value = ''; openSites.clear(); await loadHistory(); counts.history = data.sites.length; render();
+    $('q').value = ''; histSite = null; await loadHistory(); counts.history = data.sites.length; render();
   });
 
   (async () => {
