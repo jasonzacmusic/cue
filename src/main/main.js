@@ -592,6 +592,11 @@ function groupOf(t) {
 }
 
 function ensureView(t) {
+  // A view whose page has gone (crashed, or closed from under us) still sits
+  // on the tab as an object, and using it throws "Object has been destroyed".
+  // Treat it as no view and build a fresh one, so WhatsApp and the rest come
+  // back by themselves instead of failing.
+  if (t.view && t.view.webContents.isDestroyed()) { t.view = null; t.sleeping = true; }
   if (t.view) return t.view;
   const view = new WebContentsView({
     webPreferences: {
@@ -1399,8 +1404,20 @@ function splitGutters(rects, mode) {
 
 let panes = [];
 let gutters = [];
+// A page that has gone - crashed, or closed from under us - leaves a view
+// object on the tab that throws "Object has been destroyed" the moment anything
+// touches it. One dead view used to take down the whole layout pass, and with
+// it whatever Jason or an agent had just asked for. Clear them first; the tab
+// is simply asleep and wakes on its next use.
+function reapDeadViews() {
+  for (const t of tabs) {
+    if (t.view && t.view.webContents.isDestroyed()) { t.view = null; t.sleeping = true; }
+  }
+}
+
 function layout() {
   if (!mainWin || mainWin.isDestroyed()) return;
+  reapDeadViews();
   const [w, h] = mainWin.getContentSize();
   // A revealed sidebar floats over the page, so the page itself never jumps.
   uiView.setBounds({ x: 0, y: 0, width: sideReveal && !overlay ? sideWidth() : w, height: h });

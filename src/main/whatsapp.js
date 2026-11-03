@@ -258,11 +258,16 @@ const sameName = (a, b) => {
 const CHAT_NAME_FN = `const CHAT_NAME = () => {
   const h = document.querySelector('#main header');
   if (!h) return '';
+  // The first line of the header is what a person reads as the name, on a
+  // one-to-one chat and on a group alike, so it is the answer. span[title] is
+  // only the fallback: on a small group it holds the member list, and
+  // "Jason, Tom, You" has too few commas for any comma count to catch it -
+  // which is what refused a perfectly good three-person group (3-Nov-2026).
+  const first = ((h.innerText || '').split('\\n')[0] || '').trim();
+  if (first) return first;
   const titled = h.querySelector('span[title]');
   const t = titled ? (titled.getAttribute('title') || '').trim() : '';
-  // A member list, not a name: commas and a pile of numbers.
-  if (t && !(t.split(',').length > 3)) return t;
-  return ((h.innerText || '').split('\\n')[0] || '').trim();
+  return t.split(',').length > 3 ? '' : t;
 };`;
 
 const OPEN_CHAT_NAME = `(() => {
