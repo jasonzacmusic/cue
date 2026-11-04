@@ -11,9 +11,12 @@ function tabEl(t) {
   el.className = 'tab' + (t.active ? ' on' : '') + (t.loading ? ' loading' : '');
   el.title = t.title; el.setAttribute('role', 'tab'); el.setAttribute('aria-selected', t.active);
   const icon = () => { const d = document.createElement('span'); d.className = 'dot'; return d; };
-  if (t.favicon && !t.loading) {
-    const i = new Image(); i.src = t.favicon; i.alt = '';
-    i.onerror = () => i.replaceWith(icon());
+  // Each place a logo might be is tried in turn; the plain ring is the last resort.
+  const tries = (t.icons || []).slice();
+  if (tries.length && !t.loading) {
+    const i = new Image(); i.alt = '';
+    i.onerror = () => { tries.shift(); if (tries.length) i.src = tries[0]; else i.replaceWith(icon()); };
+    i.src = tries[0];
     el.append(i);
   } else el.append(icon());
   const name = document.createElement('span');

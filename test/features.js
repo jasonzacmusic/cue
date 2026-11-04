@@ -41,6 +41,8 @@ const PAGES = {
     window.peak=()=>{const n=window.__sp;const an=window.__an||(window.__an=(()=>{const x=n.context.createAnalyser();x.fftSize=8192;n.connect(x);return x})());
       const d=new Float32Array(an.frequencyBinCount);an.getFloatFrequencyData(d);let b=0;for(let i=1;i<d.length;i++)if(d[i]>d[b])b=i;return b*n.context.sampleRate/an.fftSize}</script>`,
   '/note': `<title>Note</title><p>note</p>`,
+  '/fav': `<title>Fav</title><link rel=icon href="/i.png"><p>named icon</p>`,
+  '/nofav': `<title>No fav</title><p>no icon named; the site has /favicon.ico</p>`,
   [`/${VANISH_TOKEN}`]: `<title>${VANISH_TOKEN}</title><script>document.cookie='${VANISH_TOKEN}=1;max-age=99999';localStorage.setItem('${VANISH_TOKEN}','1')</script>`,
 };
 
@@ -49,6 +51,7 @@ function server() {
     const s = http.createServer((req, res) => {
       const u = req.url.split('?')[0];
       if (u === '/rec.mp4' && RECORDING.file) { const b = fs.readFileSync(RECORDING.file); res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': b.length }); return res.end(b); }
+      if (u === '/i.png' || u === '/favicon.ico') { res.writeHead(200, { 'content-type': 'image/png', 'content-length': DOT.length }); return res.end(DOT); }
       if (u === '/tone.wav') { res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': TONE.length, 'accept-ranges': 'none' }); return res.end(TONE); }
       if (u === '/installer.dmg') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="installer.dmg"' }); return res.end(Buffer.alloc(2048)); }
       if (u in API) { res.writeHead(API[u] ? 200 : 401, { 'content-type': 'application/json' }); return res.end(API[u] || '{}'); }
@@ -58,6 +61,7 @@ function server() {
   });
 }
 const TONE = wav();
+const DOT = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGP4z8DwnxLMMGrAqAGjBgwXAwAwxP4QHCfkAAAAAABJRU5ErkJggg==', 'base64');
 const RECORDING = { file: null };
 const API = {};
 
@@ -103,8 +107,8 @@ module.exports = async function run(c) {
   c.switchSpace('Create'); await sleep(200);
   check('space: switching opens that Space', c.store.data.space === 'Create', c.store.data.space);
   check('space: new tab uses its usual login', c.byId(c.getState().activeId).identity === 'personal', c.byId(c.getState().activeId).identity);
-  c.switchSpace('Business'); await sleep(200);
-  check('space: Business uses School login', c.byId(c.getState().activeId).identity === 'school');
+  c.switchSpace('Finance'); await sleep(200);
+  check('space: Finance uses School login', c.byId(c.getState().activeId).identity === 'school');
   c.activate(sp1.id); await sleep(200);
   check('space: going to a tab goes to its Space', c.store.data.space === startSpace);
 
@@ -128,6 +132,21 @@ module.exports = async function run(c) {
   let names = await strip();
   check('vanish: three tabs in the strip, with names', names.length === 3 && names[2] === 'New tab*', names);
   check('vanish: new tab is ready to type in', (await c.vanish.ui().webContents.executeJavaScript(`document.activeElement.id`)) === 'url');
+  // Cmd+ and Cmd- in a Vanish tab, from the keyboard and from the View menu's command.
+  const vz = c.vanish.tabs.find((x) => x.id === c.vanish.activeId()).view.webContents;
+  vz.sendInputEvent({ type: 'keyDown', keyCode: '=', modifiers: ['meta'] }); await sleep(300);
+  const zIn = vz.getZoomLevel();
+  c.vanish.command('zoom', { dir: -1 }); c.vanish.command('zoom', { dir: -1 }); await sleep(200);
+  const zOut = vz.getZoomLevel();
+  vz.sendInputEvent({ type: 'keyDown', keyCode: '0', modifiers: ['meta'] }); await sleep(300);
+  check('vanish: Cmd+ zooms in, Cmd- out, Cmd+0 back', zIn === 0.5 && zOut === -0.5 && vz.getZoomLevel() === 0, [zIn, zOut, vz.getZoomLevel()]);
+  check('vanish: zoom stays in its own tab', v.view.webContents.getZoomLevel() === 0);
+  // Logos in the strip: one the page names, and the site's usual one when the page names none.
+  const vf = c.openTab({ url: `${base}/fav`, identity: 'vanish' }); await loaded(vf);
+  const vn = c.openTab({ url: `${base}/nofav`, identity: 'vanish' }); await loaded(vn); await sleep(1200);
+  const logos = await c.vanish.ui().webContents.executeJavaScript(`[...document.querySelectorAll('.tab')].map((t) => { const i = t.querySelector('img'); return t.querySelector('.name').textContent + ':' + (i && i.complete ? i.naturalWidth : 0); })`);
+  check('vanish: tabs show the site logo', logos.includes('Fav:16') && logos.includes('No fav:16'), logos);
+  c.vanish.closeTab(vf.id); c.vanish.closeTab(vn.id); await sleep(300);
   c.vanish.step(1); await sleep(200);
   check('vanish: next tab wraps to the first', c.vanish.activeId() === v.id);
   check('vanish: only the chosen tab shows', c.vanish.tabs.filter((t) => t.view.getVisible()).length === 1 && v.view.getVisible());
@@ -188,6 +207,13 @@ module.exports = async function run(c) {
   check('vanish: closing the last tab closes the window', c.vanish.window() === null);
   check('vanish: site data is wiped', (await c.sessionFor('vanish').cookies.get({})).length === 0);
   check('vanish: not in history', c.lib.history(VANISH_TOKEN).length === 0);
+  // Close the window and open a Vanish tab straight away, while its memory is still being cleared.
+  const vq = c.openTab({ url: `${base}/note?q1`, identity: 'vanish' }); await loaded(vq);
+  c.vanish.closeTab(vq.id);
+  const vq2 = c.openTab({ url: `${base}/note?q2`, identity: 'vanish' });
+  await until(() => !vq2.view.webContents.isLoading() && vq2.view.webContents.getURL().includes('q2'), 8000).catch(() => {}); await sleep(300);
+  check('vanish: a tab opened while closing still loads', c.vanish.window() !== null && (await vq2.view.webContents.executeJavaScript('document.title').catch(() => '')) === 'Note', vq2.view.webContents.getURL());
+  c.vanish.closeTab(vq2.id); await sleep(800);
   c.store.flush();
   const hits = walkFind(ud, VANISH_TOKEN);
   check('vanish: disk scan finds nothing', hits.length === 0, hits);
@@ -287,12 +313,12 @@ module.exports = async function run(c) {
   await shotUI('20-peek');
   c.closePeek();
   const before = pk.view.getBounds().width;
-  c.toggleAI('claude'); await sleep(400);
+  c.toggleAI('claudecode'); await sleep(400);
   check('AI panel: opens and page makes room', !!c.getAI() && pk.view.getBounds().width === before - 448, { before, after: pk.view.getBounds().width });
   await until(() => !c.getAI().webContents.isLoading() && c.getAI().webContents.getURL(), 12000);
   check('AI panel: loads Claude', /claude\.ai/.test(c.getAI().webContents.getURL()), c.getAI().webContents.getURL());
   await shotUI('21-ai-panel');
-  c.toggleAI('claude'); await sleep(300);
+  c.toggleAI('claudecode'); await sleep(300);
   check('AI panel: closes', !c.getAI());
 
   // ---- pages and boards

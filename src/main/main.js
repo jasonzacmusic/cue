@@ -2180,7 +2180,7 @@ function uiCommand(cmd, a = {}) {
     case 'collapse': store.data.collapsed[a.group] = !store.data.collapsed[a.group]; store.save(); pushState(); break;
     case 'setting': setSetting(a.key, a.value); break;
     case 'find': if (wc) { if (a.stop || !a.text) wc.stopFindInPage('clearSelection'); else wc.findInPage(a.text, { forward: a.forward !== false, findNext: !!a.next }); } break;
-    case 'zoom': if (wc) { t.zoom = a.reset ? 0 : t.zoom + (a.dir || 0) * 0.5; wc.setZoomLevel(t.zoom); persist(); } break;
+    case 'zoom': if (vanish.focused()) { vanish.zoom(a); break; } if (wc) { t.zoom = a.reset ? 0 : t.zoom + (a.dir || 0) * 0.5; wc.setZoomLevel(t.zoom); persist(); } break;
     case 'download-open': { const d = downloads.find((x) => x.id === a.id); if (d) shell.showItemInFolder(d.file); break; }
     case 'downloads-clear': downloads.length = 0; pushState(); break;
     case 'obs-connect': obs.connect(settings().obs); break;
@@ -3517,6 +3517,7 @@ app.whenReady().then(async () => {
     drm: () => drmReady,
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
     uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage, prefs: () => settings(),
+    logo: (u) => pick(SITE_LOGOS, String(hostOf(u) || '').toLowerCase()),
   });
   ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
   vault = new Vault(app.getPath('userData'));

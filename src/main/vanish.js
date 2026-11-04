@@ -8,8 +8,13 @@ const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const BAR = 86; // tab strip + address bar
 const FRESH = 30000; // a new tab that starts playing this soon after opening is what the link was for
 
-function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, drm, onClosed }) {
+function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, drm, logo, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
+  // Closing the window empties its session, and that takes a moment. A Vanish tab opened in that
+  // moment used to have its page cancelled by the clearing and sat there blank, which is why a new
+  // Vanish tab sometimes did nothing. Pages now wait for the clearing to finish.
+  let wiping = null;
+  const whenWiped = (go) => { if (wiping) wiping.then(go, go); else go(); };
   // Netflix and its like use protected video, which Cue cannot play yet. The main
   // window has always said so rather than leaving a player spinning; in here it said
   // nothing at all, which looked like Vanish being broken. Said once per site per
@@ -37,9 +42,29 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (!ui || ui.webContents.isDestroyed()) return;
     const a = byId(activeId);
     ui.webContents.send('vanish:state', {
-      tabs: tabs.map((t) => ({ id: t.id, title: t.url === startFile ? 'New tab' : t.title, favicon: t.favicon, active: t.id === activeId, loading: t.loading })),
+      tabs: tabs.map((t) => ({ id: t.id, title: t.url === startFile ? 'New tab' : t.title, icons: icons(t), active: t.id === activeId, loading: t.loading && !t.favicon })),
       url: a && !a.url.startsWith('file:') ? a.url : '', canBack: !!a && a.view.webContents.navigationHistory.canGoBack(), canFwd: !!a && a.view.webContents.navigationHistory.canGoForward(),
     });
+  }
+
+  // Where a tab's logo can come from: the one the page names, then the site's usual address (most
+  // sites never name one, and Cue's engine does not look there by itself), then a logo Cue ships.
+  // Never Google's icon service, which the main window uses: that would tell Google the site.
+  function icons(t) {
+    const list = [t.favicon];
+    if (/^https?:/.test(t.url)) {
+      try { list.push(`${new URL(t.url).origin}/favicon.ico`); } catch {}
+      const own = typeof logo === 'function' && logo(t.url);
+      if (own) list.push(`../../assets/logos/${own}`);
+    }
+    return [...new Set(list.filter(Boolean))];
+  }
+
+  // Cmd+ and Cmd- work here as in the main window, one tab at a time, kept in memory only.
+  function zoom({ dir = 0, reset = false } = {}) {
+    const a = byId(activeId); if (!a) return;
+    a.zoom = reset ? 0 : Math.max(-8, Math.min(9, (a.zoom || 0) + dir * 0.5));
+    a.view.webContents.setZoomLevel(a.zoom);
   }
 
   function layout() {
@@ -87,6 +112,9 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       if (a) move(a.id, tabs.indexOf(a) + (input.key === 'ArrowLeft' ? -1 : 1));
       return;
     }
+    if (!input.alt && (k === '=' || k === '+' || k === '-' || k === '_' || k === '0')) {
+      e.preventDefault(); zoom(k === '0' ? { reset: true } : { dir: k === '-' || k === '_' ? -1 : 1 }); return;
+    }
     if (/^[1-9]$/.test(k)) { // Cmd+9 is always the last tab
       const t = k === '9' ? tabs[tabs.length - 1] : tabs[Number(k) - 1];
       e.preventDefault(); if (t) activate(t.id); return;
@@ -110,6 +138,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } // it may be behind Cue or on another desktop
     const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false, disableHtmlFullscreenWindowResize: true } });
     view.setBackgroundColor('#0B0B0D');
+    view.webContents.setVisualZoomLevelLimits(1, 5).catch(() => {}); // pinch to zoom, as in the main window
     const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
     const { newTabPlace, videoSwitch } = prefs();
     const calm = !!from && from.playing && videoSwitch === 'stay'; // stay on the video; the new tab opens quietly behind it
@@ -125,6 +154,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     wc.on('did-navigate', () => { t.favicon = null; sync(); sayProtected(wc.getURL()); }); wc.on('did-navigate-in-page', sync);
     wc.on('did-start-loading', () => { t.loading = true; state(); });
     wc.on('did-stop-loading', () => { t.loading = false; sync(); });
+    wc.on('did-finish-load', () => { if (t.zoom) wc.setZoomLevel(t.zoom); }); // a new page keeps the tab's size
     wc.on('enter-html-full-screen', () => { full = true; fillScreen(true); });
     wc.on('leave-html-full-screen', () => { full = false; fillScreen(false); });
     wc.on('media-started-playing', () => {
@@ -156,7 +186,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     wc.on('did-create-window', (popup) => popup.setContentProtection(true));
     if (!url) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
     protect(wc, t);
-    wc.loadURL(guardUrl(t.url)).catch(() => {});
+    whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(guardUrl(t.url)).catch(() => {}); });
     if (calm) { layout(); state(); } else activate(t.id);
     if (!url) focusBar();
     return t;
@@ -214,11 +244,16 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     });
   }
 
-  async function wipe() {
+  function wipe() {
     const ses = session();
-    await ses.clearData().catch(() => {});
-    await ses.clearAuthCache().catch(() => {});
-    await ses.clearHostResolverCache().catch(() => {});
+    const job = (async () => {
+      await ses.clearData().catch(() => {});
+      await ses.clearAuthCache().catch(() => {});
+      await ses.clearHostResolverCache().catch(() => {});
+    })();
+    wiping = job;
+    job.then(() => { if (wiping === job) wiping = null; });
+    return job;
   }
 
   // Vanish tabs live only in this array, so reordering IS the move: there is no
@@ -234,7 +269,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
 
   function command(cmd, a = {}) {
     const t = byId(activeId); const wc = t && t.view.webContents;
-    if (cmd === 'navigate' && wc) { const u = guardUrl(resolveInput(a.text)); t.url = u; wc.loadURL(u).catch(() => {}); wc.focus(); }
+    if (cmd === 'navigate' && wc) { const u = guardUrl(resolveInput(a.text)); t.url = u; whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(u).catch(() => {}); }); wc.focus(); }
     if (cmd === 'back' && wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
     if (cmd === 'forward' && wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
     if (cmd === 'reload' && wc) wc.reload();
@@ -242,9 +277,10 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'activate') activate(a.id);
     if (cmd === 'close') closeTab(a.id);
     if (cmd === 'move') move(a.id, a.to);
+    if (cmd === 'zoom') zoom(a);
   }
 
-  return { add, closeTab, command, pictureInPicture, wipe, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, pictureInPicture, wipe, zoom, wiping: () => wiping, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };
