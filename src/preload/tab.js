@@ -328,8 +328,44 @@ function wearChrome() {
   }
 }
 
+
+// Passkeys. Electron has no passkey reader - no Touch ID, no phone over Bluetooth -
+// and its WebAuthn call simply never answers, so a site that asks for one
+// ("Verifying it's you..." on Google) sits there spinning for ever. Cue says no
+// straight away instead, which is what every browser without a reader does, and
+// the site offers another way in.
+function noPasskeys() {
+  const refuse = (signal) => new Promise((_ok, no) => {
+    try { document.dispatchEvent(new CustomEvent('cue-passkey')); } catch {}
+    const stop = setTimeout(() => no(new DOMException('This browser has no passkey reader.', 'NotAllowedError')), 350);
+    if (signal) signal.addEventListener('abort', () => { clearTimeout(stop); no(new DOMException('Aborted', 'AbortError')); }, { once: true });
+  });
+  const creds = navigator.credentials;
+  if (creds) {
+    const get = creds.get.bind(creds);
+    const create = creds.create.bind(creds);
+    creds.get = function (options) { return options && options.publicKey ? refuse(options.signal) : get(options); };
+    creds.create = function (options) { return options && options.publicKey ? refuse(options.signal) : create(options); };
+  }
+  const PKC = window.PublicKeyCredential;
+  if (typeof PKC === 'function') {
+    const nope = () => Promise.resolve(false);
+    for (const name of ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable', 'isPasskeyPlatformAuthenticatorAvailable']) {
+      try { PKC[name] = nope; } catch {}
+    }
+    try {
+      PKC.getClientCapabilities = () => Promise.resolve({
+        conditionalCreate: false, conditionalGet: false, hybridTransport: false, passkeyPlatformAuthenticator: false,
+        userVerifyingPlatformAuthenticator: false, relatedOrigins: false,
+        signalAllAcceptedCredentials: false, signalCurrentUserDetails: false, signalUnknownCredential: false,
+      });
+    } catch {}
+  }
+}
+
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
+contextBridge.executeInMainWorld({ func: noPasskeys });
 contextBridge.executeInMainWorld({ func: sayChrome });
 contextBridge.executeInMainWorld({ func: wearChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
@@ -369,6 +405,7 @@ window.addEventListener('scroll', () => {
 // a half-typed form must not be lost to tab sleep
 let typed = false;
 window.addEventListener('input', () => { if (!typed) { typed = true; ipcRenderer.send('cue:dirty'); } }, true);
+document.addEventListener('cue-passkey', () => ipcRenderer.send('cue:passkey'));
 
 // play and pause travel to the other tabs in a split view when Play Together is on
 let linkQuiet = 0;

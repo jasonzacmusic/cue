@@ -2026,6 +2026,16 @@ ipcMain.on('cue:tab-init', (e) => {
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
+// A site asked for a passkey. Cue has no reader, so it said no at once rather than
+// leaving him staring at a spinner; this is the line that tells him why.
+const toldPasskey = new Set();
+ipcMain.on('cue:passkey', (e) => {
+  const t = byWC(e.sender); if (!t) return;
+  const where = hostOf(t.url) || 'This site';
+  if (toldPasskey.has(where) || live || process.env.CUE_TEST) return;
+  toldPasskey.add(where);
+  sendEvent('toast', `${where} asked for a passkey. Cue has no passkey reader \u2014 choose \u201cTry another way\u201d and use your password.`);
+});
 ipcMain.on('cue:play-link', (e, op) => {
   const sp = store.data.split;
   const t = byWC(e.sender);
