@@ -336,7 +336,6 @@ function wearChrome() {
 // the site offers another way in.
 function noPasskeys() {
   const refuse = (signal) => new Promise((_ok, no) => {
-    try { document.dispatchEvent(new CustomEvent('cue-passkey')); } catch {}
     const stop = setTimeout(() => no(new DOMException('This browser has no passkey reader.', 'NotAllowedError')), 350);
     if (signal) signal.addEventListener('abort', () => { clearTimeout(stop); no(new DOMException('Aborted', 'AbortError')); }, { once: true });
   });
@@ -363,9 +362,58 @@ function noPasskeys() {
   }
 }
 
+
+// Google still sends him to "Use your passkey to confirm it's really you" even
+// after Cue says it has no reader, and that page is a dead end here: Continue
+// leads to a spinner, and the only way on is the small "Try another way" link.
+// So Cue takes that link for him and lands on the list of real choices.
+function skipGooglePasskey() {
+  if (!/^accounts\.google\.[a-z.]+$/i.test(location.hostname)) return;
+  const onPasskey = () => /\/signin\/challenge\/pk(\/|$)/.test(location.pathname);
+  // Counted across page loads, so Cue steps over the passkey a few times and
+  // then leaves it alone rather than bouncing for ever.
+  const n = (k) => { try { return Number(sessionStorage.getItem(k) || 0); } catch { return 0; } };
+  const bump = (k) => { try { sessionStorage.setItem(k, String(n(k) + 1)); } catch {} };
+  const press = (node) => {
+    const r = node.getBoundingClientRect();
+    if (!r.width || !r.height) return false;
+    const base = { bubbles: true, cancelable: true, composed: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      const E = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+      node.dispatchEvent(new E(type, { ...base, buttons: type === 'pointerdown' || type === 'mousedown' ? 1 : 0 }));
+    }
+    return true;
+  };
+  const other = () => [...document.querySelectorAll('button, [role="button"], a')]
+    .find((b) => (b.innerText || '').trim() === 'Try another way' && b.offsetParent !== null);
+
+  let since = 0;
+  const tick = () => {
+    // Google's sign-in swaps views without reloading, and in Cue the new view
+    // sometimes never paints: the address says passkey while the screen still
+    // shows the step before. A reload paints it, and then the one link that
+    // leads anywhere - "Try another way" - is there to take.
+    if (onPasskey()) {
+      if (n('cue-pk-done') >= 3) return;
+      const link = other();
+      if (link) { bump('cue-pk-done'); press(link); since = Date.now(); return; }
+      if (!since) since = Date.now();
+      if (Date.now() - since > 2500 && n('cue-pk-reload') < 2) { bump('cue-pk-reload'); location.reload(); }
+      return;
+    }
+    // Off the passkey step but still showing it: paint the page he is actually on.
+    if (since && /Complete sign-in using your passkey|Use your passkey to confirm/i.test(document.body.innerText || '')
+        && Date.now() - since > 2000 && n('cue-pk-after') < 2) { bump('cue-pk-after'); location.reload(); }
+  };
+  setInterval(tick, 500);
+  if (document.readyState !== 'loading') tick();
+  else document.addEventListener('DOMContentLoaded', tick, { once: true });
+}
+
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
 contextBridge.executeInMainWorld({ func: noPasskeys });
+contextBridge.executeInMainWorld({ func: skipGooglePasskey });
 contextBridge.executeInMainWorld({ func: sayChrome });
 contextBridge.executeInMainWorld({ func: wearChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
@@ -405,7 +453,6 @@ window.addEventListener('scroll', () => {
 // a half-typed form must not be lost to tab sleep
 let typed = false;
 window.addEventListener('input', () => { if (!typed) { typed = true; ipcRenderer.send('cue:dirty'); } }, true);
-document.addEventListener('cue-passkey', () => ipcRenderer.send('cue:passkey'));
 
 // play and pause travel to the other tabs in a split view when Play Together is on
 let linkQuiet = 0;
