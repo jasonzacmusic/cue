@@ -132,6 +132,9 @@ and Cue says on screen when an agent reaches into a tab he did not hand it.
 1. Raise `version` in `package.json` and the `serverInfo` version in `bin/cue-mcp.js`.
 2. `npm run dist:mac`
 3. `~/.claude/skills/nsm-mac-app/scripts/nsm-notarize.sh build/Cue-darwin-arm64/Cue.app --no-resign --dmg`
+   On 4-Nov-2026 something on the Mac mini moved every fresh `build/Cue-darwin-arm64/Cue.app` to
+   the Trash within about 90 seconds, mid-notarisation (cause not found). `ditto` the app into the
+   session scratch folder first and notarise it there.
    Never re-sign an Electron build after packaging.
 4. `~/.claude/skills/nsm-mac-app/scripts/nsm-publish.sh cue <version> <dmg> --notes "..."`
 5. Push a `v<version>` tag. That builds Windows and Linux in GitHub Actions
