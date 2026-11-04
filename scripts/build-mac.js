@@ -10,12 +10,32 @@ const { execSync } = require('child_process');
 const root = path.join(__dirname, '..');
 const pkg = require(path.join(root, 'package.json'));
 
+// Cue runs on castLabs' Electron, the one that carries Widevine, so Netflix,
+// JioHotstar and SonyLIV actually play. It ships from castLabs' own repo rather
+// than electron/electron, so the packager has to be pointed at it. npm already
+// pulled the zip into the cache; use that rather than downloading it again,
+// because the internet here is paid by the gigabyte.
+const arch = process.env.CUE_ARCH || 'arm64';
+const electronVersion = fs.readFileSync(path.join(root, 'node_modules', 'electron', 'dist', 'version'), 'utf8').trim();
+const zipName = `electron-v${electronVersion}-darwin-${arch}.zip`;
+const cacheRoot = path.join(process.env.HOME || '', 'Library', 'Caches', 'electron');
+let electronZipDir = '';
+try {
+  electronZipDir = fs.readdirSync(cacheRoot).map((d) => path.join(cacheRoot, d))
+    .find((d) => fs.existsSync(path.join(d, zipName))) || '';
+} catch {}
+if (electronZipDir) console.log(`Using ${zipName} from the cache.`);
+
 packager({
   dir: root,
+  electronVersion,
+  ...(electronZipDir ? { electronZipDir } : {
+    download: { mirrorOptions: { mirror: 'https://github.com/castlabs/electron-releases/releases/download/', customDir: `v${electronVersion}` } },
+  }),
   out: path.join(root, 'build'),
   overwrite: true,
   platform: 'darwin',
-  arch: process.env.CUE_ARCH || 'arm64',
+  arch,
   name: 'Cue',
   executableName: 'Cue',
   appBundleId: 'com.jasonzac.cue',
@@ -52,9 +72,9 @@ packager({
   },
   osxSign: process.env.CUE_NO_SIGN ? undefined : {
     identity: 'Developer ID Application: Jason Zachariah (R3UNCZH45H)',
-    optionsForFile: () => ({
+    optionsForFile: (filePath) => ({
       hardenedRuntime: true,
-      entitlements: path.join(root, 'scripts', 'entitlements.mac.plist'),
+      entitlements: path.join(root, 'scripts', /Helper/.test(filePath) ? 'entitlements.helper.plist' : 'entitlements.mac.plist'),
     }),
   },
 }).then((paths) => {

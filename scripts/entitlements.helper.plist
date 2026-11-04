@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Only the helper processes. Protected video (Netflix, JioHotstar, SonyLIV)
+       plays through Widevine, which arrives as a library Google signs, not
+       Apple, and Chromium loads it into a helper. Library validation has to be
+       off in that helper for it to load at all. Cue's own binary keeps it on,
+       so nothing can inject code into the process that holds the sign-ins. -->
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.bluetooth</key><true/>
+</dict>
+</plist>

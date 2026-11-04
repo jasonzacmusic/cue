@@ -5,6 +5,8 @@ let S = null;
 let editingOmni = false;
 let openVolId = null;
 
+// A small screen with a smaller screen in its corner: the mini player.
+const MINI = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="1.3" y="3" width="13.4" height="10" rx="1.7"/><rect x="8" y="7.6" width="5.3" height="4" rx="1" fill="currentColor" stroke="none"/></svg>';
 const SPK = {
   on: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor"/><path d="M10.6 5.6a3.4 3.4 0 0 1 0 4.8M12.3 3.9a5.8 5.8 0 0 1 0 8.2"/></svg>',
   off: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor"/><path d="M10.5 6l4 4M14.5 6l-4 4"/></svg>',
@@ -504,9 +506,16 @@ function renderPins() {
     else if (srcs.length) p.append(iconImg(srcs, letter));
     else letter();
     if (offLogin(t)) { const d = el('span', 'dot'); d.style.setProperty('--ring', t.agent ? 'var(--agent)' : ringColor(t)); p.append(d); }
-    // The strip is where he looks first, so a muted app says so here too.
-    if (t.muted) { p.append(el('b', 'favsound off', SPK.off)); p.classList.add('ismuted'); }
-    else if (t.audible) p.append(el('b', 'favsound'));
+    // The strip is where he looks first, so a muted app says so here too - and
+    // the badge is a real button, because the whole point of seeing it is being
+    // able to silence WhatsApp without first hunting for its row.
+    const pm = el('button', 'pinmute' + (t.muted ? ' off' : ''), t.muted ? SPK.off : SPK.on);
+    tip(pm, t.muted ? `Unmute ${shortName(t)}` : `Mute ${shortName(t)}`, 'Click the speaker');
+    pm.onclick = (e) => { e.preventDefault(); e.stopPropagation(); send('mute', { id: t.id }); };
+    pm.onmousedown = (e) => e.stopPropagation();
+    p.append(pm);
+    if (t.muted) p.classList.add('ismuted');
+    else if (t.audible) { p.append(el('b', 'favsound')); p.classList.add('issounding'); }
     if (!here(t)) p.classList.add('elsewhere');
     p.onclick = () => (here(t) ? send('activate', { id: t.id }) : send('app-open', { url: t.url }));
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
@@ -550,6 +559,7 @@ function tabRow(t, splitIds) {
   if (t.id === S.activeId) row.classList.add('active');
   if (splitIds.includes(t.id)) row.classList.add('insplit');
   if (t.sleeping) row.classList.add('sleeping');
+  if (t.mini) row.classList.add('inmini');
   if (S.live && t.id === S.programId) row.classList.add('onair');
   else if (S.live && t.id === S.activeId) row.classList.add('cued');
   row.append(favEl(t));
@@ -592,6 +602,14 @@ function tabRow(t, splitIds) {
     tip(m, t.playing ? 'Pause' : 'Play', '⌃P');
     m.onclick = (e) => { e.stopPropagation(); send('media', { id: t.id, cmd: 'toggle' }); };
     ctl.append(m);
+  }
+  // Anything that plays can go into the small floating window, and anything
+  // already in it comes back the same way.
+  if (t.playing || t.audible || t.mini) {
+    const mn = el('button', 'mini' + (t.mini ? ' on' : ''), MINI);
+    tip(mn, t.mini ? 'Bring it back into Cue' : 'Mini player \u00b7 keeps playing while you work', '⌃⌘M');
+    mn.onclick = (e) => { e.stopPropagation(); send('mini', { id: t.id }); };
+    ctl.append(mn);
   }
   const hasSound = t.audible || t.muted || t.playing || t.volume < 1;
   const spk = el('button', 'spk' + (t.muted ? ' muted' : t.audible ? ' live' : ''), t.muted ? SPK.off : SPK.on);

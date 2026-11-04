@@ -23,4 +23,26 @@ function protectedSite(url) {
   return hit ? hit[1] : '';
 }
 
-module.exports = { PICTURE_IN_PICTURE, protectedSite };
+
+// Mini mode. In a 480-wide window the page itself is useless, so the video it
+// is playing takes the whole window and everything else gets out of the way.
+// Undone the moment the tab comes back into Cue.
+const MINI_FILL = `(() => {
+  const v = [...document.querySelectorAll('video')].filter((x) => x.videoWidth).sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
+  if (!v) return false;
+  document.querySelectorAll('style[data-cue-mini]').forEach((n) => n.remove());
+  const s = document.createElement('style');
+  s.setAttribute('data-cue-mini', '');
+  s.textContent = 'html,body{overflow:hidden!important;background:#000!important}video[data-cue-mini]{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;margin:0!important;object-fit:contain!important;background:#000!important;z-index:2147483647!important;transform:none!important;clip-path:none!important}';
+  document.documentElement.append(s);
+  v.setAttribute('data-cue-mini', '');
+  return true;
+})()`;
+
+const MINI_UNFILL = `(() => {
+  document.querySelectorAll('style[data-cue-mini]').forEach((n) => n.remove());
+  document.querySelectorAll('video[data-cue-mini]').forEach((v) => v.removeAttribute('data-cue-mini'));
+  return true;
+})()`;
+
+module.exports = { PICTURE_IN_PICTURE, MINI_FILL, MINI_UNFILL, protectedSite };

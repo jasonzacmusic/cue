@@ -8,7 +8,7 @@ const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const BAR = 86; // tab strip + address bar
 const FRESH = 30000; // a new tab that starts playing this soon after opening is what the link was for
 
-function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, onClosed }) {
+function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, drm, onClosed }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
   // Netflix and its like use protected video, which Cue cannot play yet. The main
   // window has always said so rather than leaving a player spinning; in here it said
@@ -16,6 +16,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   // window, and the window forgets it along with everything else when it closes.
   const toldProtected = new Set();
   const sayProtected = (url) => {
+    // With Widevine loaded these sites simply play, in here too.
+    if (typeof drm === 'function' && drm()) return;
     const name = protectedSite(url);
     if (!name || toldProtected.has(name) || !win || process.env.CUE_TEST) return;
     toldProtected.add(name);

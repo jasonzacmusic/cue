@@ -179,7 +179,7 @@ Helium installed and report the numbers.
   Personal and School end up as two separate WhatsApps.
 - Safari's cookies cannot be read at all (macOS protects `~/Library/Safari` and the cookie store),
   so Chrome is the only browser a sign-in can come from.
-- Protected video (Netflix, Prime, Hotstar, Apple TV, Spotify) does not play: the Electron we use has no Widevine. `src/main/video.js` lists these sites and Cue says so once. The way in is castLabs' Electron with Widevine plus free EVS signing, which needs an account. Dolby audio (E-AC3), AirPlay and casting aren't available either.
+- Protected video plays. Cue runs castLabs' Electron (`github:castlabs/electron-releases#v44.10.1+wvcus`), which carries Widevine; `components.whenReady()` in `src/main/main.js` sets `drmReady`, and the old "can't play its shows" notice in `src/main/video.js` only appears if that fails. The CDM is a Google-signed library, so the helper processes (and only the helpers) are signed with `scripts/entitlements.helper.plist`, which turns off library validation; Cue's own binary keeps it on. Netflix may still refuse until the app is VMP-signed with castLabs EVS, which needs a castLabs account. Dolby audio (E-AC3), AirPlay and casting aren't available.
 - Vanish full screen fills the screen where the window already is (`setSimpleFullScreen`). A Mac's own full screen moved it to another desktop and could land on the main window.
 - Passkeys need Apple's browser permission or our own Chromium build (Stage 2).
 - The cache limit is per login, not per site.

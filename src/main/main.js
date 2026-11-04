@@ -2,7 +2,7 @@
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 if (process.env.CUE_TEST) require('../../test/hidden-windows');
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents, screen,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -22,7 +22,7 @@ const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
-const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
+const { PICTURE_IN_PICTURE, MINI_FILL, MINI_UNFILL, protectedSite } = require('./video');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
@@ -240,6 +240,8 @@ let stageWin = null;
 let stageStandby = null;
 let shield = null;
 const obs = new OBS();
+let drmReady = false;   // Widevine is loaded and shows can play
+let drmLog = '';        // why it could not, if it could not
 const tabs = [];
 let activeId = null;
 let programId = null;
@@ -579,7 +581,7 @@ function makeTab(opts) {
     pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
     order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: spaces().includes(opts.space) ? opts.space : store.data.space,
-    view: null, host: 'main', popout: null, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
+    view: null, host: 'main', popout: null, mini: false, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
     badge: 0, marks: [], log: [],
   };
   return t;
@@ -1021,7 +1023,7 @@ function wireTab(t) {
   wc.setAudioMuted(t.muted);
   protectPage(wc, t, (what) => logTab(t, 'blocked', what));
   wc.on('page-title-updated', (_e, title) => {
-    t.title = title; if (t.popout) t.popout.setTitle(`Cue · ${title}`);
+    t.title = title; if (t.popout) t.popout.setTitle(`${t.mini ? 'Cue mini' : 'Cue'} \u00b7 ${title}`);
     if (remembers(t)) lib.title(wc.getURL(), title);
     t.badge = countIn(t, title);
     pushState(); persist();
@@ -1131,10 +1133,12 @@ const KEEP_PAUSED = 3 * 60 * 60 * 1000; // a video you paused keeps its place th
 const toldProtected = new Set();
 function sayProtected(url) {
   const name = protectedSite(url);
+  // With Widevine loaded these sites simply play, so there is nothing to say.
+  if (drmReady) return;
   if (!name || toldProtected.has(name) || live || programId || process.env.CUE_TEST) return;
   toldProtected.add(name);
   const message = `${name} can't play its shows in Cue yet.`;
-  const detail = "It uses protected video, which Cue can't play yet. Everything else on the site works.";
+  const detail = `It uses protected video, and the player Cue needs for it did not load${drmLog ? ` (${drmLog})` : ''}. Everything else on the site works.`;
   dialog.showMessageBox(mainWin, MAC
     ? { type: 'info', buttons: ['Open in Safari', 'Stay Here'], defaultId: 0, cancelId: 1, message, detail }
     : { type: 'info', buttons: ['OK'], message, detail })
@@ -1294,7 +1298,7 @@ function activate(id, by = 'user') {
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
   if (t.id !== programId && by === 'user') followFolder(t);
   activeId = id; t.lastActive = Date.now();
-  if (t.host === 'popout' && t.popout) { t.popout.focus(); }
+  if (t.mini) { miniBack(t); } else if (t.host === 'popout' && t.popout) { t.popout.focus(); }
   ensureView(t);
   if (t.calm) { t.calm = false; if (t.held) { t.held = false; t.view.webContents.send('cue:media', 'play'); } }
   const sp = store.data.split;
@@ -1768,7 +1772,47 @@ function popOut(t) {
   t.popout = w;
   moveView(t, w, 'popout');
   w.on('resize', layout);
-  w.on('closed', () => { if (t.popout === w) { t.popout = null; if (t.view) moveView(t, mainWin, 'main'); layout(); pushState(); } });
+  w.on('closed', () => { if (t.popout === w) { t.popout = null; t.mini = false; if (t.view) moveView(t, mainWin, 'main'); layout(); pushState(); } });
+  layout(); pushState();
+}
+
+// Mini player. The thing he is watching keeps playing in a small window that
+// floats over everything - over Cue, over Final Cut, over a full-screen app -
+// while he carries on in another tab. It is the same plumbing as popping a tab
+// out, only small, pinned on top and remembered, so clicking the tab in the
+// sidebar puts it back where it came from.
+function miniBack(t) {
+  if (!t || !t.popout) return false;
+  const w = t.popout; t.popout = null; t.mini = false;
+  if (t.view) { t.view.webContents.executeJavaScript(MINI_UNFILL, true).catch(() => {}); moveView(t, mainWin, 'main'); }
+  w.destroy(); layout(); pushState();
+  return true;
+}
+
+function miniPlay(t) {
+  if (!t) return;
+  if (t.mini) { miniBack(t); return; }
+  // What is on air belongs to the class, and the Stage is its window.
+  if (t.host === 'stage' || t.id === programId) { sendEvent('toast', 'That tab is on air. Take it off air first.'); return; }
+  if (t.host === 'popout') miniBack(t);
+  ensureView(t);
+  const size = settings().miniSize || { width: 480, height: 270 };
+  const area = screen.getPrimaryDisplay().workArea;
+  const w = new BaseWindow({
+    width: size.width, height: size.height, useContentSize: true,
+    x: area.x + area.width - size.width - 24, y: area.y + area.height - size.height - 24,
+    title: `Cue mini \u00b7 ${t.title}`, backgroundColor: '#000000',
+    alwaysOnTop: true, minimizable: false, fullscreenable: false, maximizable: false,
+  });
+  w.setAlwaysOnTop(true, 'floating');
+  w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  t.popout = w; t.mini = true;
+  moveView(t, w, 'popout');
+  // Give the page a beat to settle in the small window before the video takes it over.
+  const fill = () => t.view && t.view.webContents.executeJavaScript(MINI_FILL, true).catch(() => {});
+  setTimeout(fill, 150); setTimeout(fill, 1200);
+  w.on('resize', () => { const [cw, ch] = w.getContentSize(); setSetting('miniSize', { width: cw, height: ch }); layout(); });
+  w.on('closed', () => { if (t.popout === w) { t.popout = null; t.mini = false; if (t.view) { t.view.webContents.executeJavaScript(MINI_UNFILL, true).catch(() => {}); moveView(t, mainWin, 'main'); } layout(); pushState(); } });
   layout(); pushState();
 }
 
@@ -1864,6 +1908,7 @@ function tabMenu(t) {
     { label: 'Open a copy in…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
     { label: 'Move to Space', submenu: spaces().map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
+    { label: t.mini ? 'Back from the mini player' : 'Mini player (floats while you work)', click: () => miniPlay(t) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
     { label: 'Private: never goes on air', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
@@ -1936,7 +1981,7 @@ function sendState() {
       // show him what they have while they are on hold.
       aiHanded: !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'),
       playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
-      host: t.host, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
+      host: t.host, mini: !!t.mini, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
@@ -2083,6 +2128,7 @@ function uiCommand(cmd, a = {}) {
     case 'stage-split': stageSplit(Number(a.n) || 1); break;
     case 'cue-clear': cueIds = []; cueNextId = null; pushState(); persist(); break;
     case 'popout': popOut(t); break;
+    case 'mini': miniPlay(t); break;
     case 'overlay': setOverlay(a.on); break;
     case 'collapse': store.data.collapsed[a.group] = !store.data.collapsed[a.group]; store.save(); pushState(); break;
     case 'setting': setSetting(a.key, a.value); break;
@@ -3196,6 +3242,7 @@ function buildMenu() {
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
+        { label: 'Mini Player (keeps playing while you work)', accelerator: 'Control+Cmd+M', click: cmd('mini') },
         { label: 'Picture in Picture', accelerator: 'CmdOrCtrl+Alt+P', click: () => { if (vanish.focused()) { vanish.pictureInPicture(); return; } const t = byId(activeId); if (t && t.view) t.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}); } },
         ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
       ],
@@ -3359,7 +3406,26 @@ let pendingUrls = [];
 app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openTab({ url }); else pendingUrls.push(url); });
 app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL(file).href; if (mainWin) openTab({ url }); else pendingUrls.push(url); });
 
+// Protected video (Netflix, Prime Video, JioHotstar, Disney+, Spotify) needs
+// Widevine, which stock Electron does not ship. Cue is built on castLabs'
+// Electron, which fetches the player component on first run - so wait for it
+// before any window opens, or the first show of the session fails even though
+// every later one works. It is a download the first time and instant after.
+// Wrapped so Cue still starts on a plain Electron, where there is no such API.
+async function widevineReady() {
+  let components;
+  try { ({ components } = require('electron')); } catch { return; }
+  if (!components || typeof components.whenReady !== 'function') return;
+  try {
+    await components.whenReady();
+    drmReady = true;
+  } catch (e) {
+    drmLog = String((e && e.message) || e).slice(0, 200);
+  }
+}
+
 app.whenReady().then(async () => {
+  await widevineReady();
   store = new Store(app.getPath('userData'), 'cue.json', {
     tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, savedSplit: null, savedSpaceSplit: {}, collapsed: {}, permissions: {},
     space: 'Teach', spaceSplit: {}, folder: 'school', whose: {}, aiWhich: 'claudecode', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
@@ -3401,6 +3467,7 @@ app.whenReady().then(async () => {
   extDir = path.join(app.getPath('userData'), 'extensions');
   lib = new Library(app.getPath('userData'));
   vanish = createVanish({
+    drm: () => drmReady,
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
     uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage, prefs: () => settings(),
   });
