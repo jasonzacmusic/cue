@@ -7,8 +7,14 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const pkg = require(path.join(root, 'package.json'));
 
+// Cue runs castLabs' Electron (it carries Widevine for protected video), so the engine comes from
+// their releases, not Electron's: Electron's own site has no "+wvcus" build and answered 404.
+const electronVersion = require(path.join(root, 'node_modules', 'electron', 'package.json')).version;
+
 packager({
   dir: root,
+  electronVersion,
+  download: { mirrorOptions: { mirror: 'https://github.com/castlabs/electron-releases/releases/download/', customDir: `v${electronVersion}` } },
   out: path.join(root, 'build'),
   overwrite: true,
   platform: 'win32',
