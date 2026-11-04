@@ -672,6 +672,13 @@ const SITE_NAMES = [
   [/^students\.nathanielschool\.com$/i, 'Students'],
   [/^leads\.nathanielschool\.com$/i, 'Leads'],
   [/^labs\.nathanielschool\.com$/i, 'Nathaniel Labs'],
+  [/(^|\.)x\.ai$/i, 'xAI'],
+  [/(^|\.)vercel\.com$/i, 'Vercel'],
+  [/(^|\.)neon\.tech$/i, 'Neon'],
+  [/(^|\.)render\.com$/i, 'Render'],
+  [/(^|\.)cloudflare\.com$/i, 'Cloudflare'],
+  [/^platform\.openai\.com$/i, 'OpenAI Platform'],
+  [/(^|\.)name\.com$/i, 'name.com'],
 ];
 
 // Sites whose own logo is missing or poor. pitara.nathanielschool.com answers 404 for
@@ -715,6 +722,45 @@ function tidyTitle(title) {
   return t;
 }
 
+// A sign-in, passkey or verify page says nothing about the site it belongs to: "Log In" or "Log
+// into your name.com account to view and manage your domains" (Jason, 4-Nov-2026: call it the
+// name of the website itself).
+const SIGN_IN_TITLE = /\b(log ?in(to)?|sign ?in|sign ?up|log on|passkey|verify|verification|two-step|2-step|authenticat\w*|confirm it'?s (really )?you|choose an account|device sign-in)\b/i;
+
+// The address a person would say: name.com, not www.name.com; neon.tech, not console.neon.tech;
+// but bbc.co.uk stays whole.
+function siteDomain(host) {
+  const parts = String(host || '').toLowerCase().replace(/^www\./, '').split('.').filter(Boolean);
+  if (parts.length <= 2) return parts.join('.');
+  const two = parts.slice(-2);
+  const short = /^(co|com|org|net|gov|ac|edu)$/.test(two[0]) && two[1].length === 2;
+  return parts.slice(short ? -3 : -2).join('.');
+}
+
+// What to call a whole website, as History lists it: one line per site. What he calls it first,
+// then the NSM app's own name, then the piece of the page title that names the brand ("Login -
+// Brevo" is Brevo), and when the title only says "log in" or names no brand, the address itself.
+function siteLabel(host, title) {
+  const h = String(host || '').toLowerCase().replace(/^www\./, '');
+  if (!h) return tidyTitle(title) || '';
+  const known = pick(SITE_NAMES, h) || nsmAppName(h);
+  if (known) return known;
+  const domain = siteDomain(h);
+  const brand = domain.split('.')[0].replace(/[^a-z0-9]/g, '');
+  const pieces = String(title || '').replace(/^\s*\(\d+\+?\)\s*/, '').split(TITLE_TAIL).map((x) => x.trim()).filter(Boolean);
+  const named = pieces.find((x) => x.length <= 32 && !SIGN_IN_TITLE.test(x) && brand.length >= 3
+    && x.toLowerCase().replace(/[^a-z0-9]/g, '').includes(brand));
+  if (named) return named;
+  // "Vercel Pricing: Hobby, Pro…", "Pay Cloudflare, Inc. Invoice…": the brand is one word in it.
+  const word = brand.length >= 3 && String(title || '').match(new RegExp(`\\b(${brand})\\b`, 'i'));
+  if (word && !SIGN_IN_TITLE.test(word[1])) return word[1];
+  if (/(^|\.)nathanielschool\.com$/i.test(h)) return 'Nathaniel School of Music';
+  // A short title that is not a sign-in is usually the site's own name ("Jason's Money OS").
+  const first = pieces[0] || '';
+  if (first && first.length <= 24 && !SIGN_IN_TITLE.test(first)) return first;
+  return domain;
+}
+
 // What the sidebar should call this tab. A name he typed himself always wins.
 // Named tabName, not siteName: there is already a siteName(url) further down that answers a bare
 // host for the "you are leaving a protected site" notice, and two functions of one name meant the
@@ -726,6 +772,7 @@ function tabName(t) {
   // What HE calls it comes before what the app list calls it: the app list says "Classroom LMS
   // (Learning Portal)", and he says Learning Portal. The app list is next, so an NSM app is named
   // by its own name rather than by the school.
+  if (SIGN_IN_TITLE.test(String(t.title || ''))) return siteLabel(host, t.title);
   return pick(SITE_NAMES, host) || nsmAppName(host) || tidyTitle(t.title)
     || (/(^|\.)nathanielschool\.com$/i.test(host) ? 'Nathaniel School of Music' : host);
 }
@@ -2113,7 +2160,7 @@ function uiCommand(cmd, a = {}) {
     case 'close': closeTab(a.id); break;
     case 'new-tab':
       if (!a.identity && vanish.focused()) { vanish.add(); break; }
-      openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined }); sendEvent('focus-omnibox'); break;
+      openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined }); uiView.webContents.focus(); sendEvent('focus-omnibox'); break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': if (wc) wc.reload(); break;
@@ -2712,7 +2759,7 @@ const internal = {
     // your tabs do: Nathaniel School, AI & Subscriptions, Google, Social, Code.
     const name = (id) => (id === 'other' ? 'Everything else' : (GROUP_LIST.find((g) => g.id === id) || {}).name || 'Everything else');
     const rank = (id) => (id === 'other' ? 99 : GROUP_LIST.findIndex((g) => g.id === id));
-    return lib.sites(q, 400).map((r) => { const id = groupFor(`https://${r.host}/`); return { ...r, group: name(id), rank: rank(id) }; });
+    return lib.sites(q, 400).map((r) => { const id = groupFor(`https://${r.host}/`); return { ...r, title: siteLabel(r.host, r.title), group: name(id), rank: rank(id) }; });
   },
   'library.pages': ({ host }) => lib.pages(host, 500),
   'library.forget': ({ host }) => { lib.forgetSite(host); return true; },

@@ -880,8 +880,8 @@ let sugItems = []; let sugSel = 0;
 const openUrl = (url) => () => send('navigate', { text: url, newTab: true });
 function libraryHits(r) {
   return [
-    ...r.bookmarks.map((x) => ({ k: 'Bookmark', v: x.title || x.url, run: openUrl(x.url) })),
-    ...r.history.map((x) => ({ k: 'History', v: x.title || x.url, run: openUrl(x.url) })),
+    ...r.bookmarks.map((x) => ({ k: 'Bookmark', v: x.title || x.url, url: x.url, run: openUrl(x.url) })),
+    ...r.history.map((x) => ({ k: 'History', v: x.title || x.url, url: x.url, run: openUrl(x.url) })),
     ...r.boards.map((x) => ({ k: 'Board', v: x.title || x.url, run: openUrl(x.url) })),
     ...r.apps.map((x) => ({ k: 'NSM app', v: x.name, icon: new URL('/favicon.ico', x.url).href, run: openUrl(x.url) })),
     ...r.repos.map((x) => ({ k: 'GitHub', v: x.name, icon: 'https://github.com/favicon.ico', run: openUrl(x.url) })),
@@ -898,7 +898,14 @@ async function showSuggest() {
   const engines = Object.keys(ENGINE_NAMES).map((e) => ({ k: ENGINE_NAMES[e], v: q, run: () => send('navigate', { text: q, engine: e }) }));
   const lib = libraryHits(await window.cue.invoke('suggest', { q }));
   if ($('#omnibox').value.trim() !== q) return;
-  sugItems = [{ k: 'Go', v: q, run: () => send('navigate', { text: q }) }, ...tabHits, ...lib.slice(0, 8), ...engines.slice(1)];
+  // One box for addresses and searches. A site he has been to whose address starts with what he
+  // typed ("name" -> name.com) comes first, so Enter opens it; otherwise Enter goes to the address
+  // or searches Google, as before.
+  const site = !/\s/.test(q) && lib.find((x) => x.url && hostOf(x.url).startsWith(ql.replace(/^https?:\/\//, '').replace(/^www\./, '')));
+  const go = site
+    ? { k: 'Open', v: hostOf(site.url), run: () => send('navigate', { text: 'https://' + hostOf(site.url) }) }
+    : { k: /\s/.test(q) || !/\./.test(q) ? 'Search' : 'Go', v: q, run: () => send('navigate', { text: q }) };
+  sugItems = [go, ...(site ? [{ k: 'Search', v: q, run: () => send('navigate', { text: q, engine: 'google' }) }] : []), ...tabHits, ...lib.slice(0, 8), ...engines.slice(1)];
   sugSel = 0;
   box.innerHTML = '';
   sugItems.forEach((it, i) => {

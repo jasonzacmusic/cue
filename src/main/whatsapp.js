@@ -149,20 +149,66 @@ const READ = (limit) => `(() => {
       const kind = icons.find((i) => i && !/^tail-/.test(i) && !/^msg-/.test(i));
       text = kind ? '(' + kind.replace(/-/g, ' ') + ')' : '(no text)';
     }
-    return { out: mine, when: m ? m[1] : '', who: m ? m[2] : '', text: text.replace(/\\s+/g, ' ').slice(0, 400) };
+    // full: every letter and digit in the row, nothing else. Used only to prove a send landed,
+    // because the shown text can start with a link preview's title or be cut short.
+    const full = (n.innerText || '').toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+    return { out: mine, when: m ? m[1] : '', who: m ? m[2] : '', text: text.replace(/\\s+/g, ' ').slice(0, 400), full };
   });
   return { chat, messages: out };
 })()`;
 
-// Put words into a contenteditable the way a person would. WhatsApp's editor only believes
-// execCommand; assigning textContent leaves the Send button grey and the message unsent.
-const PUT = (text) => `(() => {
-  const box = document.querySelector('#main footer div[contenteditable="true"]');
+// Put words into WhatsApp's box with every line break kept. execCommand('insertText') with the
+// whole message drops the newlines (measured 3-Nov-2026: "...2e4276b0" and "Please" arrived glued
+// together), so the words go in as a paste, which WhatsApp's editor turns into real lines exactly
+// as it does when a person pastes. If the paste does not take, it types line by line with a line
+// break between. The box is waited for, because right after a chat opens it is not there yet,
+// and that race was the "could not put the words" failure.
+const PUT = (text) => `(async () => {
+  const want = ${JSON.stringify(text)};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let box = null;
+  for (let i = 0; i < 30 && !box; i++) {
+    box = document.querySelector('#main footer div[contenteditable="true"]');
+    if (!box) await sleep(100);
+  }
   if (!box) return 'no-box';
-  box.focus();
-  document.execCommand('selectAll', false, null);
-  document.execCommand('insertText', false, ${JSON.stringify(text)});
-  return (box.innerText || '').trim().length ? 'ok' : 'empty';
+  // Words already waiting in the box are somebody's draft - often his own dictation. Never wipe them.
+  if ((box.innerText || '').trim()) return 'draft';
+  const lines = want.split('\\n');
+  const plain = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+  // Emptying the box: WhatsApp's editor ignores execCommand('delete') once text was pasted, but
+  // honours a delete announced as beforeinput over a selection of the whole box (live 4-Nov-2026).
+  const clear = async () => {
+    box.focus();
+    const sel = getSelection();
+    for (let i = 0; i < 2 && (box.innerText || '').trim(); i++) {
+      sel.removeAllRanges(); const r = document.createRange(); r.selectNodeContents(box); sel.addRange(r);
+      if (i) document.execCommand('delete', false, null);
+      else box.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+      await sleep(80);
+    }
+  };
+  const good = () => {
+    const got = box.innerText || '';
+    if (plain(got) !== plain(want)) return false;
+    return got.split('\\n').filter((l) => l.trim()).length >= lines.filter((l) => l.trim()).length;
+  };
+  await clear();
+  const dt = new DataTransfer();
+  dt.setData('text/plain', want);
+  box.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  await sleep(150);
+  if (good()) return 'ok';
+  await clear();
+  lines.forEach((line, k) => {
+    // Never a synthetic Enter here: in WhatsApp's box an Enter that loses its Shift sends.
+    if (k) document.execCommand('insertLineBreak', false, null);
+    if (line) document.execCommand('insertText', false, line);
+  });
+  await sleep(150);
+  if (good()) return 'ok';
+  await clear();
+  return 'mangled';
 })()`;
 
 // Press Send. WhatsApp shows the button as soon as there are words in the box; where there is
@@ -214,7 +260,19 @@ const CLICK_ROW = (name) => `(async () => {
   const low = (s) => s.toLowerCase();
   const hit = named.find((r) => low(r.name) === want)
     || named.find((r) => low(r.name).startsWith(want))
-    || named.find((r) => low(r.name).includes(want));
+    || named.find((r) => low(r.name).includes(want))
+    // Emoji, doubled spaces and WhatsApp's invisible direction marks make a name typed from what
+    // the list shows differ from the title it holds (3-Nov-2026: "Vocal B2🎤 Online Foundation
+    // <> Shami" was "not found", nearest: itself). So the same three tries run again on letters
+    // and digits only.
+    || (() => {
+      const flat = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+      const w = flat(want);
+      if (!w) return null;
+      return named.find((r) => flat(r.name) === w)
+        || named.find((r) => flat(r.name).startsWith(w))
+        || named.find((r) => flat(r.name).includes(w));
+    })();
   if (!hit) return { found: false, offered: named.slice(0, 8).map((r) => r.name) };
   // The row's gridcell ignores a click; the div that carries the name takes it (measured on the
   // live page 2-Nov-2026). The gridcell, then the row itself, stay behind it as fallbacks.
@@ -294,6 +352,7 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
   }
 
   const js = (wc, script) => wc.executeJavaScript(script, true);
+  let sendPressed = false;
 
   async function ready(identity) {
     const { tab, wc } = await wcFor(identity);
@@ -360,27 +419,39 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
     },
 
     async send({ identity, chat, message }) {
-      const body = String(message || '').trim();
+      const body = String(message || '').replace(/\r\n?/g, '\n').trim();
       if (!body) throw new Error('There is nothing to send.');
       const { wc } = await ready(identity);
       const name = await openChat(wc, chat, identity);
-      const put = await js(wc, PUT(body));
-      if (put !== 'ok') throw new Error('Cue could not put the words in WhatsApp\'s box, so nothing was sent.');
+      // Proof that it landed: the last outgoing messages, letters and digits only, must contain
+      // the start or the end of what was sent - and more of them than before we pressed Send, so
+      // the same words sent yesterday cannot pass for today's.
+      const flat = body.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+      const head = flat.slice(0, 30);
+      const tail = flat.slice(-30);
+      const landed = async () => {
+        const { messages } = await js(wc, READ(30));
+        return messages.filter((m) => m.out && m.full && (m.full.includes(head) || m.full.includes(tail))).length;
+      };
+      const before = await landed();
+      let put = await js(wc, PUT(body));
+      if (put === 'no-box' || put === 'mangled') { await sleep(400); put = await js(wc, PUT(body)); }
+      if (put === 'draft') throw new Error(`There are unsent words already in the box for ${name}. Cue left them alone and sent nothing.`);
+      if (put === 'no-box') throw new Error('WhatsApp\'s message box never appeared, so nothing was sent.');
+      if (put !== 'ok') throw new Error('WhatsApp would not take the message with its line breaks intact, so nothing was sent.');
       await sleep(120);
+      sendPressed = true;
       const how = await js(wc, SEND_IT);
       if (how === 'no-box') throw new Error('WhatsApp\'s message box disappeared before Cue could send.');
-      // Never report a send we have not seen land in the conversation.
-      const want = body.replace(/\s+/g, ' ').slice(0, 60);
-      const end = Date.now() + 10000;
+      const short = body.replace(/\s+/g, ' ').slice(0, 60);
+      const end = Date.now() + 15000;
       while (Date.now() < end) {
-        await sleep(300);
-        const { messages } = await js(wc, READ(4));
-        const mine = messages.filter((m) => m.out).pop();
-        if (mine && mine.text.replace(/\s+/g, ' ').startsWith(want.slice(0, Math.min(want.length, 40)))) {
-          return { text: `Sent on ${label(identity)}'s WhatsApp to ${name}: ${want}${body.length > 60 ? '…' : ''}` };
+        await sleep(400);
+        if ((await landed()) > before) {
+          return { text: `Sent on ${label(identity)}'s WhatsApp to ${name}: ${short}${body.length > 60 ? '…' : ''}` };
         }
       }
-      throw new Error(`Cue typed the message to ${name} but could not see it sent. Look at the WhatsApp tab in ${identity === 'personal' ? 'Personal' : 'School'} before sending it again.`);
+      throw new Error(`Cue pressed Send to ${name} but could not see the message arrive. Read that chat before sending it again.`);
     },
 
     // Cue's own search over Cue's own list. It looks at every chat's NAME and the one line of
@@ -420,7 +491,16 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
     const action = String(a.action || 'chats').toLowerCase();
     if (!actions[action]) throw new Error(`WhatsApp can do: ${Object.keys(actions).join(', ')}.`);
     const identity = whoOf(a.who || a.account || a.identity);
-    return actions[action]({ ...a, identity });
+    // A page that died under us ("Object has been destroyed") gets one fresh try - except a send
+    // that already pressed Send, which is never repeated, so nobody gets the same message twice.
+    sendPressed = false;
+    try {
+      return await actions[action]({ ...a, identity });
+    } catch (e) {
+      if (!/destroyed/i.test(String(e && e.message)) || sendPressed) throw e;
+      await sleep(800);
+      return actions[action]({ ...a, identity });
+    }
   };
 }
 
