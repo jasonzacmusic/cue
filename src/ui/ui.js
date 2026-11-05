@@ -1516,7 +1516,17 @@ window.cue.onEvent((name, data) => {
     const t = S.tabs.find((x) => x.id === data.id);
     if (t) { t.blocked = data.n; if (data.id === S.activeId) renderShield(t); }
   }
-  else if (name === 'focus-omnibox') { omni.focus(); omni.select(); }
+  // The bar was still showing the address of the tab he just left, because
+  // focusing it stops render() touching the text. Put the new tab's address in
+  // first - empty, for a new tab - then focus, so he types into a clear box.
+  else if (name === 'focus-omnibox') {
+    const a = S.tabs.find((t) => t.id === S.activeId);
+    omni.value = a ? a.url : '';
+    omni.focus(); omni.select();
+  }
+  // Takes the keyboard back off the page that just loaded, without touching
+  // what he has already typed.
+  else if (name === 'refocus-omnibox') { if (document.activeElement !== omni) omni.focus(); }
   else if (name === 'focus-find') openFind();
   else if (name === 'find-result') $('#findcount').textContent = data.total ? `${data.active}/${data.total}` : 'No matches';
   else if (name === 'program-thumb') $('#lb-thumb').src = data;

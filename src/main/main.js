@@ -1304,7 +1304,7 @@ function mergeDupes() {
   return drop.length;
 }
 
-function openTab({ url, identity, background, after, agent, pinned } = {}) {
+function openTab({ url, identity, background, after, agent, pinned, focusUi } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const who = IDENTITIES[identity] ? identity : folderForNewTab();
   const only = url && isFolder(who) ? soleTab(url, who) : null;
@@ -1315,7 +1315,7 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
       only.url = url;
       only.view.webContents.loadURL(guardUrl(url)).catch(() => {});
     }
-    if (!background) activate(only.id, agent ? 'agent' : 'user');
+    if (!background) activate(only.id, agent ? 'agent' : 'user', { keepUiFocus: focusUi });
     pushState();
     return only;
   }
@@ -1328,7 +1328,7 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
     tabs.splice(i + 1, 0, t);
   } else tabs.push(t);
   ensureView(t);
-  if (!background) activate(t.id, agent ? 'agent' : 'user');
+  if (!background) activate(t.id, agent ? 'agent' : 'user', { keepUiFocus: focusUi });
   pushState(); persist();
   return t;
 }
@@ -1339,7 +1339,11 @@ function openTab({ url, identity, background, after, agent, pinned } = {}) {
 // sign-in into the wrong folder. Automation may bring a tab forward inside the
 // folder he is already in; a tab in another folder is left in the background,
 // where an agent can work in it perfectly well without taking his window.
-function activate(id, by = 'user') {
+// `keepUiFocus` is for the one case where the tab comes up but the typing must
+// not: a brand-new tab, where he is about to type an address. Giving the page
+// keyboard focus there swallowed every keystroke - the address bar lit up, the
+// engine row appeared, and the letters went into the empty start page instead.
+function activate(id, by = 'user', { keepUiFocus = false } = {}) {
   const t = byId(id); if (!t) return;
   if (by !== 'user' && isFolder(t.identity) && t.identity !== openFolder()) return;
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
@@ -1351,7 +1355,7 @@ function activate(id, by = 'user') {
   const sp = store.data.split;
   if (sp.mode !== 'single' && !sp.ids.includes(id)) sp.ids = [id];
   layout(); pushState(); persist();
-  if (t.view && t.host === 'main') t.view.webContents.focus();
+  if (t.view && t.host === 'main' && !keepUiFocus) t.view.webContents.focus();
 }
 
 function closeTab(id) {
@@ -2140,6 +2144,27 @@ ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   return internal[cmd](a, byWC(e.sender), e.sender);
 });
 
+// A brand-new tab's page grabs the keyboard the moment it finishes loading,
+// about a tenth of a second after it opens. Nobody asks it to - Chromium gives
+// a freshly attached view the keyboard once its first document is up. So every
+// letter he typed straight after Cmd+T, and every address he pasted, went into
+// the empty start page and disappeared. Hold the address bar across that
+// moment, then stop: after two thirds of a second the page may have the
+// keyboard, because by then he meant to click into it.
+function holdOmnibox(t) {
+  if (!t || !t.view) return;
+  const wc = t.view.webContents;
+  const until = Date.now() + 1500;
+  const hold = () => {
+    if (Date.now() > until || activeId !== t.id || wc.isDestroyed() || !uiView || uiView.webContents.isDestroyed()) return;
+    uiView.webContents.focus();
+    sendEvent('refocus-omnibox');
+  };
+  wc.once('dom-ready', hold);
+  wc.once('did-finish-load', hold);
+  for (const ms of [80, 250, 600]) setTimeout(hold, ms);
+}
+
 function uiCommand(cmd, a = {}) {
   const t = a.id ? byId(a.id) : byId(activeId);
   const wc = t && t.view ? t.view.webContents : null;
@@ -2150,7 +2175,9 @@ function uiCommand(cmd, a = {}) {
     case 'close': closeTab(a.id); break;
     case 'new-tab':
       if (!a.identity && vanish.focused()) { vanish.add(); break; }
-      openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined }); uiView.webContents.focus(); sendEvent('focus-omnibox'); break;
+      { const nt = openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined, focusUi: true });
+        uiView.webContents.focus(); sendEvent('focus-omnibox'); holdOmnibox(nt); }
+      break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
     case 'reload': if (wc) wc.reload(); break;
