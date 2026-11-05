@@ -55,8 +55,35 @@ const NEVER_TOUCH = [
   '@@||threads.net^$domain=threads.net|instagram.com',
   '@@||whatsapp.com^$domain=whatsapp.com',
   '@@||cdninstagram.com^', '@@||fbcdn.net^',
+  // The streaming services, each on its own pages only. A film site talks to
+  // its own addresses constantly while you watch - which player, which picture
+  // quality, where you got to. The privacy lists treat some of those as
+  // tracking and refuse them, and the players do not cope: Netflix answers
+  // "Something's not quite right" and keeps asking until it runs out of room,
+  // because its own logs.netflix.com was refused. Same honesty as Meta above:
+  // the $domain= means Netflix or Amazon watching you from somebody else's
+  // page is still blocked, which is the watching that matters.
+  '@@||netflix.com^$domain=netflix.com',
+  '@@||nflxso.net^$domain=netflix.com', '@@||nflxext.com^$domain=netflix.com', '@@||nflxvideo.net^$domain=netflix.com',
+  '@@||primevideo.com^$domain=primevideo.com', '@@||aiv-cdn.net^$domain=primevideo.com',
+  '@@||aiv-delivery.net^$domain=primevideo.com', '@@||media-amazon.com^$domain=primevideo.com',
+  // Prime Video checks the browser through these before it will play anything,
+  // and refuses with "an old or unsupported version of this browser" when they
+  // are missing. Amazon's shopping pages are a different site and keep every
+  // one of their trackers blocked.
+  '@@||a2z.com^$domain=primevideo.com', '@@||amazon.com^$domain=primevideo.com',
+  '@@||ssl-images-amazon.com^$domain=primevideo.com',
+  '@@||hotstar.com^$domain=hotstar.com|jiohotstar.com', '@@||jiohotstar.com^$domain=jiohotstar.com|hotstar.com',
+  '@@||hotstarext.com^$domain=hotstar.com|jiohotstar.com',
+  '@@||sonyliv.com^$domain=sonyliv.com', '@@||slivcdn.com^$domain=sonyliv.com',
+  '@@||zee5.com^$domain=zee5.com', '@@||z5cdn.com^$domain=zee5.com',
+  '@@||jiocinema.com^$domain=jiocinema.com',
+  '@@||apple.com^$domain=tv.apple.com', '@@||mzstatic.com^$domain=tv.apple.com',
+  '@@||spotify.com^$domain=spotify.com', '@@||scdn.co^$domain=spotify.com', '@@||spotifycdn.com^$domain=spotify.com',
 ];
-const COSMETIC_OFF = /^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|nathanielschool\.com)\//;
+// Cosmetic filtering hides page furniture by guessing from class names, and a
+// video player's own controls get caught in that guess.
+const COSMETIC_OFF = /^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|nathanielschool\.com|netflix\.com|primevideo\.com|hotstar\.com|jiohotstar\.com|sonyliv\.com|zee5\.com|jiocinema\.com|apple\.com|spotify\.com)\//;
 
 const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
