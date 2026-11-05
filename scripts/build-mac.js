@@ -45,20 +45,26 @@ packager({
   appCopyright: 'Nathaniel School of Music. Free and open source (GPL-3.0).',
   icon: path.join(root, 'assets', 'icon.icns'),
   asar: { unpackDir: 'bin' },
-  // Chromium ships every language it knows, about 40 MB Cue never shows. English stays.
   afterCopy: [async ({ buildPath }) => {
-    // Stops another program using Cue's camera and microphone rights by running Cue as a plain script host.
-    await flipFuses(path.resolve(buildPath, '..', '..', '..'), {
-      version: FuseVersion.V1,
-      [FuseV1Options.RunAsNode]: false,
-      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
-      [FuseV1Options.EnableNodeCliInspectArguments]: false,
-      [FuseV1Options.EnableCookieEncryption]: true,
-      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
-      [FuseV1Options.OnlyLoadAppFromAsar]: true,
-    });
-    const res = path.join(buildPath, '..', '..', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Resources');
-    for (const f of fs.readdirSync(res)) { if (f.endsWith('.lproj') && !/^en(_GB)?\.lproj$/.test(f)) fs.rmSync(path.join(res, f), { recursive: true }); }
+    // The fuses stop another program using Cue's camera and microphone rights by
+    // running Cue as a plain script host. Flipping them rewrites castLabs' engine
+    // file, and castLabs will only put their Widevine signature on an engine they
+    // recognise byte for byte - without that signature Netflix refuses to play.
+    // On a Mac the two cannot both be had, and Jason chose Netflix (5 Nov 2026).
+    // Windows and Linux keep every fuse; nothing there needs the castLabs signature.
+    if (process.platform !== 'darwin' || process.env.CUE_NO_VMP) {
+      await flipFuses(path.resolve(buildPath, '..', '..', '..'), {
+        version: FuseVersion.V1,
+        [FuseV1Options.RunAsNode]: false,
+        [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+        [FuseV1Options.EnableNodeCliInspectArguments]: false,
+        [FuseV1Options.EnableCookieEncryption]: true,
+        [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
+        [FuseV1Options.OnlyLoadAppFromAsar]: true,
+      });
+    } else {
+      console.log('macOS: leaving the engine untouched so castLabs can sign it (Netflix).');
+    }
   }],
   prune: true,
   ignore: [/^\/build($|\/)/, /^\/test($|\/)/, /^\/scripts($|\/)/, /^\/\.git($|\/)/, /\.md$/],
@@ -74,6 +80,22 @@ packager({
   osxSign: undefined,
 }).then(async (paths) => {
   const app = path.join(paths[0], 'Cue.app');
+  const fwBin = path.join(app, 'Contents', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework');
+  // From Electron 41 the packager writes a tamper-check number for the app's own
+  // code INTO castLabs' engine file and re-signs it. That makes the engine no
+  // longer theirs, and they will not put the Widevine signature on it, so Netflix
+  // refuses to play. Put their engine back exactly as it came. Electron simply
+  // skips that tamper check when the number was never written, which is also what
+  // happens whenever anyone packages a Mac app from a PC. Apple's own signature,
+  // further down, still covers the whole app.
+  if (process.platform === 'darwin' && !process.env.CUE_NO_VMP) {
+    const pristine = path.join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework');
+    if (!fs.existsSync(pristine)) { console.error(`Cannot find castLabs' untouched engine at ${pristine}.`); process.exit(1); }
+    fs.copyFileSync(pristine, fwBin);
+    const same = execSync(`shasum -a 256 "${pristine}" "${fwBin}" | awk '{print $1}' | uniq | wc -l`).toString().trim();
+    if (same !== '1') { console.error('The engine in the app does not match castLabs\' original.'); process.exit(1); }
+    console.log("Restored castLabs' engine byte for byte, ready for their signature.");
+  }
   // Netflix refuses a Widevine player that castLabs has not signed. Everything
   // else - every other site, and all of Cue - works without it, so a build may
   // skip it deliberately with CUE_NO_VMP=1 while the castLabs account is still
@@ -83,7 +105,19 @@ packager({
     console.log('CUE_NO_VMP is set: skipping castLabs VMP. Netflix will not play in this build.');
   } else {
     console.log('Signing the packaged app with castLabs VMP...');
-    execFileSync('python3', ['-m', 'castlabs_evs.vmp', '-n', 'sign-pkg', app], { stdio: 'inherit' });
+    // It wants the folder the .app sits in, not the .app: it looks inside for
+    // a bundle carrying Electron Framework. Hand it Cue.app and it finds nothing.
+    execFileSync('python3', ['-m', 'castlabs_evs.vmp', '-n', 'sign-pkg', paths[0]], { stdio: 'inherit' });
+  }
+  // Chromium ships every language it knows, about 40 MB Cue never shows. English
+  // stays. This happens AFTER castLabs have signed: they will only sign an engine
+  // that is theirs byte for byte, and taking anything out of the engine's folder
+  // first makes the packager rewrite the engine file itself. Their signature sits
+  // in a file beside it and does not mind the languages going later. Apple's
+  // signing comes after this and seals whatever is left.
+  {
+    const res = path.join(app, 'Contents', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Resources');
+    for (const f of fs.readdirSync(res)) { if (f.endsWith('.lproj') && !/^en(_GB)?\.lproj$/.test(f)) fs.rmSync(path.join(res, f), { recursive: true }); }
   }
   if (!process.env.CUE_NO_SIGN) {
     console.log('Signing nested code and the app with Developer ID...');
