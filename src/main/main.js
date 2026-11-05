@@ -310,7 +310,13 @@ function sessionFor(identity) {
     const t = byWC(d.webContents); if (t) logTab(t, 'failed-request', `${d.error} ${d.url}`);
   });
 
-  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management']);
+  // 'storage-access' is a box on a page asking to reach its own cookies while it
+  // sits inside another site. Saying no to it breaks the invisible checks that
+  // guard sign-in forms: Netflix's sign-in simply fails with "Something's not
+  // quite right", and card payments and single sign-on go the same way. Chrome
+  // allows it. Cue stops the actual tracking earlier, in the blocker, so what
+  // still gets this far is a login box, a payment box or a guard like that.
+  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management', 'storage-access', 'top-level-storage-access']);
   ses.setPermissionCheckHandler((wc, permission, origin) => {
     if (QUIET_OK.has(permission)) return true;
     if (permission === 'midi' || permission === 'midiSysex') return midiOk(identity, safeOrigin(origin));
@@ -319,7 +325,7 @@ function sessionFor(identity) {
   });
 
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
-    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management'];
+    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management', 'storage-access', 'top-level-storage-access'];
     if (always.includes(permission)) return cb(true);
     if (permission === 'notifications') return cb(!live && identity !== 'vanish');
     if (permission === 'openExternal') {
