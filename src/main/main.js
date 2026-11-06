@@ -518,6 +518,21 @@ function enableBlocker(ses) {
 }
 
 function safeOrigin(url) { try { return new URL(url).origin; } catch { return url; } }
+
+// Sites that are never allowed to pop a notification up over whatever he is
+// doing. WhatsApp is here because it is the loudest thing on the machine: two
+// accounts, class groups, leads, every one of them banging a box onto the screen
+// mid-lesson. The messages still arrive and the sidebar still shows the count -
+// only the pop-up stops. By site, so it covers both folders at once. He can
+// change the list in Settings.
+function quietSite(url) {
+  const h = String(hostOf(url) || '').toLowerCase();
+  if (!h) return false;
+  return (settings().quietSites || []).some((s) => {
+    const q = String(s || '').trim().toLowerCase().replace(/^www\./, '');
+    return !!q && (h === q || h.endsWith(`.${q}`));
+  });
+}
 // Our own apps may talk to his instruments without asking. Everything else is
 // off until he says yes for that one site, and one answer covers plain MIDI and
 // the system messages that can change settings on the gear.
@@ -1295,13 +1310,18 @@ function mergeDupes() {
   const keep = new Map();
   const drop = [];
   for (const t of [...tabs].sort((a, b) => (b.pinned - a.pinned) || (b.lastActive - a.lastActive))) {
-    if (!isFolder(t.identity) || t.private || t.id === programId || t.agent || t.pinned || isStart(t.url) || !t.url) continue;
+    if (!isFolder(t.identity) || t.private || t.id === programId || t.agent || isStart(t.url) || !t.url) continue;
     // Either a site that is only ever one place, or the very same address open
     // twice in the same folder — three Chord Trees tabs are three of one thing.
     const key = oneKey(t.url) || t.url;
     if (!key) continue;
     const k = `${t.identity}|${key}`;
-    if (keep.has(k)) drop.push(t); else keep.set(k, t);
+    // A pinned tab counts as the one this folder keeps. It used to be skipped
+    // altogether, so a pinned WhatsApp and a loose second one both survived -
+    // an icon at the top and a row under Social at the same time. The pinned one
+    // wins (it sorts first) and the loose copy goes; a pinned tab is never the
+    // one closed.
+    if (keep.has(k)) { if (!t.pinned) drop.push(t); } else keep.set(k, t);
   }
   for (const t of drop) {
     const i = tabs.indexOf(t);
@@ -2086,7 +2106,7 @@ function startThumbs() {
 ipcMain.on('cue:tab-init', (e) => {
   const t = byWC(e.sender);
   const ytAds = settings().blockAds !== false && !(shield && shield.isAllowed('https://youtube.com/'));
-  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live };
+  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live, quiet: quietSite(e.sender.getURL() || (t && t.url) || '') };
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
@@ -2494,7 +2514,14 @@ function setSetting(key, value) {
       buildMenu();
     }
   }
+  else if (key === 'quietSites') {
+    // Typed as plain site names, one per line or comma separated.
+    s.quietSites = String(value || '').split(/[\n,]/).map((x) => x.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(Boolean);
+  }
   else s[key] = value;
+  // Every open tab has to learn its new answer there and then, or WhatsApp keeps
+  // popping boxes up until it is reloaded.
+  if (key === 'quietSites') tabs.forEach((x) => x.view && x.view.webContents.send('cue:quiet', quietSite(x.url)));
   // The sidebar is a layout, not just a number in a file: hiding it from
   // Settings has to move the page over there and then, like the ⌘\ key does.
   if (key === 'sideHidden') { setSideHidden(!!value); return; }
@@ -3560,7 +3587,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, quietSites: ['web.whatsapp.com'], agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Finance: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -3587,6 +3614,12 @@ app.whenReady().then(async () => {
     // sidebar gets to sixty tabs. Passing tabs now go after two days, into
     // Library → Archived. Set it back in Settings if you miss them.
     if (store.data.settings.archiveDays === 7) store.data.settings.archiveDays = 2;
+  }
+  // Existing profiles had no quiet list, so WhatsApp kept popping boxes up.
+  if (!store.data.quietDefaults) {
+    store.data.quietDefaults = true;
+    const q = store.data.settings.quietSites;
+    if (!Array.isArray(q) || !q.length) store.data.settings.quietSites = ['web.whatsapp.com'];
   }
   if (!store.data.groupsRepaired) {
     store.data.groupsRepaired = true;
@@ -3629,6 +3662,9 @@ app.whenReady().then(async () => {
   });
   buildMenu();
   createMain();
+  // One Gmail, one WhatsApp, one YouTube per folder, every launch, without him
+  // having to ask for it. mergeDupes never closes a pinned tab.
+  setTimeout(() => { try { if (mergeDupes()) { layout(); pushState(); persist(); } } catch (e) { logProblem('tidy', e); } }, 8000);
   setTimeout(() => { try { archiveOldTabs(); } catch (e) { logProblem('tidy', e); } }, 20000);
   checkBills(); tidyInstallers(); loadRepos(); setTimeout(checkUpdate, 8000); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
   setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch

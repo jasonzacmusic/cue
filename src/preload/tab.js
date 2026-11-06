@@ -90,12 +90,17 @@ function install(init) {
 
   // ---- notifications: every one goes to Cue's alert tray; during class they stay off the screen
   let held = !!init.hold;
+  // Some sites are simply too loud to be allowed a box on the screen - WhatsApp
+  // above all, two accounts of it, class groups and leads all day. Quiet means
+  // the message still reaches Cue's alert tray and the sidebar count, it just
+  // never jumps in front of what he is doing. Settings holds the list.
+  let quiet = !!init.quiet;
   const report = (title, body) => document.dispatchEvent(new CustomEvent('cue-note', { detail: JSON.stringify({ title: String(title || ''), body: String(body || '') }) }));
   if (window.Notification) {
     const RealN = window.Notification;
     const Quiet = function Notification(title, opts) {
       report(title, opts && opts.body);
-      if (held) return new EventTarget();
+      if (held || quiet) return new EventTarget();
       return new RealN(title, opts);
     };
     Quiet.prototype = RealN.prototype;
@@ -108,7 +113,7 @@ function install(init) {
     const realShow = ServiceWorkerRegistration.prototype.showNotification;
     ServiceWorkerRegistration.prototype.showNotification = function (title, opts) {
       report(title, opts && opts.body);
-      return held ? Promise.resolve() : realShow.call(this, title, opts);
+      return (held || quiet) ? Promise.resolve() : realShow.call(this, title, opts);
     };
   }
 
@@ -164,6 +169,7 @@ function install(init) {
   // fresh for every page and never hands out.
   const api = {
       setHold(on) { held = !!on; },
+      setQuiet(on) { quiet = !!on; },
       music(op, v) {
         const e = main();
         if (!e) return { none: true };
@@ -463,6 +469,7 @@ for (const type of ['play', 'pause']) {
 }
 
 ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
+ipcRenderer.on('cue:quiet', (_e, on) => call('setQuiet', on));
 ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));
 document.addEventListener('cue-note', (e) => {
   try { const n = JSON.parse(e.detail); ipcRenderer.send('cue:note', n); } catch {}

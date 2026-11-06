@@ -1443,6 +1443,8 @@ function openSettings() {
     sh.append(el('h3', '', 'What you see in Cue'));
     sh.append(el('div', 'note', 'This is how you hide the parts you never use. Switching one off takes its buttons out of the toolbar and the sidebar; nothing is deleted, and turning it back on brings everything straight back.'));
     Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
+    sh.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com'),
+      'WhatsApp is in here by default: both accounts, class groups and leads, all day. The messages still arrive, the count still shows in the sidebar and every one is kept in Bills & alerts \u2014 nothing jumps in front of what you are doing. Separate sites with a comma.'));
     sh.append(settingRow('Downloads tray in the sidebar', check('showDownloads', s.showDownloads !== false), 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder as usual.'));
     sh.append(settingRow('Sidebar hidden until you reach for it', check('sideHidden', s.sideHidden), 'The whole sidebar slides away (⌘\\). Move the mouse to the left edge and it comes back.'));
     sh.append(el('h3', '', 'Passwords'));
