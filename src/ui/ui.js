@@ -459,8 +459,16 @@ function renderExtras() {
   $('#recbtn').hidden = !S.recording;
 }
 
+// The tabs the strip at the top is drawing right now. They are shown once, up
+// there, and never again down in the groups: WhatsApp used to appear twice at
+// the same time - as an icon at the top AND as a row under Social - because the
+// strip shows an app whichever folder pinned it, while the row below belonged
+// to the folder you were in. One app, one place.
+let stripIds = new Set();
+
 function renderPins() {
   const box = $('#pins'); box.innerHTML = '';
+  stripIds = new Set();
   // Dropping a tab on the strip pins it. Everywhere else in the sidebar you can
   // drag a row where you want it, and this row used to be the one place you
   // could not.
@@ -475,13 +483,21 @@ function renderPins() {
   // used to make it vanish the moment he switched to the school, which is the
   // opposite of what a pin is for: the strip is the apps he uses, and the
   // folder decides whose account opens.
+  //
+  // Pinning is by SITE, not by tab. School's WhatsApp was pinned and his own
+  // was not, so he had a WhatsApp icon at the top and a second WhatsApp row
+  // under Social at the same time - two of one thing. Once a site is in the
+  // strip it is in the strip for every folder, and the tab drawn is this
+  // folder's own, pinned or not. Clicking it is instant: the folder already
+  // has that tab open, so it simply comes forward.
+  const pinnedHosts = new Set(S.tabs.filter((y) => y.pinned).map((y) => hostOf(y.url)).filter(Boolean));
   const byHost = new Map();
-  for (const x of S.tabs.filter((y) => y.pinned)) {
-    const key = hostOf(x.url) || `tab:${x.id}`;
-    const seen = byHost.get(key);
-    // This folder's own tab is the one to draw: its icon, its unread dot, and
-    // clicking it is a plain activate rather than an open.
-    if (!seen || (here(x) && !here(seen))) byHost.set(key, x);
+  const better = (x, seen) => !seen || (here(x) && !here(seen)) || (here(x) === here(seen) && x.lastActive > seen.lastActive);
+  for (const x of S.tabs) {
+    const host = hostOf(x.url);
+    const key = x.pinned && !host ? `tab:${x.id}` : host;
+    if (!key || (!x.pinned && !pinnedHosts.has(key))) continue;
+    if (better(x, byHost.get(key))) byHost.set(key, x);
   }
   for (const t of byHost.values()) {
     const p = el('div', 'pin');
@@ -519,6 +535,7 @@ function renderPins() {
     if (!here(t)) p.classList.add('elsewhere');
     p.onclick = () => (here(t) ? send('activate', { id: t.id }) : send('app-open', { url: t.url }));
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
+    stripIds.add(t.id);
     box.append(p);
   }
 }
@@ -529,7 +546,7 @@ function renderGroups() {
   box.innerHTML = '';
   const splitIds = S.split.mode !== 'single' ? S.split.ids : [];
   for (const g of S.groups) {
-    const list = S.tabs.filter((t) => !t.pinned && t.group === g.id && here(t));
+    const list = S.tabs.filter((t) => !t.pinned && !stripIds.has(t.id) && t.group === g.id && here(t));
     if (!list.length) continue;
     const wrap = el('section', 'group' + (S.collapsed[g.id] ? ' closed' : ''));
     const head = el('div', 'ghead', `<span class="caret">▾</span>${esc(g.name)}<span class="n">${list.length}</span>`);
@@ -848,29 +865,81 @@ function renderAI() {
 
 function renderDownloads() {
   const box = $('#downloads');
-  box.hidden = !S.downloads.length;
-  if (!S.downloads.length) return;
+  const show = S.settings.showDownloads !== false && S.downloads.length;
+  box.hidden = !show;
+  if (!show) return;
   box.innerHTML = '';
-  const head = el('div', 'dl-head', 'Downloads <button>Clear</button>');
-  head.querySelector('button').onclick = () => send('downloads-clear');
+  const busy = S.downloads.filter((d) => d.state === 'progressing');
+  const head = el('div', 'dl-head');
+  head.append(el('span', 'dl-title', busy.length ? `Downloading ${busy.length}` : 'Downloads'));
+  const clear = el('button', 'dl-clear', 'Clear');
+  tip(clear, 'Clear this list', 'The files stay in your Downloads folder');
+  clear.onclick = () => send('downloads-clear');
+  head.append(clear);
   box.append(head);
-  const kinds = [...new Set(S.downloads.map((d) => d.kind))];
-  for (const kind of kinds) {
-    if (kinds.length > 1) box.append(el('div', 'dl-kind', esc(kind)));
-    for (const d of S.downloads.filter((x) => x.kind === kind)) {
-      const pct = d.total ? Math.round((d.received / d.total) * 100) : 0;
-      const st = d.state === 'completed' ? 'Done' : d.state === 'cancelled' ? 'Cancelled' : d.state === 'interrupted' ? 'Failed' : `${pct}%`;
-      const r = el('div', 'dl', `<span class="nm">${esc(d.name)}</span><span class="st">${st}</span>`);
-      r.title = 'Show in Finder';
-      r.onclick = () => send('download-open', { id: d.id });
-      if (d.kind === 'Installers' && d.state === 'completed') {
-        const run = el('button', 'dl-run', 'Open'); run.title = 'Open the installer. It moves to the Trash a day later.';
-        run.onclick = (e) => { e.stopPropagation(); send('download-run', { id: d.id }); };
-        r.append(run);
-      }
-      box.append(r);
+
+  for (const d of S.downloads) {
+    const pct = d.total ? Math.min(100, Math.round((d.received / d.total) * 100)) : 0;
+    const done = d.state === 'completed';
+    const bad = d.state === 'interrupted' || d.state === 'cancelled';
+    const r = el('div', `dl${done ? ' done' : ''}${bad ? ' bad' : ''}`);
+
+    const chip = el('span', 'dl-chip', esc(kindShort(d)));
+    chip.style.setProperty('--k', KIND_COLOUR[d.kind] || 'var(--muted)');
+    r.append(chip);
+
+    const mid = el('span', 'dl-mid');
+    mid.append(el('span', 'nm', esc(d.name)));
+    mid.append(el('span', 'dl-sub', esc(
+      bad ? (d.state === 'cancelled' ? 'Cancelled' : 'Did not finish')
+        : done ? `${size(d.total || d.received)} · ${d.kind}`
+          : d.total ? `${size(d.received)} of ${size(d.total)}` : size(d.received),
+    )));
+    if (!done && !bad) {
+      const bar = el('span', 'dl-bar');
+      const fill = el('span', 'dl-fill');
+      // A download whose total nobody knows still has to look alive, so the bar
+      // sweeps instead of lying about a percentage.
+      if (d.total) fill.style.width = `${pct}%`; else bar.classList.add('unknown');
+      bar.append(fill); mid.append(bar);
     }
+    r.append(mid);
+
+    const acts = el('span', 'dl-acts');
+    if (done) {
+      const open = el('button', 'dl-btn', d.kind === 'Installers' ? 'Install' : 'Open');
+      tip(open, d.kind === 'Installers' ? 'Open the installer' : 'Open this file',
+        d.kind === 'Installers' ? 'It moves to the Trash a day later' : '');
+      open.onclick = (e) => { e.stopPropagation(); send('download-run', { id: d.id }); };
+      acts.append(open);
+      const show2 = el('button', 'dl-btn quiet', '􀈕');
+      show2.textContent = 'Finder';
+      tip(show2, 'Show it in Finder');
+      show2.onclick = (e) => { e.stopPropagation(); send('download-open', { id: d.id }); };
+      acts.append(show2);
+    } else if (!bad) acts.append(el('span', 'dl-pct', d.total ? `${pct}%` : ''));
+    r.append(acts);
+    r.onclick = () => send('download-open', { id: d.id });
+    box.append(r);
   }
+}
+
+const KIND_COLOUR = {
+  Installers: '#5F40CF', Video: '#C2410C', Audio: '#1F6F8B', Images: '#2E7D4F',
+  Documents: '#2A64CC', Archives: '#8A6A1F',
+};
+// Three or four letters is enough to tell a .dmg from a .wav at a glance, and it
+// never needs a picture that might not load.
+function kindShort(d) {
+  const ext = (/\.([a-z0-9]+)$/i.exec(d.name || '') || [, ''])[1].toUpperCase();
+  return ext.slice(0, 4) || 'FILE';
+}
+function size(n) {
+  if (!n) return '';
+  const mb = n / 1048576;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  if (mb >= 1) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
 // ---------------------------------------------------------------- omnibox + suggestions
@@ -1220,6 +1289,12 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 function openModal(build) {
   const m = $('#modal'); m.innerHTML = '';
   const sheet = el('div', 'sheet'); build(sheet);
+  // A panel you cannot see how to shut is a trap. There is a cross in the
+  // corner, Escape closes it, and so does clicking the page behind.
+  const x = el('button', 'sheetx', '\u00d7');
+  tip(x, 'Close', 'Escape also closes this');
+  x.onclick = () => closeModal();
+  sheet.prepend(x);
   m.append(sheet); m.hidden = false; overlay(true);
   m.onclick = (e) => { if (e.target === m) closeModal(); };
 }
@@ -1365,9 +1440,11 @@ function openSettings() {
     tb.onclick = () => { send('tidy-dupes'); closeModal(); };
     tidy.append(tb);
     sh.append(tidy);
-    sh.append(el('h3', '', 'Kits'));
-    sh.append(el('div', 'note', 'Switch off what you don\'t use and it stays out of your way.'));
+    sh.append(el('h3', '', 'What you see in Cue'));
+    sh.append(el('div', 'note', 'This is how you hide the parts you never use. Switching one off takes its buttons out of the toolbar and the sidebar; nothing is deleted, and turning it back on brings everything straight back.'));
     Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
+    sh.append(settingRow('Downloads tray in the sidebar', check('showDownloads', s.showDownloads !== false), 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder as usual.'));
+    sh.append(settingRow('Sidebar hidden until you reach for it', check('sideHidden', s.sideHidden), 'The whole sidebar slides away (⌘\\). Move the mouse to the left edge and it comes back.'));
     sh.append(el('h3', '', 'Passwords'));
     const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
     teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
@@ -1444,7 +1521,8 @@ function openSettings() {
     sh.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
     sh.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));
     sh.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
-    sh.append(settingRow('Archive unused tabs after (days, 0 = never)', text('archiveDays', s.archiveDays, '7', 'number'), 'Pinned tabs never archive. Find archived tabs in Library.'));
+    sh.append(settingRow('Close tabs I have not used in (days, 0 = keep everything)', text('archiveDays', s.archiveDays, '2', 'number'),
+      'Two kinds of tab. KEPT: the apps in the strip at the top, any tab you have named yourself, anything playing, on air, in a split or half-typed, and the one you are looking at — these never go. PASSING: everything else, which closes after this many days and waits in Library → Archived, one click from coming back. A blank New tab you never used just closes.'));
     sh.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
     const used = el('div', 'row'); const usedText = el('span', 'note', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache');
     clearBtn.onclick = () => send('clear-cache');

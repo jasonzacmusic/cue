@@ -1230,16 +1230,17 @@ function seedEveryday() {
   store.data.everydayPinned = done;
 }
 
-// A tab opened from another one lands where "New tabs open" says. Groups sort the sidebar, so it
-// takes on the group of whichever tab it lands beside; otherwise a link to another kind of site
-// would jump to a different section of the list.
+// A tab opened from another one lands where "New tabs open" says. It decides the
+// ORDER only. It used to stamp the group of whichever tab it landed beside, so a
+// cricket score opened from a school app was filed under Nathaniel School for
+// ever, and a bank page opened from Facebook lived in Social. A tab's group is
+// its address, every time, unless you move it yourself.
 function placeTab(t, from) {
   const list = spaceOrder().filter((x) => !x.pinned && x !== t);
   const how = from.pinned && settings().newTabPlace === 'next' ? 'start' : settings().newTabPlace;
   const beside = how === 'start' ? list[0] : how === 'end' ? list[list.length - 1] : from;
   if (!beside) { t.order = from.order + 0.001; return; }
   const group = groupOf(beside);
-  if (group !== groupOf(t)) t.groupOverride = group;
   const next = list[list.indexOf(beside) + 1];
   if (how === 'start') t.order = beside.order - 1;
   else if (how === 'end' || !next || groupOf(next) !== group) t.order = beside.order + 1;
@@ -2007,6 +2008,11 @@ function setOverlay(on) {
   if (overlay || sideReveal) mainWin.contentView.addChildView(uiView);
   else mainWin.contentView.addChildView(uiView, 0);
   layout();
+  // Settings sits OVER the page, but the keyboard was still in the page
+  // underneath, so Escape went to the website and the panel stayed open. The
+  // panel takes the keyboard while it is up, and hands it back when it closes.
+  if (overlay) { try { uiView.webContents.focus(); } catch {} }
+  else { const t = byId(activeId); if (t && t.view) { try { t.view.webContents.focus(); } catch {} } }
 }
 
 function setSideReveal(on) {
@@ -2039,6 +2045,7 @@ function sendState() {
       aiHanded: !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'),
       playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, mini: !!t.mini, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
+      lastActive: t.lastActive,
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
@@ -2488,6 +2495,10 @@ function setSetting(key, value) {
     }
   }
   else s[key] = value;
+  // The sidebar is a layout, not just a number in a file: hiding it from
+  // Settings has to move the page over there and then, like the ⌘\ key does.
+  if (key === 'sideHidden') { setSideHidden(!!value); return; }
+  if (key === 'showDownloads') layout();
   if (key === 'githubUser') loadRepos();
   store.save();
   if (key === 'originalSound') tabs.forEach((x) => x.view && x.view.webContents.send('cue:original-sound', value));
@@ -2714,7 +2725,11 @@ function checkBills() {
 }
 
 function readBillPage(t) {
-  if (!kit('business') || t.identity === 'vanish' || groupOf(t) !== 'ai' || !bills.BILLING_URL.test(t.url)) return;
+  // It used to read only pages filed under "AI & Subscriptions", and a tab lands
+  // in that group by its address - so a bill on any other site was never seen,
+  // and the radar sat empty. Now any page whose own address says billing,
+  // invoice, subscription or plan is read, in any folder but Vanish.
+  if (!kit('business') || t.identity === 'vanish' || !/^https?:/.test(t.url || '') || !bills.BILLING_URL.test(t.url)) return;
   const url = t.url;
   setTimeout(async () => {
     if (!t.view || t.url !== url) return;
@@ -2732,16 +2747,42 @@ function bookmarkTab(t) {
 }
 
 // ---------------------------------------------------------------- tidying
+// A browser that keeps every tab for ever is a drawer nobody can shut. Cue has
+// two kinds of tab and says so out loud:
+//
+//   KEPT   - the apps in the strip at the top (pinned), anything you have named
+//            yourself, anything playing, on air, in a split, half-typed, or the
+//            one you are looking at. These never go, whatever their age.
+//   PASSING - everything else: the search you ran on Tuesday, the shop you
+//            looked at once. These close on their own after a few days and go
+//            into Library → Archived, where one click brings them back.
+//
+// Nothing is ever lost, so the sweep can be brisk. A blank "New tab" that was
+// never used is not worth archiving at all - it just goes.
+function keepForever(t, inSplit) {
+  return t.pinned || !!t.name || t.id === activeId || t.id === programId || cueIds.includes(t.id)
+    || t.identity === 'vanish' || t.agent || t.playing || t.audible || t.dirty
+    || mustStayAwake(t) || inSplit.has(t.id) || t.mini;
+}
+
 function archiveOldTabs() {
-  const days = settings().archiveDays; if (!days) return;
-  const cutoff = Date.now() - days * 86400000;
   const inSplit = new Set(store.data.split.ids);
+  // A blank tab left open an hour ago is nothing. Close it quietly.
   for (const t of [...tabs]) {
-    if (t.pinned || t.id === activeId || t.id === programId || cueIds.includes(t.id) || t.identity === 'vanish' || t.agent || t.playing || t.audible || mustStayAwake(t) || inSplit.has(t.id) || t.lastActive > cutoff || isStart(t.url)) continue;
-    store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
+    if (keepForever(t, inSplit) || !isStart(t.url) || Date.now() - t.lastActive < 3600000) continue;
     destroyView(t); tabs.splice(tabs.indexOf(t), 1);
   }
-  store.data.archived.length = Math.min(store.data.archived.length, 500);
+  const days = settings().archiveDays;
+  if (days) {
+    const cutoff = Date.now() - days * 86400000;
+    for (const t of [...tabs]) {
+      if (keepForever(t, inSplit) || isStart(t.url) || t.lastActive > cutoff) continue;
+      store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
+      destroyView(t); tabs.splice(tabs.indexOf(t), 1);
+    }
+    store.data.archived.length = Math.min(store.data.archived.length, 500);
+  }
+  if (!tabs.some((t) => isFolder(t.identity))) openTab({});
   pushState(); persist();
 }
 
@@ -3515,7 +3556,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 7, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Finance: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -3534,6 +3575,22 @@ app.whenReady().then(async () => {
       }
       if (store.data.space === 'Business') store.data.space = 'Finance';
     }
+  }
+  // Two one-off repairs, each done once and never again.
+  if (!store.data.tidyDefaults) {
+    store.data.tidyDefaults = true;
+    // Tabs used to pile up for a week before Cue touched them, which is how a
+    // sidebar gets to sixty tabs. Passing tabs now go after two days, into
+    // Library → Archived. Set it back in Settings if you miss them.
+    if (store.data.settings.archiveDays === 7) store.data.settings.archiveDays = 2;
+  }
+  if (!store.data.groupsRepaired) {
+    store.data.groupsRepaired = true;
+    // Opening a link used to stamp the new tab with the group of whatever it
+    // landed beside, so cricket scores sat under Nathaniel School and a bank
+    // page under Social. Those stamps are wiped; a group you chose yourself
+    // from the right-click menu is set again the same way, in one click.
+    for (const t of store.data.tabs || []) delete t.groupOverride;
   }
   // Browsers that have been running since before folders existed have no folder
   // in the store. Open the one the tabs are actually in, not a guess.
@@ -3568,6 +3625,7 @@ app.whenReady().then(async () => {
   });
   buildMenu();
   createMain();
+  setTimeout(() => { try { archiveOldTabs(); } catch (e) { logProblem('tidy', e); } }, 20000);
   checkBills(); tidyInstallers(); loadRepos(); setTimeout(checkUpdate, 8000); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
   setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch
   const launchLink = process.argv.slice(1).find((x) => /^https?:\/\//.test(x)); if (launchLink) pendingUrls.push(launchLink);

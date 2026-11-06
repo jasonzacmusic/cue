@@ -23,6 +23,37 @@ const GROUPS = [
     hosts: ['instagram.com', 'facebook.com', 'threads.net', 'linkedin.com', 'x.com', 'twitter.com', 'pinterest.com', 'whatsapp.com', 'patreon.com'],
   },
   { id: 'code', name: 'Code', hosts: ['github.com', 'gitlab.com', 'npmjs.com', 'stackoverflow.com'] },
+  {
+    // Shops and the parcels they send. A cart and its tracking page belong
+    // together: both are "the thing I ordered", and neither is Social.
+    id: 'shop', name: 'Shopping',
+    hosts: [
+      'amazon.in', 'amazon.com', 'flipkart.com', 'robu.in', 'robocraze.com', 'silverlineelectronics.in',
+      'element14.com', 'mouser.in', 'thingbits.in', 'zepto.com', 'zeptonow.com', 'swiggy.com', 'zomato.com',
+      'blinkit.com', 'bigbasket.com', 'myntra.com', 'ajio.com', 'croma.com', 'reliancedigital.in',
+      'store.apple.com', 'bambulab.com', 'makerbazar.in', 'thomann.de', 'bhphotovideo.com', 'sweetwater.com',
+      'bluedart.com', 'trackon.in', 'delhivery.com', 'dtdc.in', 'indiapost.gov.in', 'fedex.com', 'dhl.com',
+    ],
+  },
+  {
+    // Money: the bank, the card, the rewards site. Never mixed with Social,
+    // where a rewards page used to land because a link opened beside Facebook.
+    id: 'money', name: 'Money',
+    hosts: [
+      'axisbank.com', 'axis.bank.in', 'hdfcbank.com', 'icicibank.com', 'sbi.co.in', 'kotak.com',
+      'reward360.in', 'paytm.com', 'phonepe.com', 'razorpay.com', 'payu.in', 'onlinesbi.sbi',
+      'incometax.gov.in', 'gst.gov.in', 'cleartax.in', 'zerodha.com', 'groww.in', 'paypal.com',
+    ],
+  },
+  {
+    // Films and music, so an evening's viewing is not filed under "Tabs".
+    id: 'watch', name: 'Watch & listen',
+    hosts: [
+      'netflix.com', 'primevideo.com', 'hotstar.com', 'jiohotstar.com', 'sonyliv.com', 'zee5.com',
+      'jiocinema.com', 'tv.apple.com', 'spotify.com', 'open.spotify.com', 'soundcloud.com',
+      'cricinfo.com', 'espncricinfo.com', 'hoichoi.tv', 'mubi.com',
+    ],
+  },
 ];
 
 const OTHER = { id: 'other', name: 'Tabs' }; // "Tabs" in the sidebar; History calls the same group "Everything else"
