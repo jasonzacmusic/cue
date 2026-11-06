@@ -2775,12 +2775,16 @@ function archiveOldTabs() {
   const days = settings().archiveDays;
   if (days) {
     const cutoff = Date.now() - days * 86400000;
+    let went = 0;
     for (const t of [...tabs]) {
       if (keepForever(t, inSplit) || isStart(t.url) || t.lastActive > cutoff) continue;
       store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
-      destroyView(t); tabs.splice(tabs.indexOf(t), 1);
+      destroyView(t); tabs.splice(tabs.indexOf(t), 1); went++;
     }
     store.data.archived.length = Math.min(store.data.archived.length, 500);
+    // Say it out loud. A sidebar that is suddenly shorter looks like something
+    // went wrong unless you are told where everything went.
+    if (went) sendEvent('toast', `${went} tab${went === 1 ? '' : 's'} you had not opened in ${days} day${days === 1 ? '' : 's'} went to Library \u2192 Archived.`);
   }
   if (!tabs.some((t) => isFolder(t.identity))) openTab({});
   pushState(); persist();

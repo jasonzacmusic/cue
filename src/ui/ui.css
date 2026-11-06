@@ -88,7 +88,7 @@ button { font: inherit; color: inherit; }
 .dl.bad .dl-chip { opacity: .45; }
 .dl-mid { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .dl .nm { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dl-sub { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dl-sub { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dl.bad .dl-sub { color: var(--onair); }
 .dl-bar { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 1px; }
 .dl-fill { display: block; height: 100%; border-radius: 2px; background: var(--accent, #2A64CC); transition: width .25s ease; }
