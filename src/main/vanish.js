@@ -53,9 +53,15 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   function icons(t) {
     const list = [t.favicon];
     if (/^https?:/.test(t.url)) {
-      try { list.push(`${new URL(t.url).origin}/favicon.ico`); } catch {}
+      // A logo Cue ships goes FIRST where it has one: it is already on the disk,
+      // it always draws, and it costs the site nothing. Then the page's own
+      // icon, then the two addresses nearly every site keeps one at.
       const own = typeof logo === 'function' && logo(t.url);
-      if (own) list.push(`../../assets/logos/${own}`);
+      if (own) list.unshift(`../../assets/logos/${own}`);
+      try {
+        const o = new URL(t.url).origin;
+        list.push(`${o}/favicon.ico`, `${o}/apple-touch-icon.png`, `${o}/favicon.png`);
+      } catch {}
     }
     return [...new Set(list.filter(Boolean))];
   }
@@ -94,6 +100,26 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (process.platform === 'darwin') win.setSimpleFullScreen(on); else win.setFullScreen(on);
     layout();
     if (on) { win.focus(); const a = byId(activeId); if (a) a.view.webContents.focus(); }
+  }
+
+  // Coming back from a full-screen film left no pointer and no scroll bar: the
+  // window was still animating when the page was told its new size, and the
+  // video had asked for the pointer to be hidden. Measure again once the
+  // animation is over and nudge the mouse so the pointer comes back.
+  function settle(t) {
+    const again = () => {
+      if (!t || !t.view || t.view.webContents.isDestroyed()) return;
+      layout();
+      try { t.view.webContents.focus(); } catch {}
+      try {
+        const b = t.view.getBounds();
+        const x = Math.round(b.width / 2); const y = Math.round(b.height / 2);
+        t.view.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+        t.view.webContents.sendInputEvent({ type: 'mouseMove', x: x + 1, y: y + 1 });
+      } catch {}
+    };
+    setTimeout(again, 120);
+    setTimeout(again, 600);
   }
 
   function leaveFull(wc) {
@@ -162,7 +188,9 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       if (t.calm) { t.held = true; wc.send('cue:media', 'pause'); return; }
       if (t.from && Date.now() - t.openedAt < FRESH && t.from.playing && activeId !== t.id) activate(t.id);
       t.from = null;
-      if (prefs().onePlayer) for (const o of tabs) if (o !== t && o.playing) o.view.webContents.send('cue:media', 'pause');
+      // A Vanish window is for watching, and he often has two things going at
+      // once - a match in one tab, a film in another. Nothing here pauses
+      // anything else; the one-tab-at-a-time rule belongs to the main window.
     });
     wc.on('media-paused', () => { t.playing = false; });
     wc.on('render-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') setTimeout(() => { if (!wc.isDestroyed()) wc.reload(); }, 500); });
@@ -235,6 +263,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       full = false; layout();
       const a = byId(activeId);
       if (a) a.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+      settle(a);
     });
     win.on('closed', () => {
       win = null; ui = null; activeId = null; full = false;

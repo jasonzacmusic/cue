@@ -47,14 +47,23 @@ button { font: inherit; color: inherit; }
 /* The per-tab hand-over to Claude Code and Codex: same weight as the speaker, same place, so the
    row never changes shape when a tab is handed over or taken back. */
 .aitog { border: 0; background: transparent; cursor: pointer; font: 600 9px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; padding: 3px 4px; border-radius: 5px; color: var(--muted); }
+/* Lit only while an agent is actually working in that tab. Otherwise it waits
+   out of sight and comes back when you point at the row, so a sidebar of ten
+   tabs is ten names rather than ten badges. */
+.aitog.busy { background: var(--agent-wash); color: var(--agent); }
+@keyframes aipulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.aitog.busy { animation: aipulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .aitog.busy { animation: none; } }
+.aitog.on, .aitog.idle { display: none; }
 .aitog.on { background: var(--agent-wash); color: var(--agent); }
-.aitog.idle { opacity: .28; }
-.tab:hover .aitog.idle, .tab.on .aitog.idle, .tab.active .aitog.idle { opacity: .6; }
+.tab:hover .aitog.on, .tab:hover .aitog.idle { display: inline-block; }
+.aitog.idle { opacity: .45; }
 .aitog.idle:hover { opacity: 1; }
 .aitog:disabled { cursor: default; }
-/* A silent tab still shows its speaker, faded, so the control never moves. */
-.spk.idle { opacity: .28; }
-.tab:hover .spk.idle, .tab.on .spk.idle { opacity: .6; }
+/* Same for the speaker: a tab making no sound shows nothing until you reach for
+   it. A tab that is playing, or muted, keeps its speaker where it always was. */
+.spk.idle { display: none; }
+.tab:hover .spk.idle { display: grid; opacity: .6; }
 .spk.idle:hover { opacity: 1; }
 .spk svg { width: 15px; height: 15px; }
 .spk.live { color: var(--ink); }
@@ -62,7 +71,10 @@ button { font: inherit; color: inherit; }
 .media { font-size: 10px !important; }
 
 /* hover volume: point at the speaker, the slider appears across the row, drag it, leave */
-.volpop { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 148px; display: none; align-items: center; gap: 8px;
+/* It used to open on top of the speaker, so the speaker you had just pressed was
+   suddenly somewhere else and you had to chase it. It opens to the LEFT of the
+   speaker now: nothing moves, and the button stays under the pointer. */
+.volpop { position: absolute; right: 30px; top: 50%; transform: translateY(-50%); width: 148px; display: none; align-items: center; gap: 8px;
   height: 28px; padding: 0 9px; border-radius: 14px; background: var(--raised); border: 1px solid var(--line); box-shadow: 0 4px 14px -6px var(--shadow); z-index: 4; }
 .tab.vol-open .volpop { display: flex; }
 .volpop input { flex: 1; min-width: 0; accent-color: var(--ink); height: 16px; }
@@ -535,3 +547,20 @@ body.rail .updatebar { display: none; }
 .ctl .mini:hover { color: var(--ink); background: var(--hover); }
 .ctl .mini.on { color: var(--tone); }
 .tab.inmini .title { font-style: italic; }
+
+
+/* ---- Settings: rooms down the side instead of one endless scroll ---- */
+.sheet.settings { max-width: 860px; }
+.sheet.settings .sbody { display: flex; gap: 18px; align-items: stretch; min-height: 0; }
+.sheet.settings .snav { flex: 0 0 182px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); padding-right: 12px; }
+.sheet.settings .snav button { text-align: left; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px;
+  padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+.sheet.settings .snav button:hover { background: var(--hover); color: var(--ink); }
+.sheet.settings .snav button.on { background: var(--agent-wash); color: var(--ink); font-weight: 600; }
+.sheet.settings .spane { flex: 1; min-width: 0; max-height: 62vh; overflow-y: auto; padding-right: 4px; }
+.sheet.settings .spane h3:first-child { margin-top: 0; }
+@media (max-width: 760px) {
+  .sheet.settings .sbody { flex-direction: column; }
+  .sheet.settings .snav { flex: none; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 8px; }
+  .sheet.settings .spane { max-height: none; }
+}

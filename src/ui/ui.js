@@ -604,8 +604,14 @@ function tabRow(t, splitIds) {
   // switched off from here - closing it is how you take it back.
   if (!t.private && t.identity !== 'vanish' && !String(t.url || '').startsWith('cue://')) {
     const fixed = t.agent || t.aiSite;
-    const ai = el('button', 'aitog' + (t.aiOk ? ' on' : ' idle'), 'AI');
-    tip(ai, t.agent ? 'An agent opened this tab, so it can work here'
+    // The mark used to sit on every row all day and say only "this tab is
+    // ALLOWED to be used by an agent", which is not news. Lit now means an agent
+    // is working in this tab at this moment. Otherwise it waits out of sight and
+    // appears when you point at the row, so the sidebar is tab names and nothing
+    // else until you reach for something.
+    const ai = el('button', 'aitog' + (t.aiBusy ? ' busy' : t.aiOk ? ' on' : ' idle'), 'AI');
+    tip(ai, t.aiBusy ? 'An agent is working in this tab right now'
+      : t.agent ? 'An agent opened this tab, so it can work here'
       : t.aiSite ? `${t.aiSite} is handed to agents for every folder \u00b7 change that in Settings`
       : t.aiOk ? 'Claude Code and Codex may work in this tab \u00b7 click to take it back'
                : 'Only you can use this tab \u00b7 click to hand it to Claude Code and Codex');
@@ -1307,270 +1313,324 @@ function settingRow(label, input, note) {
   return r;
 }
 function check(key, val) { const i = el('input'); i.type = 'checkbox'; i.checked = !!val; i.onchange = () => send('setting', { key, value: i.checked }); return i; }
+function choice(key, val, opts) {
+  const c = el('select');
+  opts.forEach(([v, n]) => { const o = el('option', '', n); o.value = v; o.selected = v === val; c.append(o); });
+  c.onchange = () => send('setting', { key, value: c.value });
+  return c;
+}
 function text(key, val, ph, type = 'text') { const i = el('input'); i.type = type; i.value = val || ''; i.placeholder = ph || ''; i.onchange = () => send('setting', { key, value: type === 'number' ? Number(i.value) : i.value }); return i; }
 
-function openSettings() {
+// Settings used to be one scroll a mile long: "Tabs and sound" was right at the
+// bottom, under the extensions and the passwords. It is a list of rooms now -
+// click a room on the left and you see only that. Cue remembers which room you
+// were in, so going back for one more thing lands you where you were.
+let settingsRoom = 'tabs';
+function openSettings(startAt) {
   const s = S.settings;
-  openModal((sh) => {
-    sh.append(el('h2', '', 'Cue settings'));
-    sh.append(el('h3', '', 'Shield'));
-    sh.append(settingRow('Block ads and trackers', check('blockAds', s.blockAds !== false), 'The same filter lists Brave and uBlock use. Ads, tracking scripts and cookie banners never load, so pages are lighter as well as quieter.'));
-    sh.append(settingRow('Warn me about dangerous sites', check('warnDangerous', s.warnDangerous !== false), 'A page reported for handing out viruses, or for copying a real sign-in page to collect your password, is stopped with an explanation instead of opening.'));
-    sh.append(settingRow('Try the secure address first', check('httpsFirst', s.httpsFirst !== false), 'Cue asks for https:// even when a link says http://, and tells you when a site has no secure address.'));
-    sh.append(settingRow('Keep my real address hidden on a VPN', check('hideRealIP', s.hideRealIP !== false), 'Video calling normally hands a page every network address this Mac has, which is how a site reads your home address while NordVPN is on. Cue offers the public one only. Takes effect on the next page load.'));
-    const shieldLine = el('div', 'note', 'Checking…'); sh.append(shieldLine);
-    const shieldRow = el('div', 'row'); const refresh = el('button', 'btn small', 'Check for new threats now');
-    refresh.onclick = async () => { refresh.disabled = true; refresh.textContent = 'Checking…'; await window.cue.invoke('shield.refresh'); refresh.textContent = 'Up to date'; showShield(); };
-    shieldRow.append(el('span', 'note', ''), refresh); sh.append(shieldRow);
-    const ago = (at) => {
-      if (!at) return 'never';
-      const d = Math.round((Date.now() - at) / 86400000);
-      return d <= 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} ago`;
-    };
-    const showShield = () => window.cue.invoke('shield.status').then((st) => {
-      if (!st.on) { shieldLine.textContent = 'The shield is off. Nothing is being blocked.'; return; }
-      const allowed = st.allowed.length ? ` Ads are allowed by hand on ${st.allowed.join(', ')}.` : '';
-      shieldLine.textContent = `${st.listsMB} MB of ad and tracker rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
-    });
-    showShield();
-    sh.append(el('h3', '', 'Updates'));
-    sh.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
-    // The number keys. Nine rows, each his to re-point, because the whole value of a shortcut is
-    // that it goes where he expects without him thinking about it.
-    sh.append(el('h3', '', 'The number keys'));
-    sh.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school\u2019s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Each folder keeps its OWN nine, so School\u2019s Command-4 can be the leads board while Personal\u2019s is your bank. Pick the folder below, then give a key a name and a web address, or leave the address empty to make it open a brand new tab.'));
-    // Each folder keeps its own nine, so pick the folder first and the rows below
-    // are that folder's. Switching here changes nothing until a row is edited.
-    const picker = el('div', 'fpick');
-    const rows = el('div', '');
-    let editing = S.folder || 'personal';
-    const drawKeys = () => {
-      rows.innerHTML = '';
-      const box = s.quickKeys;
-      const mine = (Array.isArray(box) ? box : (box && box[editing])) || [];
-      for (let i = 0; i < 9; i++) {
-        const q = mine[i] || {};
-        const pair = el('div', 'row');
-        pair.append(text(`quick.${editing}.${i + 1}.name`, q.name, 'What to call it'));
-        pair.append(text(`quick.${editing}.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
-        rows.append(settingRow(`Command-${i + 1}`, pair));
-      }
-    };
-    for (const [id, name] of [['personal', 'Personal'], ['school', 'School'], ['agent', 'AI agent']]) {
-      const b = el('button', id === editing ? 'on' : '', name);
-      b.onclick = () => {
-        editing = id;
-        for (const c of picker.children) c.classList.toggle('on', c === b);
-        drawKeys();
+
+  const rooms = [
+    ['tabs', 'Tabs and sound', (p) => {
+      p.append(el('h3', '', 'Apps that are one place'));
+      p.append(el('div', 'note', 'WhatsApp, Gmail, Instagram and Facebook are a place, not a page — there is nothing to have two of. Cue keeps one of each per folder in the strip at the top of the sidebar: yours in Personal, the school’s in School, and clicking the icon goes to whichever one you are. They are never a row you have to pin or tidy. YouTube is three jobs under one address — watching, Studio and your community posts — so those keep a tab each, and ordinary sites like Amazon open as many tabs as you like.'));
+      const tidy = el('div', 'row');
+      const tb = el('button', 'btn', 'Merge duplicate tabs');
+      tb.onclick = () => { send('tidy-dupes'); closeModal(); };
+      tidy.append(el('span', 'note', 'Clears up copies left from before. It also runs by itself every time Cue opens.'), tb);
+      p.append(tidy);
+
+      p.append(el('h3', '', 'When Cue opens'));
+      p.append(settingRow('Go to', choice('openOn', s.openOn || 'home', [['home', 'The app I start in'], ['last', 'The tab I was last on']])));
+      p.append(settingRow('The app I start in', text('homeApp', s.homeApp, 'https://web.whatsapp.com/'),
+        'The same app in whichever folder you open: your own WhatsApp in Personal, the school’s in School. If that app is not open yet, Cue lands on the last tab you used in that folder.'));
+
+      p.append(el('h3', '', 'Sound'));
+      p.append(settingRow('Apps that open silent', text('muteSites', (s.muteSites || []).join(', '), 'web.whatsapp.com'),
+        'WhatsApp is here by default: its ding all day is the loudest thing on the machine. YouTube and the film services are not, because sound is the point of them. You can still unmute any tab by hand — this only decides how it starts. Separate sites with a comma.'));
+      p.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. A silent video — the preview that starts when you rest the pointer on a film — never pauses anything, and the on-air tab is never paused.'));
+      p.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'switch', [['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
+      p.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
+
+      p.append(el('h3', '', 'Tabs'));
+      p.append(settingRow('Group tabs automatically (Google, Shopping, Watch & listen…)', check('autoGroup', s.autoGroup)));
+      p.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
+      p.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
+      p.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));
+      p.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
+      p.append(settingRow('Close tabs I have not used in (days, 0 = keep everything)', text('archiveDays', s.archiveDays, '2', 'number'),
+        'Two kinds of tab. KEPT: the apps in the strip at the top, any tab you have named yourself, anything playing, on air, in a split or half-typed, and the one you are looking at — these never go. PASSING: everything else, which closes after this many days and waits in Library → Archived, one click from coming back. A blank New tab you never used just closes.'));
+    }],
+
+    ['notes', 'Notifications', (p) => {
+      p.append(el('h3', '', 'What may interrupt you'));
+      p.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com'),
+        'WhatsApp is in here by default: both accounts, class groups and leads, all day. The messages still arrive, the count still shows in the sidebar and every one is kept in Bills & alerts — nothing jumps in front of what you are doing. Separate sites with a comma.'));
+      p.append(el('div', 'note', 'Nothing at all pops up while you are on air. Whatever came in is waiting in Bills & alerts when the class ends.'));
+    }],
+
+    ['keys', 'The number keys', (p) => {
+      p.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school’s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Each folder keeps its OWN nine, so School’s Command-4 can be the leads board while Personal’s is your bank. Pick the folder below, then give a key a name and a web address, or leave the address empty to make it open a brand new tab.'));
+      const picker = el('div', 'fpick');
+      const rows = el('div', '');
+      let editing = S.folder || 'personal';
+      const drawKeys = () => {
+        rows.innerHTML = '';
+        const box = s.quickKeys;
+        const mine = (Array.isArray(box) ? box : (box && box[editing])) || [];
+        for (let i = 0; i < 9; i++) {
+          const q = mine[i] || {};
+          const pair = el('div', 'row');
+          pair.append(text(`quick.${editing}.${i + 1}.name`, q.name, 'What to call it'));
+          pair.append(text(`quick.${editing}.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
+          rows.append(settingRow(`Command-${i + 1}`, pair));
+        }
       };
-      picker.append(b);
-    }
-    sh.append(settingRow('Shortcuts for', picker));
-    sh.append(rows);
-    drawKeys();
-    sh.append(el('h3', '', 'Spaces'));
-    sh.append(el('div', 'note', 'Double-click a Space in the sidebar to call it whatever you like. Its tabs, its layout and the login it opens with all come across with the name.'));
-    sh.append(el('h3', '', 'Folders'));
-    sh.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram, YouTube and WhatsApp sign-ins, so two Gmails stay signed in side by side and never see each other. Click a folder at the top of the sidebar to open it: you see the tabs that live in it, and new tabs are born in it. A tab keeps the folder it was born in until you right-click it and move it. Name the account each folder holds — it shows on the folder, and AI agents read it and use the right login without asking you.'));
-    sh.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
-    sh.append(settingRow('School account', text('label.school', S.labels.school, 'music@nathanielschool.com')));
-    // Jason asked this one out loud, so the answer lives where he will meet it,
-    // not only in a message he has to go back and find.
-    sh.append(el('div', 'note', 'Instagram has its own account switcher inside the app, which keeps several accounts in one place. With a folder for each Google account you never need it: Instagram in Personal is your own account, Instagram in School is the school\'s, and both stay signed in at once. Each folder shows the Instagram account that is live in it, so you can see which one you are about to post from before you touch anything.'));
-    // Google and Meta both refuse a sign-in form inside a browser they have not
-    // seen before. Chrome on this Mac is already signed in to all of them, and
-    // its cookies are the way in that needs no password. One button per folder,
-    // because which folder it lands in is the whole question.
-    sh.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder — the button empties that folder’s old Google cookies first, which is what Google was actually refusing, and then opens Google’s own form for you to type the password into.'));
-    const goog = el('div', 'row');
-    for (const k of ['personal', 'school']) {
-      const g = el('button', 'btn', `Sign in to Google as ${S.identities[k].name}`);
-      g.onclick = () => { send('signin.google', { identity: k }); closeModal(); };
-      goog.append(g);
-    }
-    sh.append(goog);
-    const carry = el('div', 'row');
-    for (const k of ['personal', 'school']) {
-      const b = el('button', 'btn', `Bring Instagram and Facebook into ${S.identities[k].name}`);
-      // It says what it is doing, then goes back to being a button. Left
-      // disabled, it reads as though the carry is still running forever.
-      b.onclick = () => {
-        const was = b.textContent;
-        b.disabled = true; b.textContent = 'Bringing them over\u2026';
-        send('signin.carry-all', { identity: k });
-        setTimeout(() => { b.disabled = false; b.textContent = was; }, 6000);
-      };
-      carry.append(b);
-    }
-    sh.append(carry);
-    const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
-    def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
-    sh.append(settingRow('Folder a new, empty Space opens in', def));
-    const mv = el('div', 'row'); const mvb = el('button', 'btn', 'Move in from another browser'); mvb.onclick = () => { closeModal(); openImport(); };
-    const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.onclick = () => send('make-default'); mv.append(mvb, dfb); sh.append(mv);
-    sh.append(el('h3', '', 'Spaces'));
-    sh.append(el('div', 'note', 'A Space is the job you are doing; a folder is whose account you are in. They are separate. Going to an empty Space opens the folder it usually uses; going to a Space that has tabs opens the folder of the tab you land on.'));
-    S.spaces.forEach((n) => {
-      const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
-      pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
-      const line = el('div', 'row');
-      line.append(pick);
-      if (S.spaces.length > 1) {
-        const rm = el('button', 'btn', 'Remove');
-        rm.title = `Remove ${n}. Its tabs move to ${S.spaces[0] === n ? S.spaces[1] : S.spaces[0]} — nothing is closed.`;
-        rm.onclick = () => { send('space-remove', { name: n }); closeModal(); };
-        line.append(rm);
+      for (const [id, name] of [['personal', 'Personal'], ['school', 'School'], ['agent', 'AI agent']]) {
+        const b = el('button', id === editing ? 'on' : '', name);
+        b.onclick = () => { editing = id; for (const c of picker.children) c.classList.toggle('on', c === b); drawKeys(); };
+        picker.append(b);
       }
-      sh.append(settingRow(`${n} usually opens in`, line));
-    });
-    if (S.spaces.length < 9) {
-      const add = el('div', 'row');
-      const nm = el('input'); nm.type = 'text'; nm.placeholder = 'Finance, Church, Admin…'; nm.maxLength = 18;
-      const go = el('button', 'btn', 'Add this Space');
-      const run = () => { const v = nm.value.trim(); if (v) { send('space-add', { name: v }); closeModal(); } };
-      go.onclick = run;
-      nm.onkeydown = (e) => { if (e.key === 'Enter') run(); };
-      add.append(nm, go);
-      sh.append(settingRow('A new Space', add, 'Up to nine. Each one keeps its own tabs, its own layout and the login it opens with.'));
-    }
-    sh.append(el('h3', '', 'One of each'));
-    sh.append(el('div', 'note', 'Gmail, WhatsApp, YouTube, YouTube Studio, Calendar and Drive are one place, not many, so each folder keeps a single tab for each of them and every later click lands in it. This clears up any copies left from before.'));
-    const tidy = el('div', 'row');
-    const tb = el('button', 'btn', 'Merge duplicate tabs');
-    tb.onclick = () => { send('tidy-dupes'); closeModal(); };
-    tidy.append(tb);
-    sh.append(tidy);
-    sh.append(el('h3', '', 'What you see in Cue'));
-    sh.append(el('div', 'note', 'This is how you hide the parts you never use. Switching one off takes its buttons out of the toolbar and the sidebar; nothing is deleted, and turning it back on brings everything straight back.'));
-    Object.entries(S.kits).forEach(([k, v]) => sh.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
-    sh.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com'),
-      'WhatsApp is in here by default: both accounts, class groups and leads, all day. The messages still arrive, the count still shows in the sidebar and every one is kept in Bills & alerts \u2014 nothing jumps in front of what you are doing. Separate sites with a comma.'));
-    sh.append(settingRow('Downloads tray in the sidebar', check('showDownloads', s.showDownloads !== false), 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder as usual.'));
-    sh.append(settingRow('Sidebar hidden until you reach for it', check('sideHidden', s.sideHidden), 'The whole sidebar slides away (⌘\\). Move the mouse to the left edge and it comes back.'));
-    sh.append(el('h3', '', 'Passwords'));
-    const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
-    teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
-    team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com, once. Cards and banks stay out.'), teamBtn);
-    const pwBox = el('div', 'pwlist'); sh.append(pwBox);
-    window.cue.invoke('team-offered').then((yes) => { if (yes) pwBox.before(team); });
-    window.cue.invoke('passwords').then((list) => {
-      if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
-      const same = new Map(); // one row per login, even when it is kept for both Personal and School
-      list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
-      const ours = (g) => /(^|\.)nathanielschool\.com$/.test(hostOf(g[0].origin));
-      const rows = [...same.values()].sort((p, q) => hostOf(p[0].origin).localeCompare(hostOf(q[0].origin)));
-      [['Nathaniel School', rows.filter(ours)], ['Other sites', rows.filter((g) => !ours(g))]].forEach(([title, group]) => {
-        if (group.length) pwBox.append(el('div', 'note', `${title} (${group.length})`));
-        group.forEach((g) => {
-          const x = g[0]; const r = el('div', 'row'); const a2 = check('', g.every((i) => i.auto)); a2.title = 'Sign in by itself on this site';
-          a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
-          const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
-          const auto = el('label', 'note', ' auto'); auto.prepend(a2);
-          const who = g.length > 1 ? 'Personal and School' : S.identities[x.identity].name;
-          r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${who}`)), auto, rm); pwBox.append(r);
+      p.append(settingRow('Shortcuts for', picker));
+      p.append(rows);
+      drawKeys();
+    }],
+
+    ['folders', 'Folders and accounts', (p) => {
+      p.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram, YouTube and WhatsApp sign-ins, so two Gmails stay signed in side by side and never see each other. Click a folder at the top of the sidebar to open it: you see the tabs that live in it, and new tabs are born in it. A tab keeps the folder it was born in until you right-click it and move it. Name the account each folder holds — it shows on the folder, and AI agents read it and use the right login without asking you.'));
+      p.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
+      p.append(settingRow('School account', text('label.school', S.labels.school, 'music@nathanielschool.com')));
+      p.append(el('div', 'note', 'Instagram has its own account switcher inside the app, which keeps several accounts in one place. With a folder for each Google account you never need it: Instagram in Personal is your own account, Instagram in School is the school’s, and both stay signed in at once. Each folder shows the Instagram account that is live in it, so you can see which one you are about to post from before you touch anything.'));
+      p.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder — the button empties that folder’s old Google cookies first, which is what Google was actually refusing, and then opens Google’s own form for you to type the password into.'));
+      const goog = el('div', 'row');
+      for (const k of ['personal', 'school']) {
+        const g = el('button', 'btn', `Sign in to Google as ${S.identities[k].name}`);
+        g.onclick = () => { send('signin.google', { identity: k }); closeModal(); };
+        goog.append(g);
+      }
+      p.append(goog);
+      const carry = el('div', 'row');
+      for (const k of ['personal', 'school']) {
+        const b = el('button', 'btn', `Bring Instagram and Facebook into ${S.identities[k].name}`);
+        b.onclick = () => {
+          const was = b.textContent;
+          b.disabled = true; b.textContent = 'Bringing them over…';
+          send('signin.carry-all', { identity: k });
+          setTimeout(() => { b.disabled = false; b.textContent = was; }, 6000);
+        };
+        carry.append(b);
+      }
+      p.append(carry);
+      const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
+      def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
+      p.append(settingRow('Folder a new, empty Space opens in', def));
+      const mv = el('div', 'row'); const mvb = el('button', 'btn', 'Move in from another browser'); mvb.onclick = () => { closeModal(); openImport(); };
+      const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.onclick = () => send('make-default'); mv.append(mvb, dfb); p.append(mv);
+    }],
+
+    ['spaces', 'Spaces', (p) => {
+      p.append(el('div', 'note', 'A Space is the job you are doing; a folder is whose account you are in. They are separate. Going to an empty Space opens the folder it usually uses; going to a Space that has tabs opens the folder of the tab you land on. Double-click a Space in the sidebar to call it whatever you like.'));
+      S.spaces.forEach((n) => {
+        const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
+        pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
+        const line = el('div', 'row');
+        line.append(pick);
+        if (S.spaces.length > 1) {
+          const rm = el('button', 'btn', 'Remove');
+          rm.title = `Remove ${n}. Its tabs move to ${S.spaces[0] === n ? S.spaces[1] : S.spaces[0]} — nothing is closed.`;
+          rm.onclick = () => { send('space-remove', { name: n }); closeModal(); };
+          line.append(rm);
+        }
+        p.append(settingRow(`${n} usually opens in`, line));
+      });
+      if (S.spaces.length < 9) {
+        const add = el('div', 'row');
+        const nm = el('input'); nm.type = 'text'; nm.placeholder = 'Finance, Church, Admin…'; nm.maxLength = 18;
+        const go = el('button', 'btn', 'Add this Space');
+        const run = () => { const v = nm.value.trim(); if (v) { send('space-add', { name: v }); closeModal(); } };
+        go.onclick = run;
+        nm.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+        add.append(nm, go);
+        p.append(settingRow('A new Space', add, 'Up to nine. Each one keeps its own tabs, its own layout and the login it opens with.'));
+      }
+    }],
+
+    ['look', 'What you see', (p) => {
+      p.append(el('div', 'note', 'This is how you hide the parts you never use. Switching one off takes its buttons out of the toolbar and the sidebar; nothing is deleted, and turning it back on brings everything straight back.'));
+      Object.entries(S.kits).forEach(([k, v]) => p.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
+      p.append(settingRow('Downloads tray in the sidebar', check('showDownloads', s.showDownloads !== false), 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder as usual.'));
+      p.append(settingRow('Sidebar hidden until you reach for it', check('sideHidden', s.sideHidden), 'The whole sidebar slides away (⌘\\). Move the mouse to the left edge and it comes back.'));
+      p.append(el('div', 'note', 'A tab’s own buttons — the speaker, the AI mark, move up and down, close — only appear when the pointer is on that row, so the sidebar stays quiet. A tab making a noise keeps its speaker showing, and a tab an agent is working in keeps its AI mark lit, whether or not you are pointing at it.'));
+    }],
+
+    ['shield', 'Shield', (p) => {
+      p.append(settingRow('Block ads and trackers', check('blockAds', s.blockAds !== false), 'The same filter lists Brave and uBlock use. Ads, tracking scripts and cookie banners never load, so pages are lighter as well as quieter.'));
+      p.append(settingRow('Warn me about dangerous sites', check('warnDangerous', s.warnDangerous !== false), 'A page reported for handing out viruses, or for copying a real sign-in page to collect your password, is stopped with an explanation instead of opening.'));
+      p.append(settingRow('Try the secure address first', check('httpsFirst', s.httpsFirst !== false), 'Cue asks for https:// even when a link says http://, and tells you when a site has no secure address.'));
+      p.append(settingRow('Keep my real address hidden on a VPN', check('hideRealIP', s.hideRealIP !== false), 'Video calling normally hands a page every network address this Mac has, which is how a site reads your home address while NordVPN is on. Cue offers the public one only. Takes effect on the next page load.'));
+      const shieldLine = el('div', 'note', 'Checking…'); p.append(shieldLine);
+      const shieldRow = el('div', 'row'); const refresh = el('button', 'btn small', 'Check for new threats now');
+      const ago = (at) => {
+        if (!at) return 'never';
+        const d = Math.round((Date.now() - at) / 86400000);
+        return d <= 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} ago`;
+      };
+      const showShield = () => window.cue.invoke('shield.status').then((st) => {
+        if (!st.on) { shieldLine.textContent = 'The shield is off. Nothing is being blocked.'; return; }
+        const allowed = st.allowed.length ? ` Ads are allowed by hand on ${st.allowed.join(', ')}.` : '';
+        shieldLine.textContent = `${st.listsMB} MB of ad and tracker rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
+      });
+      refresh.onclick = async () => {
+        refresh.disabled = true; refresh.textContent = 'Fetching the new lists…';
+        const r = await window.cue.invoke('shield.refresh');
+        refresh.textContent = r && r.ok === false ? 'Could not reach the lists' : 'Up to date';
+        setTimeout(() => { refresh.disabled = false; refresh.textContent = 'Check for new threats now'; }, 4000);
+        showShield();
+      };
+      shieldRow.append(el('span', 'note', 'Cue fetches them by itself every few days; this is for when you want it now.'), refresh); p.append(shieldRow);
+      showShield();
+    }],
+
+    ['pw', 'Passwords', (p) => {
+      p.append(el('div', 'note', 'Cue offers to save a password when you sign in to a site, and fills it in next time. With “auto” ticked it signs you in by itself. Nothing leaves this Mac and nothing is ever filled into a page you did not open yourself.'));
+      const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
+      teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
+      team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com, once. Cards and banks stay out.'), teamBtn);
+      const pwBox = el('div', 'pwlist'); p.append(pwBox);
+      window.cue.invoke('team-offered').then((yes) => { if (yes) pwBox.before(team); });
+      window.cue.invoke('passwords').then((list) => {
+        if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
+        const same = new Map();
+        list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
+        const ours = (g) => /(^|\.)nathanielschool\.com$/.test(hostOf(g[0].origin));
+        const rows = [...same.values()].sort((q, r2) => hostOf(q[0].origin).localeCompare(hostOf(r2[0].origin)));
+        [['Nathaniel School', rows.filter(ours)], ['Other sites', rows.filter((g) => !ours(g))]].forEach(([title, group]) => {
+          if (group.length) pwBox.append(el('div', 'note', `${title} (${group.length})`));
+          group.forEach((g) => {
+            const x = g[0]; const r = el('div', 'row'); const a2 = check('', g.every((i) => i.auto)); a2.title = 'Sign in by itself on this site';
+            a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
+            const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
+            const auto = el('label', 'note', ' auto'); auto.prepend(a2);
+            const who = g.length > 1 ? 'Personal and School' : S.identities[x.identity].name;
+            r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${who}`)), auto, rm); pwBox.append(r);
+          });
         });
       });
-    });
-    sh.append(el('h3', '', 'Chrome extensions'));
-    const exBox = el('div', 'pwlist'); sh.append(exBox);
-    sh.append(el('div', 'note', 'An extension can read the pages you are signed in to, so each one says what it can do before you add it. Copied from your other browsers, so they keep working here. Removing one puts it in the Trash.'));
-    // Each extension gets its sentence under its name, because "manifest
-    // permissions: cookies, webRequest, <all_urls>" is not a warning anybody
-    // can act on.
-    const extRow = (x, right) => {
-      const r = el('div', 'rowtall');
-      const left = el('div', 'rowtext');
-      left.append(el('div', '', esc(x.version ? `${x.name} · ${x.version}` : x.name)));
-      if (x.can) left.append(el('div', 'note', esc(x.can)));
-      r.append(left, right);
-      return r;
-    };
-    window.cue.invoke('ext-find').then(({ available, installed }) => {
-      if (installed.length) exBox.append(el('div', 'note', `In Cue now (${installed.length})`));
-      installed.forEach((x) => {
-        const b = el('button', 'btn danger', 'Remove');
-        let sure = false;
-        b.onclick = () => {
-          if (!sure) { sure = true; b.textContent = 'Remove it?'; b.classList.add('sure'); setTimeout(() => { if (sure) { sure = false; b.textContent = 'Remove'; b.classList.remove('sure'); } }, 4000); return; }
-          window.cue.invoke('ext-remove', { id: x.id });
-          r.replaceChildren(el('span', 'note', esc(`${x.name} removed. It is in the Trash.`)));
-        };
-        const r = extRow({ ...x, name: x.on === false ? `${x.name} · off` : x.name }, b);
-        exBox.append(r);
+    }],
+
+    ['ext', 'Chrome extensions', (p) => {
+      const exBox = el('div', 'pwlist'); p.append(exBox);
+      p.append(el('div', 'note', 'An extension can read the pages you are signed in to, so each one says what it can do before you add it. Copied from your other browsers, so they keep working here. Removing one puts it in the Trash.'));
+      const extRow = (x, right) => {
+        const r = el('div', 'rowtall');
+        const left = el('div', 'rowtext');
+        left.append(el('div', '', esc(x.version ? `${x.name} · ${x.version}` : x.name)));
+        if (x.can) left.append(el('div', 'note', esc(x.can)));
+        r.append(left, right);
+        return r;
+      };
+      window.cue.invoke('ext-find').then(({ available, installed }) => {
+        if (installed.length) exBox.append(el('div', 'note', `In Cue now (${installed.length})`));
+        installed.forEach((x) => {
+          const b = el('button', 'btn danger', 'Remove');
+          let sure = false;
+          b.onclick = () => {
+            if (!sure) { sure = true; b.textContent = 'Remove it?'; b.classList.add('sure'); setTimeout(() => { if (sure) { sure = false; b.textContent = 'Remove'; b.classList.remove('sure'); } }, 4000); return; }
+            window.cue.invoke('ext-remove', { id: x.id });
+            r.replaceChildren(el('span', 'note', esc(`${x.name} removed. It is in the Trash.`)));
+          };
+          const r = extRow({ ...x, name: x.on === false ? `${x.name} · off` : x.name }, b);
+          exBox.append(r);
+        });
+        if (available.length) exBox.append(el('div', 'note', `Found in your other browsers (${available.length})`));
+        available.slice(0, 30).forEach((x) => {
+          const b = el('button', 'btn', 'Add'); const wrap = el('div', 'rowbtns');
+          const st = el('span', 'note', esc(x.from));
+          b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; };
+          wrap.append(st, b);
+          exBox.append(extRow(x, wrap));
+        });
+        if (!installed.length && !available.length) exBox.append(el('div', 'note', 'None found.'));
       });
-      if (available.length) exBox.append(el('div', 'note', `Found in your other browsers (${available.length})`));
-      available.slice(0, 30).forEach((x) => {
-        const b = el('button', 'btn', 'Add'); const wrap = el('div', 'rowbtns');
-        const st = el('span', 'note', esc(x.from));
-        b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; };
-        wrap.append(st, b);
-        exBox.append(extRow(x, wrap));
-      });
-      if (!installed.length && !available.length) exBox.append(el('div', 'note', 'None found.'));
-    });
-    sh.append(el('h3', '', 'Tabs and sound'));
-    sh.append(settingRow('Group tabs automatically (Google, AI & Subscriptions…)', check('autoGroup', s.autoGroup)));
-    sh.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. The on-air tab is never paused.'));
-    const choice = (key, val, opts) => {
-      const c = el('select');
-      opts.forEach(([v, n]) => { const o = el('option', '', n); o.value = v; o.selected = v === val; c.append(o); });
-      c.onchange = () => send('setting', { key, value: c.value });
-      return c;
+    }],
+
+    ['live', 'Live class', (p) => {
+      p.append(settingRow('Safe-share (blur emails, phone numbers, money, keys on air)', check('safeShare', s.safeShare)));
+      const size = el('select'); [['1920x1080', '1920 × 1080'], ['1280x720', '1280 × 720']].forEach(([v, n]) => { const o = el('option', '', n); o.value = v; if (v === `${s.stageWidth}x${s.stageHeight}`) o.selected = true; size.append(o); });
+      size.onchange = () => { const [w, h] = size.value.split('x').map(Number); send('setting', { key: 'stageWidth', value: w }); send('setting', { key: 'stageHeight', value: h }); };
+      p.append(settingRow('Stage window size', size, 'Zoom: Share Screen → pick “Cue Stage — On Air”. OBS: Window Capture → the same window.'));
+      p.append(settingRow('OBS address', text('obs.host', s.obs.host, '127.0.0.1')));
+      p.append(settingRow('OBS port', text('obs.port', s.obs.port, '4455', 'number')));
+      p.append(settingRow('OBS password', text('obs.password', '', s.obs.password ? 'Saved' : 'From OBS → Tools → WebSocket', 'password')));
+      const ob = el('div', 'row'); const status = el('span', 'pill' + (S.obs === 'connected' ? ' ok' : ''), S.obs === 'connected' ? 'Connected' : S.obs === 'connecting' ? 'Connecting…' : 'Not connected');
+      const cb = el('button', 'btn', 'Connect to OBS'); cb.onclick = () => send('obs-connect');
+      const ac = check('obs.autoConnect', s.obs.autoConnect); const acl = el('label', 'note', ' connect on launch'); acl.prepend(ac);
+      ob.append(status, acl, cb); p.append(ob);
+      const a = S.tabs.find((t) => t.id === S.activeId);
+      if (a) {
+        const sc = el('div', 'row'); const inp = el('input'); inp.type = 'text'; inp.value = a.obsScene || ''; inp.placeholder = 'Scene name, e.g. 🎹 Class Apps';
+        inp.onchange = () => send('set-scene', { id: a.id, scene: inp.value });
+        sc.append(el('label', '', `OBS scene for “${esc(a.title.slice(0, 40))}”`), inp); p.append(sc);
+        window.cue.invoke('obs-scenes').then((list) => { if (list && list.length) { const dl = el('datalist'); dl.id = 'scenes'; list.forEach((n) => { const o = el('option'); o.value = n; dl.append(o); }); p.append(dl); inp.setAttribute('list', 'scenes'); } });
+      }
+    }],
+
+    ['ai', 'AI agents', (p) => {
+      p.append(el('div', 'note', `Claude Code, Codex and other AI tools connect through Cue's AI port (127.0.0.1:${S.agent.port}). They work in their own tabs with a purple ring, can use your Personal or School logins, and can never touch private tabs, Vanish tabs or the tab on air. If one reaches into a tab you did not hand it, Cue says so on screen.`));
+      const door = el('input'); door.type = 'checkbox'; door.checked = !!S.agent.on;
+      door.onchange = () => send('ai-door', { on: door.checked });
+      p.append(settingRow('Let AI agents drive Cue', door,
+        'Stays as you leave it, so an agent can answer WhatsApp or check a page while you teach. While it is off nothing can drive Cue but you, and an AI tool that tries is told why. Either way they never touch private tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it.'));
+      for (const site of (S.agent.sites || [])) {
+        p.append(settingRow(`Let agents use ${site.name}`,
+          check(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false), site.what));
+      }
+      p.append(el('div', 'note', 'Every other tab is yours until you hand it over: point at its row in the sidebar and click the AI mark, and click it again to take it back. The mark lights up on its own while an agent is actually working in that tab, so a lit AI means something is happening in there right now.'));
+      const cp = el('button', 'btn', 'Copy AI setup'); cp.onclick = () => send('agent-copy');
+      const r = el('div', 'row'); r.append(el('span', 'note', S.agent.last ? `Last: ${esc(S.agent.last.agent)} used ${esc(S.agent.last.tool)}` : 'No agent has connected yet.'), cp); p.append(r);
+    }],
+
+    ['disk', 'Storage and updates', (p) => {
+      p.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
+      p.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
+      const used = el('div', 'row'); const usedText = el('span', 'note', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache');
+      clearBtn.onclick = () => send('clear-cache');
+      used.append(usedText, clearBtn); p.append(used);
+      window.cue.invoke('storage').then((r) => { usedText.textContent = `Cache ${r.cacheMB} MB. Cue in total ${r.totalMB} MB. Trimmed automatically above ${r.limitMB} MB.`; });
+      p.append(settingRow('Warn before downloading when free space falls under (GB)', text('lowDiskGB', s.lowDiskGB, '5', 'number')));
+      p.append(settingRow('Move opened installers to the Trash after a day', check('tidyInstallers', s.tidyInstallers)));
+      p.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'jasonzacmusic')));
+    }],
+  ];
+
+  openModal((sh) => {
+    sh.classList.add('settings');
+    sh.append(el('h2', '', 'Cue settings'));
+    const body = el('div', 'sbody');
+    const nav = el('div', 'snav');
+    const pane = el('div', 'spane');
+    body.append(nav, pane);
+    sh.append(body);
+    const show = (id) => {
+      const room = rooms.find((x) => x[0] === id) || rooms[0];
+      settingsRoom = room[0];
+      pane.innerHTML = '';
+      [...nav.children].forEach((b) => b.classList.toggle('on', b.dataset.id === room[0]));
+      try { room[2](pane); }
+      catch (e) {
+        pane.innerHTML = '';
+        pane.append(el('div', 'note', `This part of Settings could not be drawn: ${e && e.message ? e.message : e}. Everything else still works, and nothing is lost — tell Jason and it gets fixed.`));
+      }
+      pane.scrollTop = 0;
     };
-    sh.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
-    sh.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'switch', [['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
-    sh.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
-    sh.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
-    sh.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));
-    sh.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
-    sh.append(settingRow('Close tabs I have not used in (days, 0 = keep everything)', text('archiveDays', s.archiveDays, '2', 'number'),
-      'Two kinds of tab. KEPT: the apps in the strip at the top, any tab you have named yourself, anything playing, on air, in a split or half-typed, and the one you are looking at — these never go. PASSING: everything else, which closes after this many days and waits in Library → Archived, one click from coming back. A blank New tab you never used just closes.'));
-    sh.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
-    const used = el('div', 'row'); const usedText = el('span', 'note', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache');
-    clearBtn.onclick = () => send('clear-cache');
-    used.append(usedText, clearBtn); sh.append(used);
-    window.cue.invoke('storage').then((r) => { usedText.textContent = `Cache ${r.cacheMB} MB. Cue in total ${r.totalMB} MB. Trimmed automatically above ${r.limitMB} MB.`; });
-    sh.append(settingRow('Warn before downloading when free space falls under (GB)', text('lowDiskGB', s.lowDiskGB, '5', 'number')));
-    sh.append(settingRow('Move opened installers to the Trash after a day', check('tidyInstallers', s.tidyInstallers)));
-    sh.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'jasonzacmusic')));
-    sh.append(el('h3', '', 'Live class'));
-    sh.append(settingRow('Safe-share (blur emails, phone numbers, money, keys on air)', check('safeShare', s.safeShare)));
-    const size = el('select'); [['1920x1080', '1920 × 1080'], ['1280x720', '1280 × 720']].forEach(([v, n]) => { const o = el('option', '', n); o.value = v; if (v === `${s.stageWidth}x${s.stageHeight}`) o.selected = true; size.append(o); });
-    size.onchange = () => { const [w, h] = size.value.split('x').map(Number); send('setting', { key: 'stageWidth', value: w }); send('setting', { key: 'stageHeight', value: h }); };
-    sh.append(settingRow('Stage window size', size, 'Zoom: Share Screen → pick “Cue Stage — On Air”. OBS: Window Capture → the same window.'));
-    sh.append(settingRow('OBS address', text('obs.host', s.obs.host, '127.0.0.1')));
-    sh.append(settingRow('OBS port', text('obs.port', s.obs.port, '4455', 'number')));
-    sh.append(settingRow('OBS password', text('obs.password', '', s.obs.password ? 'Saved' : 'From OBS → Tools → WebSocket', 'password')));
-    const ob = el('div', 'row'); const status = el('span', 'pill' + (S.obs === 'connected' ? ' ok' : ''), S.obs === 'connected' ? 'Connected' : S.obs === 'connecting' ? 'Connecting…' : 'Not connected');
-    const cb = el('button', 'btn', 'Connect to OBS'); cb.onclick = () => send('obs-connect');
-    const ac = check('obs.autoConnect', s.obs.autoConnect); const acl = el('label', 'note', ' connect on launch'); acl.prepend(ac);
-    ob.append(status, acl, cb); sh.append(ob);
-    const a = S.tabs.find((t) => t.id === S.activeId);
-    if (a) {
-      const sc = el('div', 'row'); const inp = el('input'); inp.type = 'text'; inp.value = a.obsScene || ''; inp.placeholder = 'Scene name, e.g. 🎹 Class Apps';
-      inp.onchange = () => send('set-scene', { id: a.id, scene: inp.value });
-      sc.append(el('label', '', `OBS scene for “${esc(a.title.slice(0, 40))}”`), inp); sh.append(sc);
-      window.cue.invoke('obs-scenes').then((list) => { if (list && list.length) { const dl = el('datalist'); dl.id = 'scenes'; list.forEach((n) => { const o = el('option'); o.value = n; dl.append(o); }); sh.append(dl); inp.setAttribute('list', 'scenes'); } });
-    }
-    sh.append(el('h3', '', 'AI agents'));
-    sh.append(el('div', 'note', `Claude Code, Codex and other AI tools connect through Cue's AI port (127.0.0.1:${S.agent.port}). They work in their own tabs with a purple ring, can use your Personal or School logins, and can never touch private tabs, Vanish tabs or the tab on air. If one reaches into a tab you did not hand it, Cue says so on screen.`));
-    const door = el('input'); door.type = 'checkbox'; door.checked = !!S.agent.on;
-    door.onchange = () => send('ai-door', { on: door.checked });
-    sh.append(settingRow('Let AI agents drive Cue', door,
-      'Stays as you leave it, so an agent can answer WhatsApp or check a page while you teach. While it is off nothing can drive Cue but you, and an AI tool that tries is told why. Either way they never touch private tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it.'));
-    // The two sites that are handed over wholesale, because doing it tab by tab is the thing that
-    // never gets kept up. Both start on.
-    for (const site of (S.agent.sites || [])) {
-      sh.append(settingRow(`Let agents use ${site.name}`,
-        check(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false), site.what));
-    }
-    sh.append(el('div', 'note', 'Every other tab is yours until you hand it over: click the faint AI on its row in the sidebar, and click it again to take it back. A tab an agent opened for itself already carries one.'));
-    const cp = el('button', 'btn', 'Copy AI setup'); cp.onclick = () => send('agent-copy');
-    const r = el('div', 'row'); r.append(el('span', 'note', S.agent.last ? `Last: ${esc(S.agent.last.agent)} used ${esc(S.agent.last.tool)}` : 'No agent has connected yet.'), cp); sh.append(r);
+    rooms.forEach(([id, name]) => {
+      const b = el('button', '', name); b.dataset.id = id;
+      b.onclick = () => show(id);
+      nav.append(b);
+    });
+    show(startAt || settingsRoom);
     const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);
   });
 }
-
 let sharePending = false;
 function sharePicker(d) {
   sharePending = true;

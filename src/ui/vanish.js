@@ -10,10 +10,18 @@ function tabEl(t) {
   const el = document.createElement('div');
   el.className = 'tab' + (t.active ? ' on' : '') + (t.loading ? ' loading' : '');
   el.title = t.title; el.setAttribute('role', 'tab'); el.setAttribute('aria-selected', t.active);
-  const icon = () => { const d = document.createElement('span'); d.className = 'dot'; return d; };
-  // Each place a logo might be is tried in turn; the plain ring is the last resort.
+  // The last resort is not an empty ring any more: it is the site's own first
+  // letter, so a tab always says which site it is even when the site keeps no
+  // logo at any of the usual addresses.
+  const icon = () => {
+    const d = document.createElement('span');
+    d.className = 'dot';
+    const c = (t.title || '').trim()[0];
+    if (c && !t.loading) { d.textContent = c.toUpperCase(); d.className = 'dot letter'; }
+    return d;
+  };
   const tries = (t.icons || []).slice();
-  if (tries.length && !t.loading) {
+  if (tries.length) {
     const i = new Image(); i.alt = '';
     i.onerror = () => { tries.shift(); if (tries.length) i.src = tries[0]; else i.replaceWith(icon()); };
     i.src = tries[0];

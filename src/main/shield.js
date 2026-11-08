@@ -294,6 +294,16 @@ function createShield({ dir, fetchImpl, log }) {
       allowed: [...allowed],
     }),
     refreshDanger: () => fetchDanger(),
+    // "Check for new threats now" used to fetch only the list of dangerous
+    // sites; the ad and tracker rules were left until their weekly rebuild, so
+    // the button did half of what it said. This throws the old rules away and
+    // fetches them again. The engine under a page that is already open is not
+    // swapped mid-sentence - the new rules are in from the next time Cue opens.
+    refreshAds: async () => {
+      try { fs.rmSync(enginePath, { force: true }); } catch {}
+      try { putStamp({ engineAt: 0 }); await buildEngine(); return true; }
+      catch (e) { note({ tool: 'shield', error: `ad lists: ${e.message}` }); return false; }
+    },
     hostOf,
   };
 }

@@ -525,6 +525,18 @@ function safeOrigin(url) { try { return new URL(url).origin; } catch { return ur
 // mid-lesson. The messages still arrive and the sidebar still shows the count -
 // only the pop-up stops. By site, so it covers both folders at once. He can
 // change the list in Settings.
+// Apps that open silent. WhatsApp is one by default: its ding is the loudest
+// thing on the machine and he never wants it. YouTube and the film services are
+// not, because sound is the point of them. A tab of one of these sites opens
+// muted, and unmuting it by hand still works - this only decides how it starts.
+function mutedSite(url) {
+  const h = String(hostOf(url) || '').toLowerCase();
+  if (!h) return false;
+  return (settings().muteSites || []).some((x) => {
+    const q = String(x || '').trim().toLowerCase().replace(/^www\./, '');
+    return !!q && (h === q || h.endsWith(`.${q}`));
+  });
+}
 function quietSite(url) {
   const h = String(hostOf(url) || '').toLowerCase();
   if (!h) return false;
@@ -599,7 +611,10 @@ function makeTab(opts) {
   const t = {
     id: nextId++, uid: opts.uid || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
     identity: IDENTITIES[opts.identity] ? opts.identity : folderForNewTab(opts.space),
-    pinned: !!opts.pinned, groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1, muted: !!opts.muted, name: opts.name || null,
+    // An app that lives in the strip is pinned the moment it is born, and a site
+    // on the silent list opens silent. Both only decide how a tab STARTS.
+    pinned: !!opts.pinned || alwaysPinned(opts.url), groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1,
+    muted: opts.muted === undefined ? mutedSite(opts.url) : !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
     order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: spaces().includes(opts.space) ? opts.space : store.data.space,
     view: null, host: 'main', popout: null, mini: false, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
@@ -1148,16 +1163,26 @@ function wireTab(t) {
     const handover = from && from.playing && from.id !== programId && !from.holdAwake;
     if (handover && t.id !== activeId) activate(t.id, 'auto');
     if (settings().onePlayer || handover) {
-      for (const o of tabs) {
-        const together = sharesSplit(t) && sharesSplit(o);
-        if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) o.view.webContents.send('cue:media', 'pause');
-      }
+      // Resting the pointer on a film on Netflix starts a SILENT preview, and
+      // that used to pause the music he was actually listening to in another
+      // tab. Nothing is paused for a video with no sound: give it a moment to
+      // find its voice, and only then clear the room.
+      setTimeout(() => {
+        if (!t.view || t.view.webContents.isDestroyed() || !t.playing) return;
+        let loud = false;
+        try { loud = t.view.webContents.isCurrentlyAudible(); } catch {}
+        if (!loud) return;
+        for (const o of tabs) {
+          const together = sharesSplit(t) && sharesSplit(o);
+          if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) o.view.webContents.send('cue:media', 'pause');
+        }
+      }, 600);
     }
     pushState();
   });
   wc.on('media-paused', () => { t.playing = false; t.videoAt = Date.now(); pushState(); });
   wc.on('enter-html-full-screen', () => { t.fullscreen = true; const w = hostWindow(t); if (w) w.setFullScreen(true); layout(); });
-  wc.on('leave-html-full-screen', () => { t.fullscreen = false; const w = hostWindow(t); if (w) w.setFullScreen(false); layout(); });
+  wc.on('leave-html-full-screen', () => { t.fullscreen = false; const w = hostWindow(t); if (w) w.setFullScreen(false); layout(); settleAfterFullScreen(t); });
   wc.on('found-in-page', (_e, r) => sendEvent('find-result', { active: r.activeMatchOrdinal, total: r.matches }));
   wc.on('focus', () => {
     if (t.id !== activeId && store.data.split.ids.includes(t.id) && t.host === 'main') { activeId = t.id; t.lastActive = Date.now(); pushState(); }
@@ -1285,14 +1310,29 @@ const ONE_PER_FOLDER = [
   /^studio\.youtube\.com$/i,
   /^calendar\.google\.com$/i,
   /^drive\.google\.com$/i,
+  /^([a-z0-9-]+\.)?instagram\.com$/i,
+  /^([a-z0-9-]+\.)?facebook\.com$/i,
 ];
-// studio.youtube.com and youtube.com are two different jobs, so they keep one
-// tab each rather than fighting over a single YouTube tab.
+// The four apps that are a PLACE, not a page: your inbox, your WhatsApp, your
+// Instagram, your Facebook. There is nothing to have two of, so Cue keeps them
+// in the strip at the top of the sidebar for ever - one per folder, yours in
+// Personal and the school's in School - and they never appear as a row you have
+// to pin, unpin or tidy. Everything else is an ordinary tab.
+const ALWAYS_PINNED = [/^web\.whatsapp\.com$/i, /^mail\.google\.com$/i, /^([a-z0-9-]+\.)?instagram\.com$/i, /^([a-z0-9-]+\.)?facebook\.com$/i];
+const alwaysPinned = (url) => { const h = hostOf(url); return !!h && ALWAYS_PINNED.some((r) => r.test(h)); };
+// YouTube is three different jobs under one address, and he uses all three at
+// once: the channel he is watching, Studio where he publishes, and the posts
+// page where the community lives. Each keeps its own tab. Everything else on
+// youtube.com is "watching".
 const oneKey = (url) => {
   const h = hostOf(url);
   if (!h) return '';
   if (/^studio\.youtube\.com$/i.test(h)) return 'studio.youtube.com';
-  if (/youtube\.com$/i.test(h)) return 'youtube.com';
+  if (/youtube\.com$/i.test(h)) {
+    let path = '';
+    try { path = new URL(url).pathname; } catch {}
+    return /\/(posts|community)(\/|$)|^\/post\//i.test(path) ? 'youtube-community' : 'youtube.com';
+  }
   return ONE_PER_FOLDER.some((r) => r.test(h)) ? h.toLowerCase() : '';
 };
 // The tab this folder already keeps for that site, if it has one.
@@ -1682,6 +1722,29 @@ async function obsAimAtStage() {
   sendEvent('toast', `OBS is showing the Stage only${ours.length > 1 ? ` (${ours.length} sources)` : ''}.`);
 }
 
+// Coming out of a full-screen video used to leave the page in a half-finished
+// state: no mouse pointer, no scroll bar, the picture still the full-screen
+// shape inside a normal window. The window is still animating when the page is
+// told, so the page measures the wrong size and Chromium keeps the pointer
+// hidden the way the video asked. Lay it out again once the animation has
+// finished, hand the keyboard back, and move the mouse a hair so the pointer
+// comes back without him having to click.
+function settleAfterFullScreen(t) {
+  const again = () => {
+    if (!t || !t.view || t.view.webContents.isDestroyed()) return;
+    layout();
+    try { t.view.webContents.focus(); } catch {}
+    try {
+      const b = t.view.getBounds();
+      const x = Math.round(b.width / 2); const y = Math.round(b.height / 2);
+      t.view.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+      t.view.webContents.sendInputEvent({ type: 'mouseMove', x: x + 1, y: y + 1 });
+    } catch {}
+  };
+  setTimeout(again, 120);
+  setTimeout(again, 600);   // the Mac's full-screen animation is about half a second
+}
+
 function moveView(t, toWin, host) {
   if (!t.view) ensureView(t);
   const from = hostWindow(t);
@@ -2066,6 +2129,7 @@ function sendState() {
       playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, mini: !!t.mini, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
       lastActive: t.lastActive,
+      aiBusy: !!t.aiBusy,
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })),
@@ -2221,7 +2285,15 @@ function uiCommand(cmd, a = {}) {
     case 'rename': if (t) { const n = String(a.name || '').trim().slice(0, 60); t.name = n || null; pushState(); persist(); } break;
     case 'tab-menu': tabMenu(t); break;
     case 'reorder': reorder(a); break;
-    case 'pin': if (t) { t.pinned = a.on === undefined ? !t.pinned : !!a.on; t.order = Date.now(); pushState(); persist(); } break;
+    case 'pin': {
+      if (!t) break;
+      const on = a.on === undefined ? !t.pinned : !!a.on;
+      // WhatsApp, Gmail, Instagram and Facebook stay in the strip. There is only
+      // ever one of each per folder, so taking it out of the strip just turns it
+      // into a row to tidy up later.
+      if (!on && alwaysPinned(t.url)) { sendEvent('toast', `${hostOf(t.url)} lives in the strip at the top \u2014 one for Personal, one for School. Nothing to unpin.`); break; }
+      t.pinned = on; t.order = Date.now(); pushState(); persist(); break;
+    }
     case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
@@ -2413,6 +2485,11 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
     sendEvent('toast', 'Recording saved in Cue Captures.'); capture.reveal(file);
     return file;
   }
+  // The shield's own two answers. They had only ever been wired to Cue's
+  // internal pages, so Settings asked and nothing ever answered: the line under
+  // the shield switches said "Checking..." for ever. The button beside it did
+  // work - it just could never say so.
+  if (cmd === 'shield.status' || cmd === 'shield.refresh') return internal[cmd]({});
   return null;
 });
 
@@ -2513,6 +2590,9 @@ function setSetting(key, value) {
       s.quickKeys = box;
       buildMenu();
     }
+  }
+  else if (key === 'muteSites') {
+    s.muteSites = String(value || '').split(/[\n,]/).map((x) => x.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(Boolean);
   }
   else if (key === 'quietSites') {
     // Typed as plain site names, one per line or comma separated.
@@ -2859,7 +2939,12 @@ const internal = {
   'library.pages': ({ host }) => lib.pages(host, 500),
   'library.forget': ({ host }) => { lib.forgetSite(host); return true; },
   'shield.status': () => (shield ? { ...shield.status(), on: shield.status().on && settings().blockAds !== false } : { on: false, lists: 0, dangerous: 0, listsAt: 0, dangerAt: 0, allowed: [] }),
-  'shield.refresh': async () => { if (shield) await shield.refreshDanger(); return shield ? shield.status() : null; },
+  'shield.refresh': async () => {
+    if (!shield) return null;
+    await shield.refreshDanger();
+    const ads = await shield.refreshAds();
+    return { ...shield.status(), ok: ads };
+  },
   // "Open it anyway" on the warning page. One host, until Cue is closed.
   'shield.close': (_a, from) => { if (from) closeTab(from.id); return true; },
   'shield.proceed': ({ site }, from, sender) => {
@@ -3195,7 +3280,10 @@ const agentApi = {
     if (!/^(https?:|about:blank)/i.test(target)) throw new Error('Only web pages can be opened here. Cue\'s own pages and files on this computer stay private.');
     return target;
   },
-  ensure: (t) => ensureView(t),
+  // The AI mark on a row means an agent is working in that tab NOW, not that it
+  // is allowed to one day. Every read or click an agent makes lights it; it goes
+  // out by itself a minute later.
+  ensure: (t) => { t.aiBusy = Date.now(); clearTimeout(t.aiTimer); t.aiTimer = setTimeout(() => { t.aiBusy = 0; pushState(); }, 60000); pushState(); return ensureView(t); },
   capture: (t) => captureTab(t),
   close: (t) => closeTab(t.id),
   fullPage: (t) => capture.fullPage(t.view.webContents, t.title),
@@ -3523,6 +3611,7 @@ function createMain() {
     if (t.view && !t.view.webContents.isDestroyed()) {
       t.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
     }
+    settleAfterFullScreen(t);
   });
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
 
@@ -3537,7 +3626,18 @@ function createMain() {
   cueNextId = cueIds[0] || null;
   seedEveryday();
   if (!tabs.length) tabs.push(makeTab({ url: START_URL }));
-  const first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
+  // Where Cue lands when you open it. "The app I start in" puts you in the
+  // folder's own WhatsApp (your own in Personal, the school's in School) rather
+  // than wherever you happened to stop last night. Anything else, and it is the
+  // tab you were last on, as before.
+  let first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
+  if (settings().openOn === 'home') {
+    const who = store.data.folder;
+    const want = hostOf(settings().homeApp || '');
+    const mine = tabs.filter((t) => t.identity === who && t.id !== programId);
+    const home = want && mine.find((t) => hostOf(t.url) === want);
+    first = home || mine.sort((a, b) => b.lastActive - a.lastActive)[0] || first;
+  }
   const current = (sp) => ({ ...sp, uids: undefined, ids: (sp.uids || []).map((u) => tabs.find((t) => t.uid === u)?.id).filter(Boolean) });
   store.data.spaceSplit = Object.fromEntries(Object.entries(store.data.savedSpaceSplit || {}).map(([k, v]) => [k, current(v)]));
   store.data.split = fitSplit(current(store.data.savedSplit || { mode: 'single' }));
@@ -3587,7 +3687,7 @@ app.whenReady().then(async () => {
       defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, quietSites: ['web.whatsapp.com'], agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, quietSites: ['web.whatsapp.com'], muteSites: ['web.whatsapp.com'], openOn: 'home', homeApp: 'https://web.whatsapp.com/', agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
   store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Finance: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
@@ -3620,6 +3720,14 @@ app.whenReady().then(async () => {
     store.data.quietDefaults = true;
     const q = store.data.settings.quietSites;
     if (!Array.isArray(q) || !q.length) store.data.settings.quietSites = ['web.whatsapp.com'];
+  }
+  // Existing profiles: WhatsApp starts silent, and the four apps that live in
+  // the strip are put there whether or not they were pinned before.
+  if (!store.data.stripDefaults) {
+    store.data.stripDefaults = true;
+    const m = store.data.settings.muteSites;
+    if (!Array.isArray(m) || !m.length) store.data.settings.muteSites = ['web.whatsapp.com'];
+    for (const t of store.data.tabs || []) if (alwaysPinned(t.url)) t.pinned = true;
   }
   if (!store.data.groupsRepaired) {
     store.data.groupsRepaired = true;
