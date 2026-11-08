@@ -3380,7 +3380,13 @@ async function checkForUpdates() {
 }
 
 function buildMenu() {
-  const cmd = (c, a) => () => ipcMain.emit('ui:cmd', {}, c, a);
+  const raw = (c, a) => () => ipcMain.emit('ui:cmd', {}, c, a);
+  // A Vanish window is a player, not the browser. Its own keys belong to it, and
+  // the main window's keys must not reach past it: pressing one used to switch a
+  // tab behind the film and throw him out of what he was watching.
+  const inVanish = () => { try { return vanish.focused(); } catch { return false; } };
+  const mainOnly = (fn) => () => { if (inVanish()) return; fn(); };
+  const cmd = (c, a) => mainOnly(raw(c, a));
   const ids = Object.keys(IDENTITIES);
   const tpl = [
     ...(process.platform === 'darwin' ? [{
@@ -3388,7 +3394,7 @@ function buildMenu() {
         { role: 'about' },
         // Where every Mac app keeps it, so it is findable without hunting for
         // the cog at the foot of the sidebar.
-        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => sendEvent('open-settings') },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: mainOnly(() => sendEvent('open-settings')) },
         { label: 'Check for Updates…', click: () => checkForUpdates() },
         { type: 'separator' },
         { role: 'services' },
@@ -3403,36 +3409,36 @@ function buildMenu() {
     {
       label: 'File', submenu: [
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: cmd('new-tab') },
-        { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Shift+N', click: cmd('new-tab', { identity: 'vanish' }) },
-        { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Alt+N', visible: false, acceleratorWorksWhenHidden: true, click: cmd('new-tab', { identity: 'vanish' }) }, // for Macs where another app owns Cmd+Shift+N
+        { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Shift+N', click: raw('new-tab', { identity: 'vanish' }) },
+        { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Alt+N', visible: false, acceleratorWorksWhenHidden: true, click: raw('new-tab', { identity: 'vanish' }) }, // for Macs where another app owns Cmd+Shift+N
         { label: 'New Tab As', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: cmd('new-tab', { identity: i }) })) },
         { label: 'Move In From Another Browser…', click: () => sendEvent('import') },
         { label: 'Bring This Site\u2019s Sign-in Over From Chrome…', click: () => carrySignIn(byId(activeId)) },
-        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: () => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } } },
-        { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: () => { uiView.webContents.focus(); sendEvent('focus-omnibox'); } },
-        { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: () => { uiView.webContents.focus(); sendEvent('palette-open'); } },
+        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: mainOnly(() => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } }) },
+        { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('focus-omnibox'); }) },
+        { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('palette-open'); }) },
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
-        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => { const t = byId(activeId); if (t && t.view) t.view.webContents.print(); } },
+        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: mainOnly(() => { const t = byId(activeId); if (t && t.view) t.view.webContents.print(); }) },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => { if (vanish.focused()) vanish.closeTab(vanish.activeId()); else closeTab(activeId); } },
         { type: 'separator' },
         // His own nine. The label says where each key goes, so the menu is also the reminder.
         ...quickKeys().map((q) => ({
           label: q.url ? `Go to ${q.name}` : q.name,
           accelerator: `CmdOrCtrl+${q.key}`,
-          click: () => jumpTo(q.url),
+          click: mainOnly(() => jumpTo(q.url)),
         })),
         { type: 'separator' },
-        { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: () => moveTab({ id: activeId, dir: -1 }) },
-        { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: () => moveTab({ id: activeId, dir: 1 }) },
+        { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: mainOnly(() => moveTab({ id: activeId, dir: -1 })) },
+        { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: mainOnly(() => moveTab({ id: activeId, dir: 1 })) },
       ],
     },
     { role: 'editMenu' },
     {
       label: 'View', submenu: [
         { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: cmd('reload') },
-        { label: 'Hide or Show Sidebar', accelerator: 'CmdOrCtrl+\\', click: () => setSideHidden(!settings().sideHidden) },
-        { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: () => { uiView.webContents.focus(); sendEvent('focus-find'); } },
+        { label: 'Hide or Show Sidebar', accelerator: 'CmdOrCtrl+\\', click: mainOnly(() => setSideHidden(!settings().sideHidden)) },
+        { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('focus-find'); }) },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: cmd('zoom', { dir: 1 }) },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: cmd('zoom', { dir: -1 }) },
         { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: cmd('zoom', { reset: true }) },
