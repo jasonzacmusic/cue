@@ -88,8 +88,11 @@ const ROW_READER = `const readRow = (row) => {
   const lines = (row.innerText || '').split('\\n').map((s) => s.trim()).filter(Boolean);
   const unreadEl = row.querySelector('[aria-label*="unread" i]');
   const badge = unreadEl ? (unreadEl.innerText || unreadEl.getAttribute('aria-label') || '').match(/\\d+/) : null;
-  const when = lines[1] || '';
-  const last = (titled[1] && (titled[1].getAttribute('title') || titled[1].innerText) || lines.slice(2).join(' ') || '').trim();
+  // The time is the line that looks like one. Taking the second line used to print the name twice
+  // on a chat whose name holds emoji, because the emoji split the name across two lines.
+  const WHEN = /^(\\d{1,2}[:.]\\d{2}\\s*([ap]\\.?m\\.?)?|yesterday|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})$/i;
+  const when = lines.slice(1, 5).find((l) => WHEN.test(l)) || '';
+  const last = (titled[1] && (titled[1].getAttribute('title') || titled[1].innerText) || lines.slice(2).join(' ') || '').replace(/\\s+/g, ' ').trim();
   return { name, when, last: last.slice(0, 120), unread: badge ? Number(badge[0]) : (unreadEl ? 1 : 0) };
 };
 const visibleRows = () => [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
@@ -112,12 +115,15 @@ const WALK_ROWS = (cap) => `(async () => {
   pane.scrollTop = 0; nudge();
   await new Promise((r) => setTimeout(r, 250));
   grab();
-  let before = -1;
-  for (let i = 0; i < 60 && seen.size !== before && seen.size < ${Number(cap) || 400}; i++) {
-    before = seen.size;
+  // A tab that has only just woken draws its rows late, so one step with nothing new is not the
+  // end of the list: three in a row is (the school's first call after a restart saw 15 of 40).
+  let stale = 0;
+  for (let i = 0; i < 80 && stale < 3 && seen.size < ${Number(cap) || 400}; i++) {
+    const before = seen.size;
     pane.scrollTop = pane.scrollTop + Math.max(300, pane.clientHeight - 100); nudge();
-    await new Promise((r) => setTimeout(r, 350));
+    await new Promise((r) => setTimeout(r, 350 + stale * 300));
     grab();
+    stale = seen.size === before ? stale + 1 : 0;
     if (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 5) { await new Promise((r) => setTimeout(r, 450)); grab(); break; }
   }
   pane.scrollTop = was; nudge();

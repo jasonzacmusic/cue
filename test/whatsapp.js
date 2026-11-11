@@ -23,7 +23,7 @@ const CHATS = {
   personal: [
     { name: 'Jatin', when: '14:03', last: 'Sending the files tonight', unread: 2 },
     { name: 'Mom', when: '12:40', last: 'Did you eat', unread: 0 },
-    { name: 'Jatin Sharma', when: '09:15', last: 'Different person', unread: 0 },
+    { name: 'Jatin Sharma', when: '09:15', last: 'Different person', unread: 0, twice: true, more: 'Second line' }, // twice: the name drawn again before the time, as an emoji name is; more: a preview over two lines
     ...filler.slice(0, 30),
     { name: 'Parth Ahire 🔍 Recruit NSM', when: 'Yesterday', last: 'Okay', unread: 0 },
     ...filler.slice(30),
@@ -95,8 +95,9 @@ function page(which, { nosearch = false } = {}) {
         if (it.kind === 'head') row.innerHTML = '<div>' + it.text + '</div>';
         else {
           const c = it.c;
-          row.innerHTML = '<div role="gridcell"><div><span title="' + esc(c.name) + '">' + esc(c.name) + '</span></div><div>' + c.when + '</div>' +
-            '<span title="' + esc(c.last) + '">' + esc(c.last) + '</span>' + (c.unread ? '<span aria-label="' + c.unread + ' unread messages">' + c.unread + '</span>' : '') + '</div>';
+          const prev = c.more ? c.last + '\\n' + c.more : c.last;
+          row.innerHTML = '<div role="gridcell"><div><span title="' + esc(c.name) + '">' + esc(c.name) + '</span></div>' + (c.twice ? '<div>' + esc(c.name) + '</div>' : '') + '<div>' + c.when + '</div>' +
+            '<span title="' + esc(prev) + '">' + esc(c.last) + (c.more ? '<br>' + esc(c.more) : '') + '</span>' + (c.unread ? '<span aria-label="' + c.unread + ' unread messages">' + c.unread + '</span>' : '') + '</div>';
           row.dataset.name = c.name;
         }
         pane.appendChild(row);
@@ -253,6 +254,9 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     await jasonTab.view.webContents.executeJavaScript(`(() => { const b = document.querySelector('#side input'); b.value = 'jatin'; b.dispatchEvent(new Event('input', { bubbles: true })); })()`, true);
     const full = await wa({ who: 'jason', action: 'chats', limit: 60 });
     check('a search left in the box does not hide the rest of the list', /· 57 chats/.test(full.text.split('\n')[0]), full.text.split('\n')[0]);
+    const js = full.text.split('\n').find((l) => l.startsWith('Jatin Sharma')) || '';
+    check('a chat list line has the time, not the name again', /^Jatin Sharma · 09:15 · /.test(js), js);
+    check('a preview over two lines comes back on one line', /Different person Second line/.test(js) && full.text.split('\n').length === 58, { js, lines: full.text.split('\n').length });
 
     let wrong = '';
     try { await wa({ who: 'jason', action: 'read', chat: 'Trap' }); } catch (e) { wrong = e.message; }
