@@ -24,9 +24,11 @@ const ROWS = (limit) => `(() => {
   const out = rows.map((row) => {
     const people = [...row.querySelectorAll('[email]')].map((e) => (e.getAttribute('name') || e.textContent || '').trim() + (e.getAttribute('email') ? ' <' + e.getAttribute('email') + '>' : ''));
     const when = row.querySelector('td.xW span[title], .xW span[title]');
-    const tid = row.querySelector('[data-legacy-thread-id]');
+    // The id printed is the newest message's, not the thread's: Gmail opens #all/<message> every
+    // time, but would not open #all/<thread> for a thread he had just sent himself (11-Nov-2026).
+    const tid = row.querySelector('[data-legacy-last-non-draft-message-id], [data-legacy-last-message-id], [data-legacy-thread-id]');
     return {
-      id: tid ? tid.getAttribute('data-legacy-thread-id') : '',
+      id: tid ? (tid.getAttribute('data-legacy-last-non-draft-message-id') || tid.getAttribute('data-legacy-last-message-id') || tid.getAttribute('data-legacy-thread-id')) : '',
       unread: row.classList.contains('zE'),
       from: [...new Set(people)].slice(0, 3).join(', '),
       subject: text(row.querySelector('.bog')),
@@ -116,13 +118,17 @@ function makeGmail({ agentTab, wake, label }) {
     async read({ identity, id }) {
       const thread = String(id || '').trim();
       if (!/^[0-9a-f]{8,}$/i.test(thread)) throw new Error('Pass the [id] that search printed for the email.');
-      const { wc } = await go(identity, `#all/${thread}`);
-      let got = { messages: [] };
-      const end = Date.now() + 20000;
-      while (Date.now() < end) {
-        await sleep(500);
-        got = await js(wc, THREAD).catch(() => got);
-        if (got.messages.length && got.messages.some((m) => m.body)) break;
+      // #all/ first; if Gmail does not answer it, #inbox/ and then #sent/, which it sometimes takes instead.
+      let got = { messages: [] }, wc;
+      for (const [place, wait] of [['all', 9000], ['inbox', 6000], ['sent', 6000]]) {
+        ({ wc } = await go(identity, `#${place}/${thread}`));
+        const end = Date.now() + wait;
+        while (Date.now() < end) {
+          await sleep(500);
+          got = await js(wc, THREAD).catch(() => got);
+          if (got.messages.length && got.messages.some((m) => m.body)) break;
+        }
+        if (got.messages.length) break;
       }
       if (!got.messages.length) throw new Error(`Gmail did not open that email (${thread}) in the ${label(identity)} folder. Nothing was read.`);
       const parts = got.messages.map((m) => `— ${m.when} · ${m.from}${m.to ? ' → ' + m.to : ''}\n${m.body.slice(0, 6000)}`);

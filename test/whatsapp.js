@@ -147,7 +147,7 @@ function page(which, { nosearch = false } = {}) {
 function gmailPage() {
   const rows = (n, tag) => Array.from({ length: n }, (_, i) => `<tr class="zA ${i % 3 ? 'yO' : 'zE'}"><td><span email="s${i}@example.com" name="Sender ${i}">Sender ${i}</span></td>
     <td><span class="bog">${tag} subject ${i}</span><span class="y2"> - ${tag} snippet ${i}</span></td><td class="xW"><span title="Wed, Nov 11, 2026, ${i}:00 AM">${i}:00</span></td>
-    <td><span data-legacy-thread-id="1a1af231${1000 + i}"></span></td></tr>`).join('');
+    <td><span data-legacy-thread-id="1a1af231${1000 + i}" data-legacy-last-non-draft-message-id="1a1b7777${1000 + i}"></span></td></tr>`).join('');
   return `<!doctype html><title>Inbox - school@example.com - Mail</title>
   <div id="old" style="display: none"><table>${rows(10, 'Old')}</table></div>
   <div id="list"></div>
@@ -163,7 +163,9 @@ function gmailPage() {
     function route() {
       const h = location.hash;
       if (h.startsWith('#search/')) { document.title = 'Search results - school@example.com - Mail'; thread.style.display = 'none'; list.style.display = ''; list.innerHTML = '<table>' + ROWS + '</table>'; }
-      else if (h.startsWith('#all/')) { document.title = 'Paid maker internship - school@example.com - Mail'; list.style.display = 'none'; thread.style.display = ''; }
+      // Real Gmail would not open #all/<thread> for a thread just sent (11-Nov-2026); #inbox/ did.
+      else if (h === '#all/1a1af2311000') { document.title = 'Search results - school@example.com - Mail'; }
+      else if (h.startsWith('#all/') || h.startsWith('#inbox/')) { document.title = 'Paid maker internship - school@example.com - Mail'; list.style.display = 'none'; thread.style.display = ''; }
       else { document.title = 'Inbox - school@example.com - Mail'; list.innerHTML = ''; }
     }
     addEventListener('hashchange', route); route();
@@ -303,6 +305,9 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     check('his own Gmail tab is not moved by an agent search', hisMail.view.webContents.getURL() === hisUrl, hisMail.view.webContents.getURL());
     const id = (glines[0].match(/\[([0-9a-f]+)\]$/) || [])[1];
     const gr = await agentApi.gmail({ identity: 'school', action: 'read', id });
+    check('search prints the newest message\'s id, which Gmail always opens', id === '1a1b77771000', id);
+    const quirk = await agentApi.gmail({ identity: 'school', action: 'read', id: '1a1af2311000' });
+    check('a thread Gmail will not open from #all/ is opened another way', /interested students/.test(quirk.text), quirk.text.slice(0, 120));
     check('reading an email gives every message in full, the collapsed one opened', /First message body/.test(gr.text) && /collapsed message, now open/.test(gr.text) && /interested students/.test(gr.text), gr.text.slice(0, 160));
     const agentMail = tabs.find((t) => t.agent && t.identity === 'school' && String(t.url).includes('/gmail'));
     const mailSeen = agentMail && await agentMail.view.webContents.executeJavaScript('({ vis: document.visibilityState, w: innerWidth })', true);
