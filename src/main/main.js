@@ -1168,11 +1168,15 @@ function wireTab(t) {
       // that used to pause the music he was actually listening to in another
       // tab. Nothing is paused for a video with no sound: give it a moment to
       // find its voice, and only then clear the room.
-      setTimeout(() => {
+      setTimeout(async () => {
         if (!t.view || t.view.webContents.isDestroyed() || !t.playing) return;
         let loud = false;
         try { loud = t.view.webContents.isCurrentlyAudible(); } catch {}
-        if (!loud) return;
+        // Chromium's own answer can lag, and is always "no" with sound switched off for the
+        // whole app (CUE_QUIET). The page knows too: a film that is playing, not muted, and
+        // has decoded sound is making sound. A Netflix hover preview is muted, so it still waits.
+        if (!loud) loud = await t.view.webContents.executeJavaScript(SOUNDING, true).catch(() => false);
+        if (!loud || !t.playing) return;
         for (const o of tabs) {
           const together = sharesSplit(t) && sharesSplit(o);
           if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) o.view.webContents.send('cue:media', 'pause');
@@ -3245,6 +3249,8 @@ function logAgent(entry) {
 // agent's last call it is hidden again; if he opens that tab himself, layout() puts it in its
 // normal place at once. Tried first and dropped (11-Nov-2026): webContents.incrementCapturerCount
 // no longer exists in Electron 44, and Chromium's view-size override gives a size but only one frame.
+// Is a film or song in this page really making sound? Playing, not muted, volume up, and sound decoded.
+const SOUNDING = `[...document.querySelectorAll('video, audio')].some((m) => !m.paused && !m.muted && m.volume > 0 && ((m.webkitAudioDecodedByteCount || 0) > 0 || (m.audioTracks && m.audioTracks.length > 0)))`;
 const AWAKE_MS = 15000;
 function offStage() {
   const r = contentRect();

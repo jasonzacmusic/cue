@@ -709,7 +709,8 @@ module.exports = async function run(c) {
   await vA.view.webContents.executeJavaScript(`window.open('${base}/play?vb'); 1`, true).catch(() => {}); await sleep(2500);
   const vB = c.vanish.tabs.find((t) => t.url.includes('?vb'));
   check('vanish: a new tab opens beside the old one', !!vB && c.vanish.tabs.indexOf(vB) === c.vanish.tabs.indexOf(vA) + 1);
-  check('vanish: the old video pauses and the new tab plays', !!vB && !vA.playing && vB.playing && c.vanish.activeId() === vB.id, { a: vA.playing, b: vB && vB.playing });
+  // Vanish is for watching, and he often has two things going at once (0.6.15): nothing there pauses anything else.
+  check('vanish: the new tab comes to the front and plays, and the old one keeps playing', !!vB && vA.playing && vB.playing && c.vanish.activeId() === vB.id, { a: vA.playing, b: vB && vB.playing });
   for (const t of [...c.vanish.tabs]) c.vanish.closeTab(t.id);
   await sleep(300);
 
