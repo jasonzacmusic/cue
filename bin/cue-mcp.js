@@ -39,7 +39,7 @@ const TOOLS = [
   ['fullpage', 'Save a picture of the whole page, however long, to the Cue Captures folder.', { id }, ['id']],
   ['alert', 'Put a message in the user\'s Cue alert tray, such as a failed deploy. It stays quiet during class.', { title: { type: 'string' }, body: { type: 'string' }, url: { type: 'string' }, source: { type: 'string' } }, ['title']],
   ['bills', 'List the subscriptions Cue is tracking with amounts in rupees, renewal dates and status.', {}],
-  ['whatsapp', 'WhatsApp, in one call. Use this for anything on WhatsApp instead of opening web.whatsapp.com and clicking: it works in the tab that is already linked, in the background, and answers in short plain lines. who: "jason" for his own number, "nathaniel" for the school\'s - always say which. action: "chats" (recent chats, or unreadOnly for the ones waiting), "read" (a conversation), "send" (a message, confirmed only when it is seen in the conversation), "search" (find a chat), "status" (is this account linked; show:true puts the tab in front for the one-time scan).',
+  ['whatsapp', 'WhatsApp, in one call. Use this for anything on WhatsApp instead of opening web.whatsapp.com and clicking: it works in the tab that is already linked, in the background, and answers in short plain lines. who: "jason" for his own number, "nathaniel" for the school\'s - always say which. action: "chats" (recent chats, or unreadOnly for the ones waiting), "read" (a conversation), "send" (a message, confirmed only when it is seen in the conversation), "search" (find a chat), "status" (is this account linked; show:true puts the tab in front for the one-time scan). chat: the FULL name as WhatsApp shows it, or a phone number ("+91 85003 50600" or "8500350600"); a part of a name works only when it fits one chat, otherwise it answers with the choices. Every read checks the open chat\'s full name before answering and fails loudly if it is not the one asked for. Calls on one account run one after another; the two accounts work side by side, and neither is ever brought in front of the user.',
     { who: { type: 'string', description: '"jason" (personal number) or "nathaniel" (the school\'s)' },
       action: { type: 'string', enum: ['chats', 'read', 'send', 'search', 'status'] },
       chat: { type: 'string', description: 'Who the conversation is with, as it is named in WhatsApp' },
@@ -47,6 +47,13 @@ const TOOLS = [
       query: { type: 'string', description: 'For search' },
       unreadOnly: { type: 'boolean' }, limit: { type: 'number' }, show: { type: 'boolean' } },
     ['who']],
+  ['gmail', 'Gmail, in one call: search a mailbox and read whole emails, as plain lines. Works in your own background Gmail tab of that folder (never the inbox the user is reading) and returns EVERY result row, not just the one a background tab shows. identity: "personal" (Jason\'s own Gmail) or "school" (the school\'s) - always say which. action: "search" (query in Gmail\'s own words: from:, subject:, newer_than:7d; up to 50 rows, each ending in its [id]) or "read" (id from search: every message in that thread, with its full text; Gmail marks it read).',
+    { identity: { type: 'string', enum: ['personal', 'school'] },
+      action: { type: 'string', enum: ['search', 'read'] },
+      query: { type: 'string', description: 'For search: Gmail search words' },
+      id: { type: 'string', description: 'For read: the [id] search printed' },
+      limit: { type: 'number', description: 'For search: rows to return, up to 50' } },
+    ['identity']],
 ].map(([name, description, props, required = []]) => ({ name: `cue_${name}`, description, inputSchema: { type: 'object', properties: props, required } }));
 
 async function call(name, args) {
@@ -73,7 +80,7 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.6.16' },
+      serverInfo: { name: 'cue', version: '0.6.17' },
       instructions: 'Cue is the user\'s browser and he works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Use cue_identities to see which logins are already signed in, then cue_open with identity "personal" or "school" to work inside those accounts without asking the user to log in. Work only in tabs you open, in the background, so you never steal the window he is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose account every time - who:"jason" is his own number, who:"nathaniel" is the school\'s.',
     });
   }

@@ -13,11 +13,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok }); console.log(`[cue-whatsapp] ${ok ? 'PASS' : 'FAIL'} ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ''}`); };
 
+// Personal holds sixty chats, so most of them are NOT drawn at first, as on the real page (WhatsApp
+// only draws the rows in view). The ones that went wrong on 11-Nov-2026 sit far down the list:
+// Parth and Priyanshu share a first letter and a suffix, and the unsaved number carries the
+// invisible direction marks WhatsApp puts round a phone number.
+const LTR = (s) => `\u202a${s}\u202c`;
+const filler = Array.from({ length: 50 }, (_, i) => ({ name: `Student ${String(i + 1).padStart(2, '0')}`, when: '08:00', last: `Practice note ${i + 1}`, unread: 0 }));
 const CHATS = {
   personal: [
     { name: 'Jatin', when: '14:03', last: 'Sending the files tonight', unread: 2 },
     { name: 'Mom', when: '12:40', last: 'Did you eat', unread: 0 },
     { name: 'Jatin Sharma', when: '09:15', last: 'Different person', unread: 0 },
+    ...filler.slice(0, 30),
+    { name: 'Parth Ahire 🔍 Recruit NSM', when: 'Yesterday', last: 'Okay', unread: 0 },
+    ...filler.slice(30),
+    { name: 'Priyanshu Yadav 🔍 Recruit NSM', when: '15/10/2026', last: 'starting from Jan 1st', unread: 0 },
+    { name: LTR('+91 85003 50600'), when: '7:16 pm', last: 'Voice call', unread: 0, call: true },
+    { name: 'Trap', when: '01:00', last: 'This row opens the wrong chat', unread: 0, opens: 'Trapeze Artist' },
   ],
   school: [
     { name: 'Piano Batch 7', when: '18:00', last: 'See you Saturday', unread: 5 },
@@ -25,83 +37,152 @@ const CHATS = {
   ],
 };
 
-function page(which) {
+function page(which, { nosearch = false } = {}) {
   // WhatsApp shipped role=row in place of role=listitem (2-Nov-2026). The two accounts serve
   // one shape each, so a selector that only knows one of them fails this suite.
   const role = which === 'school' ? 'row' : 'listitem';
-  const rows = CHATS[which].map((c) => `
-    <div role="${role}"><div role="gridcell" style="height:56px">
-      <span title="${c.name}">${c.name}</span>
-      <div>${c.when}</div>
-      <span title="${c.last}">${c.last}</span>
-      ${c.unread ? `<span aria-label="${c.unread} unread messages">${c.unread}</span>` : ''}
-    </div></div>`).join('');
   return `<!doctype html><title>WhatsApp</title>
-  <style>body{margin:0;font:13px system-ui}#pane-side{width:300px;float:left}#main{margin-left:310px}
-  [role=gridcell]{border-bottom:1px solid #222;padding:6px}</style>
-  <div id="side"><div contenteditable="true" id="search"></div><div id="pane-side">${rows}</div></div>
+  <style>body{margin:0;font:13px system-ui}#side{width:300px;float:left}#main{margin-left:310px}
+  #pane-side{height:400px;overflow-y:auto;position:relative}.r{position:absolute;left:0;right:0;height:56px;border-bottom:1px solid #222}</style>
+  <div id="side"><input type="text" aria-label="Search or start a new chat" placeholder="Search or start a new chat"><div id="pane-side"><div id="spacer"></div></div></div>
   <div id="main" hidden>
-    <header><span title=""></span></header>
+    <header><div class="avatar"></div><div><span data-testid="conversation-info-header-chat-title" dir="auto"></span></div></header>
     <div id="thread"></div>
     <footer><div contenteditable="true" id="compose"></div></footer>
   </div>
   <script>
+    const ROLE = ${JSON.stringify(role)};
+    const NOSEARCH = ${JSON.stringify(nosearch)};
     const data = ${JSON.stringify(CHATS[which])};
     const thread = {};
-    data.forEach((c) => { thread[c.name] = [{ out: false, who: c.name, when: '14:03', text: c.last }]; });
+    data.forEach((c) => {
+      thread[c.opens || c.name] = thread[c.opens || c.name] || [];
+      thread[c.name] = c.call ? [{ call: '11 minutes' }] : [{ out: false, who: c.name, when: '14:03', text: c.last }];
+    });
+    thread['Trapeze Artist'] = [{ out: false, who: 'Trapeze Artist', when: '02:00', text: 'You are in the wrong chat' }];
+    let current = '';
+    // The real header, 11-Nov-2026: the avatar's letter is its FIRST line, and the name is a
+    // span[dir=auto] whose emoji are pictures.
+    const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const withPictures = (name) => esc(name).replace(/\\p{Extended_Pictographic}/gu, (e) => '<img alt="' + e + '">');
     function draw(name) {
+      current = name;
       const main = document.getElementById('main');
       main.hidden = false;
-      main.querySelector('header span').setAttribute('title', name);
-      // Today's real WhatsApp markup, not 2024's. The .message-in / .message-out classes are GONE
-      // from the live page (checked 2-Nov-2026: zero matches, while [data-pre-plain-text] matched
-      // every message), so a stub that marks his own messages only by that class tests a browser
-      // nobody has. Direction is carried the way WhatsApp carries it now: a row, the stamp, and on
-      // his own messages the bubble tail plus a delivery state.
-      document.getElementById('thread').innerHTML = (thread[name] || []).map((m) =>
-        '<div role="row">' +
-        '<div data-pre-plain-text="[' + m.when + ', 2/11/2026] ' + (m.out ? 'You' : m.who) + ': "></div>' +
-        '<span data-icon="' + (m.out ? 'tail-out' : 'tail-in') + '"></span>' +
-        (m.out ? '<span aria-label="Read"></span>' : '') +
-        '<span class="selectable-text">' + m.text + '</span></div>').join('');
+      main.querySelector('.avatar').textContent = name.replace(/[^A-Za-z+]/g, '').charAt(0) || '?';
+      main.querySelector('[data-testid]').innerHTML = withPictures(name);
+      document.getElementById('thread').innerHTML = (thread[name] || []).map((m) => m.call
+        ? '<div role="row"><span>Voice call</span><br><span>' + m.call + '</span><br><span>7:16 pm</span></div>'
+        : '<div role="row">' +
+          '<div data-pre-plain-text="[' + m.when + ', 2/11/2026] ' + (m.out ? 'You' : m.who) + ': "></div>' +
+          '<span data-icon="' + (m.out ? 'tail-out' : 'tail-in') + '"></span>' +
+          (m.out ? '<span aria-label="Read"></span>' : '') +
+          '<span class="selectable-text">' + esc(m.text) + '</span></div>').join('');
     }
-    document.getElementById('pane-side').addEventListener('click', (e) => {
+    // Only the rows in view are drawn, like WhatsApp: a row scrolled away is GONE from the page.
+    const pane = document.getElementById('pane-side');
+    const box = document.querySelector('#side input');
+    let list = data.map((c) => ({ kind: 'chat', c }));
+    function render() {
+      const h = 56, top = pane.scrollTop, height = pane.clientHeight || 400;
+      document.getElementById('spacer').style.height = (list.length * h) + 'px';
+      [...pane.querySelectorAll('.r')].forEach((r) => r.remove());
+      const from = Math.max(0, Math.floor(top / h) - 1), to = Math.min(list.length, Math.ceil((top + height) / h) + 1);
+      for (let i = from; i < to; i++) {
+        const it = list[i];
+        const row = document.createElement('div');
+        row.className = 'r'; row.setAttribute('role', ROLE); row.style.top = (i * h) + 'px';
+        if (it.kind === 'head') row.innerHTML = '<div>' + it.text + '</div>';
+        else {
+          const c = it.c;
+          row.innerHTML = '<div role="gridcell"><div><span title="' + esc(c.name) + '">' + esc(c.name) + '</span></div><div>' + c.when + '</div>' +
+            '<span title="' + esc(c.last) + '">' + esc(c.last) + '</span>' + (c.unread ? '<span aria-label="' + c.unread + ' unread messages">' + c.unread + '</span>' : '') + '</div>';
+          row.dataset.name = c.name;
+        }
+        pane.appendChild(row);
+      }
+    }
+    pane.addEventListener('scroll', render);
+    render();
+    pane.addEventListener('click', (e) => {
       const row = e.target.closest('[role=listitem], [role=row]');
-      if (row) draw(row.querySelector('span[title]').getAttribute('title'));
+      if (!row || !row.dataset.name) return;
+      const c = data.find((x) => x.name === row.dataset.name);
+      draw((c && c.opens) || row.dataset.name);
     });
     // The compose box behaves like WhatsApp's: Enter sends what is in it, and only then does
     // the message appear in the conversation.
     document.getElementById('compose').addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.shiftKey) return;
       e.preventDefault();
-      const box = e.currentTarget;
-      const text = (box.innerText || '').trim();
+      const text = (e.currentTarget.innerText || '').trim();
       if (!text) return;
-      const name = document.querySelector('#main header span[title]').getAttribute('title');
-      (thread[name] = thread[name] || []).push({ out: true, who: 'You', when: '14:05', text });
-      box.innerText = '';
-      draw(name);
+      (thread[current] = thread[current] || []).push({ out: true, who: 'You', when: '14:05', text });
+      e.currentTarget.innerText = '';
+      draw(current);
     });
-    // Searching narrows the list, as WhatsApp's does.
-    document.getElementById('search').addEventListener('input', (e) => {
-      const q = (e.currentTarget.innerText || '').trim().toLowerCase();
-      for (const row of document.querySelectorAll('#pane-side [role=listitem], #pane-side [role=row]')) {
-        const n = row.querySelector('span[title]').getAttribute('title').toLowerCase();
-        row.style.display = !q || n.includes(q) ? '' : 'none';
+    // Search narrows the list into WhatsApp's own sections. ?nosearch is the 2-Nov-2026 page,
+    // where the box took the words and never filtered.
+    box.addEventListener('input', () => {
+      if (NOSEARCH) return;
+      const q = box.value.trim().toLowerCase();
+      const digits = q.replace(/\\D/g, '');
+      const hit = (c) => c.name.toLowerCase().includes(q) || (digits.length >= 6 && c.name.replace(/\\D/g, '').includes(digits));
+      if (!q) list = data.map((c) => ({ kind: 'chat', c }));
+      else {
+        const found = data.filter(hit);
+        list = found.length ? [{ kind: 'head', text: 'Chats' }, ...found.map((c) => ({ kind: 'chat', c }))] : [{ kind: 'head', text: 'No chats, contacts or messages found' }];
       }
+      pane.scrollTop = 0;
+      render();
+    });
+    window.__seen = () => ({ vis: document.visibilityState, w: innerWidth });
+  </script>`;
+}
+
+// A stand-in Gmail: fifty rows in the search shown now, and an older list still in the page but
+// hidden, as Gmail keeps it. A thread of three messages, the middle one collapsed until
+// "Expand all" is pressed.
+function gmailPage() {
+  const rows = (n, tag) => Array.from({ length: n }, (_, i) => `<tr class="zA ${i % 3 ? 'yO' : 'zE'}"><td><span email="s${i}@example.com" name="Sender ${i}">Sender ${i}</span></td>
+    <td><span class="bog">${tag} subject ${i}</span><span class="y2"> - ${tag} snippet ${i}</span></td><td class="xW"><span title="Wed, Nov 11, 2026, ${i}:00 AM">${i}:00</span></td>
+    <td><span data-legacy-thread-id="1a1af231${1000 + i}"></span></td></tr>`).join('');
+  return `<!doctype html><title>Inbox - school@example.com - Mail</title>
+  <div id="old" style="display: none"><table>${rows(10, 'Old')}</table></div>
+  <div id="list"></div>
+  <div id="thread" style="display: none"><h2 class="hP">Paid maker internship</h2>
+    <button aria-label="Expand all">Expand all</button>
+    <div data-message-id="m1"><span class="gD" email="placements@example.edu" name="Placements">Placements</span><span class="g3" title="Fri, Nov 6, 2026, 10:04 AM">Nov 6</span><div class="a3s">First message body</div></div>
+    <div data-message-id="m2" id="collapsed"><span class="gD" email="me@example.com" name="me">me</span><span class="g3" title="Sat, Nov 7, 2026">Nov 7</span><span class="iA">snippet only</span></div>
+    <div data-message-id="m3"><span class="gD" email="placements@example.edu" name="Placements">Placements</span><span class="g3" title="Wed, Nov 11, 2026, 12:47 PM">12:47</span><div class="a3s">Please find attached the list of interested students</div></div>
+  </div>
+  <script>
+    const list = document.getElementById('list'), thread = document.getElementById('thread');
+    const ROWS = ${JSON.stringify(rows(50, 'Found'))};
+    function route() {
+      const h = location.hash;
+      if (h.startsWith('#search/')) { document.title = 'Search results - school@example.com - Mail'; thread.style.display = 'none'; list.style.display = ''; list.innerHTML = '<table>' + ROWS + '</table>'; }
+      else if (h.startsWith('#all/')) { document.title = 'Paid maker internship - school@example.com - Mail'; list.style.display = 'none'; thread.style.display = ''; }
+      else { document.title = 'Inbox - school@example.com - Mail'; list.innerHTML = ''; }
+    }
+    addEventListener('hashchange', route); route();
+    document.querySelector('[aria-label="Expand all"]').addEventListener('click', () => {
+      const c = document.getElementById('collapsed');
+      if (!c.querySelector('.a3s')) c.insertAdjacentHTML('beforeend', '<div class="a3s">The collapsed message, now open</div>');
     });
   </script>`;
 }
 
-module.exports = async ({ app, agentApi, tabs, openTab }) => {
+module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
   let server;
   try {
     // One stand-in server, two pages: /personal is Jason's phone, /school is the school's,
     // /blank is an account nobody has scanned yet.
     server = http.createServer((req, res) => {
-      const which = req.url.startsWith('/school') ? 'school' : req.url.startsWith('/blank') ? null : 'personal';
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(which ? page(which) : '<!doctype html><title>WhatsApp</title><h1>Scan the QR code with your phone’s camera</h1><p>Link with phone number instead.</p>');
+      if (req.url.startsWith('/gmail')) return res.end(gmailPage());
+      const which = req.url.startsWith('/school') ? 'school' : req.url.startsWith('/blank') ? null : 'personal';
+      res.end(which ? page(which, { nosearch: /nosearch/.test(req.url) }) : '<!doctype html><title>WhatsApp</title><h1>Scan the QR code with your phone’s camera</h1><p>Link with phone number instead.</p>');
     });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -127,7 +208,7 @@ module.exports = async ({ app, agentApi, tabs, openTab }) => {
     check('each answer says which phone it came from', /^Jason ·/.test(his.text) && /^Nathaniel ·/.test(theirs.text));
 
     // ---- the answer is small
-    check('a chat list costs a few lines, not a page', his.text.length < 400, his.text.length);
+    check('a chat list costs a few lines, not a page', his.text.split('\n').every((l) => l.length < 90) && his.text.length < 1500, his.text.length);
 
     // ---- unread only
     const unread = await wa({ who: 'jason', action: 'chats', unreadOnly: true });
@@ -158,6 +239,73 @@ module.exports = async ({ app, agentApi, tabs, openTab }) => {
     const found = await wa({ who: 'jason', action: 'search', query: 'jat' });
     check('search finds the chats it should', /Jatin/.test(found.text), found.text);
 
+    // ---- 11-Nov-2026: the chats that went wrong on the real phone
+    const boxOf = (t) => t.view.webContents.executeJavaScript('document.querySelector("#side input").value', true);
+    const pri = await wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav' });
+    check('a chat far down the list opens (not drawn until scrolled to)', /^Jason · Priyanshu Yadav/.test(pri.text), pri.text.split('\n')[0]);
+    check('Priyanshu never opens Parth, though the header starts with "P"', !/Parth/.test(pri.text) && /starting from Jan 1st/.test(pri.text), pri.text);
+    const num = await wa({ who: 'jason', action: 'read', chat: '8500350600' });
+    check('an unsaved number opens by its digits, through the invisible marks', /85003 50600/.test(num.text.split('\n')[0]), num.text.split('\n')[0]);
+    check('a chat whose only history is a call says so', /Voice call/.test(num.text), num.text);
+    check('the search box is empty after every call', (await boxOf(jasonTab)) === '');
+
+    // A search somebody left behind narrows every list; Cue clears it first.
+    await jasonTab.view.webContents.executeJavaScript(`(() => { const b = document.querySelector('#side input'); b.value = 'jatin'; b.dispatchEvent(new Event('input', { bubbles: true })); })()`, true);
+    const full = await wa({ who: 'jason', action: 'chats', limit: 60 });
+    check('a search left in the box does not hide the rest of the list', /· 57 chats/.test(full.text.split('\n')[0]), full.text.split('\n')[0]);
+
+    let wrong = '';
+    try { await wa({ who: 'jason', action: 'read', chat: 'Trap' }); } catch (e) { wrong = e.message; }
+    check('a click that opens the wrong chat fails loudly, and nothing is read', /opened “Trapeze Artist”/.test(wrong) && /Nothing was read/.test(wrong), wrong);
+    let two = '';
+    try { await wa({ who: 'jason', action: 'read', chat: 'Recruit NSM' }); } catch (e) { two = e.message; }
+    check('half a name that fits two chats is a question, not a guess', /More than one chat/.test(two) && /Parth/.test(two) && /Priyanshu/.test(two), two);
+
+    // Several jobs at once on one phone wait their turn; the two phones work side by side, and
+    // neither is brought in front of him.
+    const frontBefore = getState().activeId;
+    const [a1, a2, a3, b1] = await Promise.all([
+      wa({ who: 'jason', action: 'read', chat: 'Mom' }),
+      wa({ who: 'jason', action: 'read', chat: 'Jatin Sharma' }),
+      wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav 🔍 Recruit NSM' }),
+      wa({ who: 'nathaniel', action: 'read', chat: 'Geeth' }),
+    ]);
+    check('reads at the same time on one account each get their own chat',
+      /^Jason · Mom/.test(a1.text) && /Did you eat/.test(a1.text) && /Different person/.test(a2.text) && /Jan 1st/.test(a3.text), [a1.text, a2.text, a3.text].map((t) => t.split('\n')[0]));
+    check('the other account works at the same time', /^Nathaniel · Geeth/.test(b1.text) && /invoice/.test(b1.text), b1.text);
+    check('working in WhatsApp never brings a tab in front of him', getState().activeId === frontBefore, `${frontBefore} -> ${getState().activeId}`);
+    const seen = await jasonTab.view.webContents.executeJavaScript('window.__seen()', true);
+    check('the background WhatsApp tab is awake while an agent works in it', seen.vis === 'visible' && seen.w > 0, seen);
+
+    // The search box ignored, as on 2-Nov-2026: walking the list still opens a far-down chat.
+    jasonTab.view.webContents.loadURL(`${base}/personal?nosearch`);
+    await sleep(1200);
+    const walked = await wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav' });
+    check('with search dead, a far-down chat still opens by walking', /^Jason · Priyanshu Yadav/.test(walked.text) && /Jan 1st/.test(walked.text), walked.text.split('\n')[0]);
+    jasonTab.view.webContents.loadURL(`${base}/personal`);
+    await sleep(1200);
+
+    // ---- Gmail: every row, and whole emails, in the agent's own tab
+    process.env.CUE_GMAIL_URL = `${base}/gmail`;
+    const hisMail = openTab({ url: `${base}/gmail#inbox`, identity: 'school', background: true });
+    await sleep(800);
+    const hisUrl = hisMail.view.webContents.getURL();
+    const gs = await agentApi.gmail({ identity: 'school', action: 'search', query: 'internship' });
+    const glines = gs.text.split('\n').filter((l) => /\[[0-9a-f]+\]$/.test(l));
+    check('Gmail search returns every row, not just the first', glines.length === 25 && /Found subject 24/.test(gs.text), `${glines.length} rows`);
+    const g50 = await agentApi.gmail({ identity: 'school', action: 'search', query: 'internship', limit: 50 });
+    check('and up to fifty when asked, none from the hidden old list', g50.text.split('\n').filter((l) => /\]$/.test(l)).length === 50 && !/Old subject/.test(g50.text));
+    check('the answer names the mailbox it came from', /school@example\.com/.test(gs.text.split('\n')[0]), gs.text.split('\n')[0]);
+    check('his own Gmail tab is not moved by an agent search', hisMail.view.webContents.getURL() === hisUrl, hisMail.view.webContents.getURL());
+    const id = (glines[0].match(/\[([0-9a-f]+)\]$/) || [])[1];
+    const gr = await agentApi.gmail({ identity: 'school', action: 'read', id });
+    check('reading an email gives every message in full, the collapsed one opened', /First message body/.test(gr.text) && /collapsed message, now open/.test(gr.text) && /interested students/.test(gr.text), gr.text.slice(0, 160));
+    const agentMail = tabs.find((t) => t.agent && t.identity === 'school' && String(t.url).includes('/gmail'));
+    const mailSeen = agentMail && await agentMail.view.webContents.executeJavaScript('({ vis: document.visibilityState, w: innerWidth })', true);
+    check('the agent Gmail tab is awake while it works', mailSeen && mailSeen.vis === 'visible' && mailSeen.w > 0, mailSeen);
+    const asleep = await hisMail.view.webContents.executeJavaScript('document.visibilityState', true);
+    check('control: a background tab no agent touched stays asleep', asleep === 'hidden', asleep);
+
     // ---- an account nobody has scanned
     process.env.CUE_WA_URL = `${base}/blank`;
     const blankTab = openTab({ url: `${base}/blank`, identity: 'agent', background: true });
@@ -180,7 +328,8 @@ module.exports = async ({ app, agentApi, tabs, openTab }) => {
     // rule rather than a copy of it that the stand-in host would quietly falsify.
     const waUrl = `${base}/personal`;
     check('agents may work in his linked WhatsApp tab', mayAct(waUrl, 'personal') && mayAct(waUrl, 'school'));
-    check('and in nothing else of his', !mayAct('https://mail.google.com/', 'personal') && !mayAct(waUrl, 'vanish'));
+    // Gmail is handed over too, by the same Settings switch (0.6.x), so the "nothing else" is a shop.
+    check('and in nothing else of his', !mayAct('https://www.amazon.in/gp/cart/view.html', 'personal') && !mayAct(waUrl, 'vanish'));
 
     // ---- opening a site he already has open must not build a twin beside it
     const before = tabs.length;

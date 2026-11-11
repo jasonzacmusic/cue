@@ -29,15 +29,31 @@ function whoOf(name) {
 }
 const label = (identity) => (identity === 'personal' ? 'Jason' : 'Nathaniel');
 
-// The same normalising the page scripts do, for the comparisons that happen out here: WhatsApp's
-// header text drops emoji, so "Manoj 💼 Crio Recruitment" and "Manoj  Crio Recruitment" are one
-// chat spelled two ways.
-const plainName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const sameChat = (a, b) => {
-  const x = plainName(a), y = plainName(b);
-  if (!x || !y) return false;
-  return x === y || x.startsWith(y) || y.startsWith(x);
+// The same comparison the page scripts make (NAME_FN below), for the checks that happen out here.
+// Two spellings of one chat meet once everything but letters and digits is gone: the list keeps
+// emoji as text, the header shows them as pictures, and unsaved numbers carry WhatsApp's invisible
+// direction marks (U+202A ... U+202C) around "+91 85003 50600".
+//
+// EXACT, NEVER A PREFIX. On 11-Nov-2026 the header of Parth's chat read "P" (the avatar's letter)
+// as its first line, and "Priyanshu Yadav" starts with "P", so a read for Priyanshu returned
+// Parth's messages without a word of warning. A name is the same name only when all of it matches,
+// or, for a phone number, when the digits match (with or without the country code).
+const flatName = (s) => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '');
+const digitsOf = (s) => String(s || '').replace(/\D+/g, '');
+// A phone number is what is left when the name is only digits, spaces, dashes, brackets and a plus.
+const isPhone = (s) => /^[\s\u200e\u200f\u202a-\u202e+()\-.\d]+$/.test(String(s || '')) && digitsOf(s).length >= 8;
+const samePhone = (a, b) => {
+  const x = digitsOf(a), y = digitsOf(b);
+  if (x.length < 8 || y.length < 8) return false;
+  return x === y || (x.length > y.length ? x.endsWith(y) : y.endsWith(x)) && Math.min(x.length, y.length) >= 10;
 };
+const sameChat = (a, b) => {
+  if (isPhone(a) && isPhone(b)) return samePhone(a, b);
+  const x = flatName(a), y = flatName(b);
+  return !!x && x === y;
+};
+// Kept for search, where "jat" finding "Jatin" is the point.
+const plainName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 // ---------------------------------------------------------------- page scripts
 // All of these run inside the WhatsApp tab. They return plain data, never HTML.
@@ -77,7 +93,11 @@ const ROW_READER = `const readRow = (row) => {
   return { name, when, last: last.slice(0, 120), unread: badge ? Number(badge[0]) : (unreadEl ? 1 : 0) };
 };
 const visibleRows = () => [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
-  .filter((r) => r.offsetParent !== null);`;
+  .filter((r) => r.offsetParent !== null);
+// Say "it scrolled" out loud. A tab that is off screen gets no scroll events of its own, because
+// Chromium sends them with the next frame and a hidden tab draws no frames - so WhatsApp never drew
+// the rows further down, and a walk of the school's list saw 5 chats (11-Nov-2026).
+const nudge = () => { const p = document.querySelector('#pane-side'); if (p) p.dispatchEvent(new Event('scroll')); };`;
 
 // Every chat, not just the ones drawn right now. WhatsApp only renders the rows in view, so the
 // pane is scrolled to the bottom and back, collecting names as they appear. This is what the
@@ -89,18 +109,18 @@ const WALK_ROWS = (cap) => `(async () => {
   const seen = new Map();
   const grab = () => { for (const row of visibleRows()) { const r = readRow(row); if (r.name && !seen.has(r.name)) seen.set(r.name, r); } };
   const was = pane.scrollTop;
-  pane.scrollTop = 0;
+  pane.scrollTop = 0; nudge();
   await new Promise((r) => setTimeout(r, 250));
   grab();
   let before = -1;
   for (let i = 0; i < 60 && seen.size !== before && seen.size < ${Number(cap) || 400}; i++) {
     before = seen.size;
-    pane.scrollTop = pane.scrollTop + Math.max(300, pane.clientHeight - 100);
+    pane.scrollTop = pane.scrollTop + Math.max(300, pane.clientHeight - 100); nudge();
     await new Promise((r) => setTimeout(r, 350));
     grab();
     if (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 5) { await new Promise((r) => setTimeout(r, 450)); grab(); break; }
   }
-  pane.scrollTop = was;
+  pane.scrollTop = was; nudge();
   return [...seen.values()];
 })()`;
 
@@ -129,8 +149,19 @@ const ROWS = `(() => {
 const READ = (limit) => `(() => {
   ${CHAT_NAME_FN}
   const chat = CHAT_NAME();
-  const stamps = [...document.querySelectorAll('#main [data-pre-plain-text]')].slice(-${Number(limit) || 20});
-  const out = stamps.map((stamp) => {
+  // Every row of the conversation, in order: messages carry the stamp, and the rest - a voice call,
+  // a missed call, a deleted message - are rows without one. A chat whose only history is an
+  // 11-minute call used to read back as "no messages yet" (11-Nov-2026, +91 85003 50600).
+  const stamps = [...document.querySelectorAll('#main [data-pre-plain-text]')];
+  const events = [...document.querySelectorAll('#main [role="row"]')].filter((r) => !r.querySelector('[data-pre-plain-text]')
+    && (r.innerText || '').trim() && !/end-to-end encrypted/i.test(r.innerText || ''));
+  const units = [...stamps, ...events].sort((a, b) => (a.compareDocumentPosition(b) & 4 ? -1 : 1)).slice(-${Number(limit) || 20});
+  const out = units.map((unit) => {
+    const stamp = unit.matches('[data-pre-plain-text]') ? unit : null;
+    if (!stamp) {
+      const said = (unit.innerText || '').split('\\n').map((l) => l.trim()).filter(Boolean).join(' · ');
+      return { out: false, event: true, when: '', who: '', text: '(' + said.slice(0, 200) + ')', full: '' };
+    }
     const n = stamp.closest('[role="row"]') || stamp.parentElement || stamp;
     const meta = stamp.getAttribute('data-pre-plain-text') || '';
     const m = meta.match(/^\\[([^,\\]]+)[^\\]]*\\]\\s*(.*?):\\s*$/);
@@ -226,74 +257,165 @@ const SEND_IT = `(() => {
   return 'enter';
 })()`;
 
-// WHATSAPP'S OWN SEARCH CANNOT BE DRIVEN FROM A SCRIPT. The box is easy to find - it is a real
-// <input aria-label="Search or start a new chat"> now, not the old contenteditable div - and the
-// text goes in: box.value reads back what was typed and the box has focus. WhatsApp still never
-// filters. Measured on the live page 2-Nov-2026: fourteen different terms each left the list at
-// all 26 rows, unfiltered and identical. Three ways of typing were tried and all three failed -
-// the native value setter followed by an 'input' event, a per-character run of keydown,
-// beforeinput, input and keyup with InputEvent and inputType, and execCommand('insertText') on
-// the focused input.
+// WHATSAPP'S OWN SEARCH. On 2-Nov-2026 the box took text and never filtered, whatever way it was
+// typed into, so Cue stopped using it. On 11-Nov-2026 it filters again: the native value setter
+// followed by an 'input' event narrows the list to "Chats", "Contacts", "Messages" and "Groups in
+// common" sections, which reaches every chat, not just the ones drawn on screen, and finds unsaved
+// numbers too. A search that quietly returns everything would still be the worst failure here, so
+// it is only trusted when WhatsApp answers with its section headings (or says nothing was found);
+// otherwise Cue falls back to walking its own list, as before.
 //
-// This mattered more than a missing selector, because a search that quietly returns everything
-// cannot be caught by a control search: the control passes too, and the answer looks right. So
-// nothing here asks WhatsApp to search any more. Cue walks its own chat list and filters it
-// itself - see WALK_ROWS - and the box is left alone.
+// Whatever is typed is ALWAYS taken out again afterwards (CLEAR_SEARCH, in a finally). On
+// 11-Nov-2026 the box was found still holding "crio" from an earlier job, so every later list saw
+// 24 chats instead of 400.
+const SEARCH_BOX = `document.querySelector('#side input[type="text"]') || document.querySelector('input[aria-label*="Search" i][type="text"]')
+  || document.querySelector('#side div[contenteditable="true"]')`;
 
-// Click the row for a chat. Matching is exact first, then "starts with", then "contains", so
-// "Jatin" never lands on "Jatin's Parents" while an exact match exists.
-//
+const TYPE_SEARCH_FN = `const typeSearch = (box, text) => {
+  // Focus first. On a tab in the background WhatsApp ignores the typing otherwise and puts the old
+  // words back (11-Nov-2026: the school's box kept "8971821459" through every clear). Focus inside a
+  // page is the page's own business - it does not take Cue's window or his keyboard.
+  box.focus();
+  if (box.tagName === 'INPUT') {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    set.call(box, text);
+  } else {
+    box.focus();
+    document.execCommand('selectAll', false, null);
+    if (text) document.execCommand('insertText', false, text); else document.execCommand('delete', false, null);
+  }
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+};
+const boxValue = (box) => (box.tagName === 'INPUT' ? box.value : box.innerText || '').trim();`;
+
+const CLEAR_SEARCH = `(async () => {
+  const box = ${SEARCH_BOX};
+  if (!box) return 'no-box';
+  ${TYPE_SEARCH_FN}
+  if (!boxValue(box)) return 'empty';
+  typeSearch(box, '');
+  for (let i = 0; i < 20 && boxValue(box); i++) await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 150));
+  if (document.activeElement === box) box.blur();
+  return boxValue(box) ? 'stuck' : 'cleared';
+})()`;
+
+// Search WhatsApp and read back what it found, section by section. Section headings are rows with
+// no span[title] ("Chats", "Contacts", "Messages", "Groups in common").
+const SEARCH_ROWS = (query) => `(async () => {
+  ${ROW_READER}
+  ${TYPE_SEARCH_FN}
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const box = ${SEARCH_BOX};
+  if (!box) return { searched: false };
+  typeSearch(box, ${JSON.stringify(String(query))});
+  const SECTIONS = /^(chats|contacts|messages|groups in common|chat|contact|message|unread)$/i;
+  const NONE = /no (chats|results|contacts)|no chats, contacts or messages found|not found/i;
+  const read = () => {
+    const out = []; let section = '';
+    const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')];
+    for (const row of rows) {
+      if (!row.querySelector('span[title]')) { const t = (row.innerText || '').trim(); if (t && t.length < 40) section = t; continue; }
+      const r = readRow(row); if (r.name) out.push({ ...r, section });
+    }
+    const sectioned = rows.some((row) => !row.querySelector('span[title]') && SECTIONS.test((row.innerText || '').trim()));
+    const nothing = NONE.test((document.querySelector('#pane-side') || document.querySelector('#side') || {}).innerText || '');
+    return { out, sectioned, nothing };
+  };
+  let got = { out: [], sectioned: false, nothing: false }, last = '';
+  for (let i = 0; i < 40; i++) {
+    await sleep(150);
+    got = read();
+    const sig = got.out.map((r) => r.name + r.section).join('|');
+    // Settled: WhatsApp has answered in its own words, and nothing changed for one more look.
+    if ((got.sectioned || got.nothing) && sig === last && i > 2) break;
+    last = sig;
+  }
+  if (document.activeElement === box) box.blur();
+  return { searched: true, trusted: got.sectioned || got.nothing, rows: got.out };
+})()`;
+
+// Click a row by its exact title among the rows drawn right now, and confirm in the header.
 // The click is dispatched in the page, not sent as a mouse event at x,y: these tabs sit in the
-// background with no geometry on screen, and a pointer aimed at a tab nobody can see hits
-// nothing. A full pointer-and-mouse sequence is what React listens for.
-const CLICK_ROW = (name) => `(async () => {
-  ${FIRE}
-  ${SAME_NAME_FN}
-  ${CHAT_NAME_FN}
-  const want = ${JSON.stringify(String(name).trim().toLowerCase())};
-  const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
-    .filter((r) => r.offsetParent !== null);
-  const named = rows.map((row) => {
-    const t = row.querySelector('span[title]');
-    return { row, name: ((t && (t.getAttribute('title') || t.innerText)) || '').trim() };
-  }).filter((r) => r.name);
-  const low = (s) => s.toLowerCase();
-  const hit = named.find((r) => low(r.name) === want)
-    || named.find((r) => low(r.name).startsWith(want))
-    || named.find((r) => low(r.name).includes(want))
-    // Emoji, doubled spaces and WhatsApp's invisible direction marks make a name typed from what
-    // the list shows differ from the title it holds (3-Nov-2026: "Vocal B2🎤 Online Foundation
-    // <> Shami" was "not found", nearest: itself). So the same three tries run again on letters
-    // and digits only.
-    || (() => {
-      const flat = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
-      const w = flat(want);
-      if (!w) return null;
-      return named.find((r) => flat(r.name) === w)
-        || named.find((r) => flat(r.name).startsWith(w))
-        || named.find((r) => flat(r.name).includes(w));
-    })();
-  if (!hit) return { found: false, offered: named.slice(0, 8).map((r) => r.name) };
+// background with no geometry on screen, and a pointer aimed at a tab nobody can see hits nothing.
+const CLICK_AND_CONFIRM = `const clickAndConfirm = async (row, title) => {
   // The row's gridcell ignores a click; the div that carries the name takes it (measured on the
   // live page 2-Nov-2026). The gridcell, then the row itself, stay behind it as fallbacks.
-  const titled = hit.row.querySelector('span[title]');
-  const el = (titled && titled.closest('div')) || hit.row.querySelector('[role="gridcell"]') || hit.row;
+  const titled = row.querySelector('span[title]');
+  const el = (titled && titled.closest('div')) || row.querySelector('[role="gridcell"]') || row;
   el.scrollIntoView({ block: 'center' });
   fire(el);
   // Then CONFIRM, because a click on the chat list is not a promise. On 2-Nov-2026 a click aimed
   // at a Satish row opened a large broadcast list instead: the list had re-rendered under it. The
-  // header is the only honest answer to "which chat am I in", so it is read back, and a mismatch
-  // is reported rather than passed off as success - reading, or worse writing, in the wrong chat.
-  const opened = await (async () => {
-    for (let i = 0; i < 24; i++) {
-      const n = CHAT_NAME();
-      if (n && sameName(n, hit.name)) return n;
-      await new Promise((r) => setTimeout(r, 250));
+  // header is the only honest answer to "which chat am I in", so it is read back and compared in
+  // FULL, and a mismatch is reported rather than passed off as success.
+  for (let i = 0; i < 24; i++) {
+    const n = CHAT_NAME();
+    if (n && sameName(n, title)) return { found: true, name: title, opened: n };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return { found: true, name: title, opened: CHAT_NAME(), mismatch: true };
+};`;
+
+// Open a chat through WhatsApp's search. Chats first, then Contacts (a saved contact with no
+// conversation yet). Message hits are never clicked: they open a chat at an old message.
+const OPEN_VIA_SEARCH = (name) => `(async () => {
+  ${FIRE}
+  ${SAME_NAME_FN}
+  ${CHAT_NAME_FN}
+  ${CLICK_AND_CONFIRM}
+  const want = ${JSON.stringify(String(name).trim())};
+  const found = await ${SEARCH_ROWS(name)};
+  if (!found.searched) return { searched: false };
+  if (!found.trusted) return { searched: true, trusted: false };
+  const usable = found.rows.filter((r) => !/^(messages|message|groups in common)$/i.test(r.section));
+  const chats = usable.filter((r) => /^chats?$/i.test(r.section) || !r.section);
+  const inChats = pick(want, chats.map((r) => r.name));
+  const choice = inChats.name ? inChats : pick(want, usable.map((r) => r.name));
+  if (!choice.name) return { searched: true, trusted: true, found: false, choices: choice.choices || [], offered: usable.slice(0, 6).map((r) => r.name) };
+  const rows = [...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')];
+  const row = rows.find((r) => { const t = r.querySelector('span[title]'); return t && (t.getAttribute('title') || t.innerText || '').trim() === choice.name; });
+  if (!row) return { searched: true, trusted: true, found: false, choices: [], offered: [choice.name] };
+  return { searched: true, trusted: true, ...(await clickAndConfirm(row, choice.name)) };
+})()`;
+
+// The fallback when search cannot be trusted. WhatsApp only draws the rows in view, so the list is
+// walked from the top and the chat is clicked THE MOMENT it is drawn. The old code walked the whole
+// list to find the name, put the scroll back, and then clicked - by then the row was gone again,
+// which is why "Aishwarya" was found "among 404 chats" and still could not be opened (11-Nov-2026).
+const WALK_AND_OPEN = (name) => `(async () => {
+  ${FIRE}
+  ${ROW_READER}
+  ${SAME_NAME_FN}
+  ${CHAT_NAME_FN}
+  ${CLICK_AND_CONFIRM}
+  const want = ${JSON.stringify(String(name).trim())};
+  const pane = document.querySelector('#pane-side');
+  if (!pane) return { found: false, total: 0, choices: [], offered: [] };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const titleOf = (row) => { const t = row.querySelector('span[title]'); return ((t && (t.getAttribute('title') || t.innerText)) || '').trim(); };
+  const walk = async (test) => {
+    const seen = new Set();
+    pane.scrollTop = 0; nudge(); await sleep(250);
+    for (let i = 0; i < 80; i++) {
+      for (const row of visibleRows()) { const n = titleOf(row); if (!n) continue; seen.add(n); if (test(n)) return { row, name: n, seen }; }
+      if (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 5) break;
+      pane.scrollTop = pane.scrollTop + Math.max(300, pane.clientHeight - 100); nudge();
+      await sleep(350);
     }
-    return CHAT_NAME();
-  })();
-  if (!sameName(opened, hit.name)) return { found: true, name: hit.name, opened, mismatch: true };
-  return { found: true, name: hit.name, opened };
+    for (const row of visibleRows()) { const n = titleOf(row); if (n) { seen.add(n); if (test(n)) return { row, name: n, seen }; } }
+    return { row: null, seen };
+  };
+  // First pass: an exact name, clicked where it stands.
+  let hit = await walk((n) => sameName(n, want));
+  if (!hit.row) {
+    // No exact name anywhere. One unambiguous near name is allowed; then a second pass to reach it.
+    const choice = pick(want, [...hit.seen]);
+    if (!choice.name) return { found: false, total: hit.seen.size, choices: choice.choices || [], offered: [...hit.seen].slice(0, 5) };
+    hit = await walk((n) => n === choice.name);
+    if (!hit.row) return { found: false, total: hit.seen.size, choices: [], offered: [choice.name] };
+  }
+  return clickAndConfirm(hit.row, hit.name);
 })()`;
 
 // Which conversation is open. WhatsApp took the title attribute off the conversation header
@@ -306,23 +428,60 @@ const CLICK_ROW = (name) => `(async () => {
 // where the emoji was - which is why comparing a prefix of one against the other failed on every
 // chat with an emoji in its name (checked live 2-Nov-2026). Keep letters, digits and single
 // spaces, drop everything else, and the two spellings meet.
-const SAME_NAME_FN = `const plain = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\\s+/g, ' ').trim();
+const SAME_NAME_FN = `const flat = (s) => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\\p{L}\\p{N}]+/gu, '');
+const digits = (s) => String(s || '').replace(/\\D+/g, '');
+const isPhone = (s) => /^[\\s\\u200e\\u200f\\u202a-\\u202e+()\\-.\\d]+$/.test(String(s || '')) && digits(s).length >= 8;
+const samePhone = (a, b) => {
+  const x = digits(a), y = digits(b);
+  if (x.length < 8 || y.length < 8) return false;
+  return x === y || (x.length > y.length ? x.endsWith(y) : y.endsWith(x)) && Math.min(x.length, y.length) >= 10;
+};
 const sameName = (a, b) => {
-  const x = plain(a), y = plain(b);
-  if (!x || !y) return false;
-  return x === y || x.startsWith(y) || y.startsWith(x);
+  if (isPhone(a) && isPhone(b)) return samePhone(a, b);
+  const x = flat(a), y = flat(b);
+  return !!x && x === y;
+};
+// Best match for what was asked, among names in the order WhatsApp lists them. Exact (or the same
+// phone number) wins outright. Failing that, a name that starts with what was asked, then one that
+// contains it - but only when there is exactly ONE such name. Two candidates is a question for the
+// caller, never a guess: "Jatin" must not quietly open "Jatin Sharma" when "Jatin K" exists too.
+const pick = (want, names) => {
+  const exact = names.filter((n) => sameName(n, want));
+  if (exact.length) return { name: exact[0] };
+  const w = flat(want);
+  if (!w || isPhone(want)) return { name: null, choices: [] };
+  for (const test of [(n) => flat(n).startsWith(w), (n) => flat(n).includes(w)]) {
+    const got = [...new Set(names.filter(test))];
+    if (got.length === 1) return { name: got[0] };
+    if (got.length > 1) return { name: null, choices: got.slice(0, 6) };
+  }
+  return { name: null, choices: [] };
 };`;
 
-const CHAT_NAME_FN = `const CHAT_NAME = () => {
+// Which conversation is open, read the way a person reads it. WhatsApp marks the name itself with
+// data-testid="conversation-info-header-chat-title" (seen live 11-Nov-2026), a span[dir=auto] whose
+// emoji are <img alt="🔍"> pictures - so the alt text is read back in, or "Parth Ahire 🔍 Recruit
+// NSM" would come out as "Parth Ahire  Recruit NSM". The header's FIRST LINE is no longer the name:
+// on a chat with no photo it is the avatar's single letter, "P", which is what let a read for
+// Priyanshu land in Parth's chat. Lines of one character are skipped for that reason.
+const CHAT_NAME_FN = `const textOf = (el) => {
+  let out = '';
+  const walk = (n) => {
+    if (n.nodeType === 3) out += n.nodeValue;
+    else if (n.nodeType === 1) { if (n.tagName === 'IMG') out += n.getAttribute('alt') || ''; else n.childNodes.forEach(walk); }
+  };
+  walk(el);
+  return out.replace(/\\s+/g, ' ').trim();
+};
+const CHAT_NAME = () => {
   const h = document.querySelector('#main header');
   if (!h) return '';
-  // The first line of the header is what a person reads as the name, on a
-  // one-to-one chat and on a group alike, so it is the answer. span[title] is
-  // only the fallback: on a small group it holds the member list, and
-  // "Jason, Tom, You" has too few commas for any comma count to catch it -
-  // which is what refused a perfectly good three-person group (3-Nov-2026).
-  const first = ((h.innerText || '').split('\\n')[0] || '').trim();
-  if (first) return first;
+  const marked = h.querySelector('[data-testid="conversation-info-header-chat-title"]') || h.querySelector('span[dir="auto"]');
+  const named = marked ? textOf(marked) : '';
+  if (named) return named;
+  const lines = (h.innerText || '').split('\\n').map((l) => l.trim()).filter((l) => l.length > 1);
+  if (lines[0]) return lines[0];
+  // On a small group span[title] holds the member list ("Jason, Tom, You"), so it is the last resort.
   const titled = h.querySelector('span[title]');
   const t = titled ? (titled.getAttribute('title') || '').trim() : '';
   return t.split(',').length > 3 ? '' : t;
@@ -334,20 +493,29 @@ const OPEN_CHAT_NAME = `(() => {
 })()`;
 
 // ---------------------------------------------------------------- the engine
-function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }) {
+function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, frontId, wake }) {
   // Never the tab a class is looking at, and never a private one.
   const onAir = () => (typeof programId === 'function' ? programId() : programId);
+  // The tab he is looking at right now, if any. Cue never reloads that one under him.
+  const inFront = (t) => typeof frontId === 'function' && frontId() === t.id;
   const tabFor = (identity) => tabs.find((t) => t.identity === identity && hostOf(t.url) === WA_HOST()
     && !t.private && t.id !== onAir());
 
+  // Everything here works in the tab's page and nothing else: no activate(), no focus(), no window
+  // raised. That is what lets Claude work in the school's WhatsApp while Jason types in his own
+  // (or the other way round): each account is its own tab with its own page, and the only action
+  // allowed to bring a tab forward is status with show:true, for the one-time scan.
   async function wcFor(identity) {
     let t = tabFor(identity);
     if (!t) t = openTab({ url: WA(), identity, background: true, agent: true });
     ensureView(t);
+    // Awake for the length of the job, so WhatsApp draws its list and search results as it would
+    // on screen (see wake() in main.js). Off screen all the same.
     const wc = t.view.webContents;
     if (hostOf(wc.getURL()) !== WA_HOST()) await wc.loadURL(WA()).catch(() => {});
     const end = Date.now() + 20000;
     while (wc.isLoading() && Date.now() < end) await sleep(100);
+    if (typeof wake === 'function') await wake(t);
     return { tab: t, wc };
   }
 
@@ -367,62 +535,108 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
     return { tab, wc };
   }
 
-  async function openChat(wc, name, identity) {
+  const refuseChoices = (want, identity, choices) => {
+    throw new Error(`More than one chat on ${label(identity)}'s WhatsApp could be “${want}”: ${choices.join(', ')}. Say the full name. Nothing was opened.`);
+  };
+
+  // A number with no chat yet: WhatsApp's own /send?phone= address opens it. That reloads the tab,
+  // so it is never done to the tab he is looking at.
+  async function openByNumber(tab, wc, want, identity) {
+    if (inFront(tab)) throw new Error(`There is no chat with ${want} on ${label(identity)}'s WhatsApp yet, and opening one means reloading the WhatsApp tab Jason has in front of him. Nothing was opened.`);
+    const url = new URL(`send?phone=${digitsOf(want)}`, WA()).toString();
+    await wc.loadURL(url).catch(() => {});
+    const end = Date.now() + 30000;
+    while (Date.now() < end) {
+      await sleep(500);
+      const state = await js(wc, LINKED).catch(() => 'loading');
+      if (state !== 'ready') continue;
+      if (typeof wake === 'function') await wake(tab);
+      const n = await js(wc, OPEN_CHAT_NAME).catch(() => '');
+      if (n && sameChat(n, want)) return n;
+      const bad = await js(wc, `/invalid|isn.t on whatsapp|not on whatsapp/i.test(document.body.innerText)`).catch(() => false);
+      if (bad) throw new Error(`${want} is not on WhatsApp, says WhatsApp. Nothing was opened.`);
+    }
+    const n = await js(wc, OPEN_CHAT_NAME).catch(() => '');
+    throw new Error(`Cue asked WhatsApp to open ${want}, but the chat that opened is “${n || 'nothing'}”. Nothing was read or sent.`);
+  }
+
+  // Open a chat and PROVE it is the one asked for. Returns the name exactly as the header shows it.
+  async function openChat(tab, wc, name, identity) {
     const want = String(name || '').trim();
     if (!want) throw new Error('Name the chat to open.');
     const already = await js(wc, OPEN_CHAT_NAME);
-    if (sameChat(already, want)) return already;
+    if (already && sameChat(already, want)) return already;
 
-    let hit = await js(wc, CLICK_ROW(want));
-    if (!hit.found) {
-      // Not among the rows WhatsApp has drawn. Walking the list scrolls the rest into existence,
-      // which is the only way left to reach a chat far down it now that search is a dead end.
-      await js(wc, WALK_ROWS(400));
-      hit = await js(wc, CLICK_ROW(want));
+    let hit = null;
+    // 1. WhatsApp's own search, which reaches every chat and every saved contact.
+    const viaSearch = await js(wc, OPEN_VIA_SEARCH(want));
+    await js(wc, CLEAR_SEARCH).catch(() => {});
+    if (viaSearch.searched && viaSearch.trusted) {
+      if (viaSearch.found) hit = viaSearch;
+      else if (viaSearch.choices && viaSearch.choices.length > 1) refuseChoices(want, identity, viaSearch.choices);
     }
-    if (!hit.found) {
+    // 2. Search could not be trusted, or found nothing: walk the list and click as it is drawn.
+    let walked = null;
+    if (!hit) {
+      walked = await js(wc, WALK_AND_OPEN(want));
+      if (walked.found) hit = walked;
+      else if (walked.choices && walked.choices.length > 1) refuseChoices(want, identity, walked.choices);
+    }
+    // 3. A phone number with no chat at all.
+    if (!hit && isPhone(want)) return openByNumber(tab, wc, want, identity);
+    if (!hit) {
       // Say what IS there, by name, so the mistake is obvious: a typo, or the wrong account.
-      const all = await js(wc, WALK_ROWS(400));
-      const near = all.map((r) => r.name).filter((n) => sameChat(n, want)).slice(0, 5);
-      const some = (near.length ? near : all.slice(0, 5).map((r) => r.name));
-      throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp, among ${all.length} chat${all.length === 1 ? '' : 's'}.${some.length ? ` Nearest: ${some.join(', ')}.` : ''}`);
+      const near = [...new Set([...(viaSearch.offered || []), ...((walked && walked.offered) || [])])].slice(0, 5);
+      const total = walked ? walked.total : 0;
+      throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp${total ? `, among ${total} chat${total === 1 ? '' : 's'}` : ''}.${near.length ? ` Nearest: ${near.join(', ')}.` : ''}`);
     }
-    // The click already waited for the header and reported what actually opened. Trust that, and
-    // insist on the whole name: matching the first twelve characters would accept "Satish Rao" for
-    // "Satish Kumar", and reading, or writing, in the wrong chat is the one failure that matters.
     if (hit.mismatch) {
       throw new Error(`Cue clicked “${hit.name}” but WhatsApp opened “${hit.opened || 'nothing'}” instead. Nothing was read or sent.`);
     }
-    return hit.opened || hit.name;
+    // The click confirmed the header against the row it clicked. Check once more against what was
+    // ASKED, in full, because a near name ("Priyanshu Yadav" for "Priyanshu Yadav 🔍 Recruit NSM")
+    // was allowed only when it was the one candidate.
+    const now = await js(wc, OPEN_CHAT_NAME);
+    if (!sameChat(now, hit.name)) throw new Error(`WhatsApp's open chat changed to “${now || 'nothing'}” while Cue was opening “${hit.name}”. Nothing was read or sent.`);
+    return now;
+  }
+
+  // Before reading or writing anything, the open chat must still be the one that was opened. A
+  // wrong-chat read fails loudly; it is never returned as if it were the right one.
+  async function stillIn(wc, name, identity) {
+    const now = await js(wc, OPEN_CHAT_NAME);
+    if (!sameChat(now, name)) throw new Error(`The chat open on ${label(identity)}'s WhatsApp is “${now || 'nothing'}”, not “${name}”. Nothing was read or sent.`);
   }
 
   // ---- the five things anyone actually wants
   const actions = {
-    async chats({ identity, unreadOnly, limit }) {
-      const { wc } = await ready(identity);
-      let rows = await js(wc, WALK_ROWS(400));
+    async chats({ wc, identity, unreadOnly, limit }) {
+      const want = Math.min(Number(limit) || 15, 60);
+      // Unread chats can sit anywhere, so that question walks the whole list; a plain list stops
+      // walking once it has enough.
+      let rows = await js(wc, WALK_ROWS(unreadOnly ? 400 : want + 5));
       if (!rows.length) rows = await js(wc, ROWS);
       if (unreadOnly) rows = rows.filter((r) => r.unread > 0);
-      rows = rows.slice(0, Math.min(Number(limit) || 15, 60));
+      rows = rows.slice(0, want);
       if (!rows.length) return { text: unreadOnly ? `${label(identity)}: nothing unread.` : `${label(identity)}: no chats on screen yet.` };
       const lines = rows.map((r) => `${r.unread ? `(${r.unread}) ` : ''}${r.name}${r.when ? ` · ${r.when}` : ''}${r.last ? ` · ${r.last}` : ''}`);
       return { text: `${label(identity)} · ${rows.length} chat${rows.length === 1 ? '' : 's'}\n${lines.join('\n')}` };
     },
 
-    async read({ identity, chat, limit }) {
-      const { wc } = await ready(identity);
-      const name = await openChat(wc, chat, identity);
-      const { messages } = await js(wc, READ(limit));
+    async read({ tab, wc, identity, chat, limit }) {
+      const name = await openChat(tab, wc, chat, identity);
+      const { chat: shown, messages } = await js(wc, READ(limit));
+      // The messages came from whatever the header said while they were read. Compare it in full.
+      if (!sameChat(shown, name)) throw new Error(`Cue opened “${name}” but the messages it read belong to “${shown || 'no chat'}”. Nothing is reported from either.`);
       if (!messages.length) return { text: `${label(identity)} · ${name}: no messages yet.` };
-      const lines = messages.map((m) => `${m.when ? m.when + ' ' : ''}${m.out ? 'You' : (m.who || name)}: ${m.text}`);
+      const lines = messages.map((m) => (m.event ? m.text : `${m.when ? m.when + ' ' : ''}${m.out ? 'You' : (m.who || name)}: ${m.text}`));
       return { text: `${label(identity)} · ${name}\n${lines.join('\n')}` };
     },
 
-    async send({ identity, chat, message }) {
+    async send({ tab, wc, identity, chat, message }) {
       const body = String(message || '').replace(/\r\n?/g, '\n').trim();
       if (!body) throw new Error('There is nothing to send.');
-      const { wc } = await ready(identity);
-      const name = await openChat(wc, chat, identity);
+      const name = await openChat(tab, wc, chat, identity);
       // Proof that it landed: the last outgoing messages, letters and digits only, must contain
       // the start or the end of what was sent - and more of them than before we pressed Send, so
       // the same words sent yesterday cannot pass for today's.
@@ -434,12 +648,15 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
         return messages.filter((m) => m.out && m.full && (m.full.includes(head) || m.full.includes(tail))).length;
       };
       const before = await landed();
+      await stillIn(wc, name, identity);
       let put = await js(wc, PUT(body));
       if (put === 'no-box' || put === 'mangled') { await sleep(400); put = await js(wc, PUT(body)); }
       if (put === 'draft') throw new Error(`There are unsent words already in the box for ${name}. Cue left them alone and sent nothing.`);
       if (put === 'no-box') throw new Error('WhatsApp\'s message box never appeared, so nothing was sent.');
       if (put !== 'ok') throw new Error('WhatsApp would not take the message with its line breaks intact, so nothing was sent.');
       await sleep(120);
+      // The last look before the one step that cannot be undone.
+      await stillIn(wc, name, identity);
       sendPressed = true;
       const how = await js(wc, SEND_IT);
       if (how === 'no-box') throw new Error('WhatsApp\'s message box disappeared before Cue could send.');
@@ -454,19 +671,28 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
       throw new Error(`Cue pressed Send to ${name} but could not see the message arrive. Read that chat before sending it again.`);
     },
 
-    // Cue's own search over Cue's own list. It looks at every chat's NAME and the one line of
-    // last message the list shows - not the whole conversation, which only WhatsApp's own search
-    // could reach and which cannot be driven from a script. That limit is said out loud in the
-    // answer, because a search that quietly looks at less than you think is the whole reason this
-    // was rewritten.
-    async search({ identity, query }) {
-      const { wc } = await ready(identity);
+    // WhatsApp's own search when it can be trusted: chat names, contacts, and words INSIDE the
+    // conversations. When it cannot, Cue's own look over the list, and the answer says it looked at
+    // names and last lines only, because a search that quietly looks at less than you think is the
+    // whole reason this was rewritten.
+    async search({ wc, identity, query }) {
       const q = String(query || '').trim();
       if (!q) throw new Error('Say what to look for.');
+      const found = await js(wc, SEARCH_ROWS(q));
+      await js(wc, CLEAR_SEARCH).catch(() => {});
+      if (found.searched && found.trusted) {
+        if (!found.rows.length) return { text: `${label(identity)}: WhatsApp found nothing for “${q}”.` };
+        const groups = new Map();
+        for (const r of found.rows) { const k = r.section || 'Chats'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+        const parts = [...groups].map(([k, rs]) => `${k}:\n${rs.slice(0, 12).map((r) => `${r.unread ? `(${r.unread}) ` : ''}${r.name}${r.when ? ` · ${r.when}` : ''}${r.last ? ` · ${r.last}` : ''}`).join('\n')}`);
+        return { text: `${label(identity)} · WhatsApp search for “${q}”\n${parts.join('\n')}` };
+      }
       const all = await js(wc, WALK_ROWS(400));
       if (!all.length) return { text: `${label(identity)}: no chats to look through yet.` };
       const needle = plainName(q);
-      const hits = all.filter((r) => plainName(r.name).includes(needle) || plainName(r.last).includes(needle));
+      const digits = digitsOf(q);
+      const hits = all.filter((r) => plainName(r.name).includes(needle) || plainName(r.last).includes(needle)
+        || (digits.length >= 6 && digitsOf(r.name).includes(digits)));
       const scope = `Looked at ${all.length} chat${all.length === 1 ? '' : 's'} by name and last message only, not inside the conversations.`;
       if (!hits.length) return { text: `${label(identity)}: nothing matches “${q}”. ${scope}` };
       const lines = hits.slice(0, 15).map((r) => `${r.unread ? `(${r.unread}) ` : ''}${r.name}${r.last ? ` · ${r.last}` : ''}`);
@@ -475,8 +701,7 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
 
     // Only for the one-time link, and when something looks wrong: this is the single action
     // that is allowed to put the tab in front of him.
-    async status({ identity, show }) {
-      const { tab, wc } = await wcFor(identity);
+    async status({ tab, wc, identity, show }) {
       const state = await js(wc, LINKED);
       if (show && activate) activate(tab.id);
       const said = state === 'ready' ? 'linked and ready'
@@ -486,22 +711,48 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId }
     },
   };
 
+  async function run(action, a, identity) {
+    // status has to answer for an account that is not linked, so it skips the ready() check.
+    const { tab, wc } = action === 'status' ? await wcFor(identity) : await ready(identity);
+    // A search left in the box (his, or an earlier job's) hides most of the list from every action.
+    if (action !== 'status' && !inFront(tab)) await js(wc, CLEAR_SEARCH).catch(() => {});
+    try {
+      return await actions[action]({ ...a, identity, tab, wc });
+    } finally {
+      if (action !== 'status') await js(wc, CLEAR_SEARCH).catch(() => {});
+    }
+  }
+
+  // ONE JOB AT A TIME PER ACCOUNT. Each account is a single tab with a single open chat, so two
+  // reads at once on the same phone used to open each other's chats and return the wrong messages
+  // (11-Nov-2026). Calls for the same account now wait their turn; the two accounts never wait
+  // for each other, because they are two separate tabs.
+  const queues = new Map();
+  const inLine = (identity, job) => {
+    const prev = queues.get(identity) || Promise.resolve();
+    const next = prev.catch(() => {}).then(job);
+    queues.set(identity, next.catch(() => {}));
+    return next;
+  };
+
   // One door for every agent. The account is named in words, never assumed.
   return async function whatsapp(a = {}) {
     const action = String(a.action || 'chats').toLowerCase();
     if (!actions[action]) throw new Error(`WhatsApp can do: ${Object.keys(actions).join(', ')}.`);
     const identity = whoOf(a.who || a.account || a.identity);
-    // A page that died under us ("Object has been destroyed") gets one fresh try - except a send
-    // that already pressed Send, which is never repeated, so nobody gets the same message twice.
-    sendPressed = false;
-    try {
-      return await actions[action]({ ...a, identity });
-    } catch (e) {
-      if (!/destroyed/i.test(String(e && e.message)) || sendPressed) throw e;
-      await sleep(800);
-      return actions[action]({ ...a, identity });
-    }
+    return inLine(identity, async () => {
+      // A page that died under us ("Object has been destroyed") gets one fresh try - except a send
+      // that already pressed Send, which is never repeated, so nobody gets the same message twice.
+      sendPressed = false;
+      try {
+        return await run(action, a, identity);
+      } catch (e) {
+        if (!/destroyed/i.test(String(e && e.message)) || sendPressed) throw e;
+        await sleep(800);
+        return run(action, a, identity);
+      }
+    });
   };
 }
 
-module.exports = { makeWhatsApp, WHO, WA_HOST };
+module.exports = { makeWhatsApp, WHO, WA_HOST, sameChat };

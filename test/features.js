@@ -689,6 +689,22 @@ module.exports = async function run(c) {
   if (st.n) { c.activate(st.n.id); await sleep(1500); check('video: going to the waiting tab starts it and pauses the other', st.n.playing && !st.a.playing, { n: st.n.playing, a: st.a.playing }); c.closeTab(st.n.id); }
   c.closeTab(st.a.id); c.setSetting('videoSwitch', 'switch'); await sleep(200);
 
+  // An agent's background tab is drawn at its real size while it works (wake() in main.js), and
+  // nothing in front of him moves. The control: the same tab asleep has no size and no frames.
+  {
+    const frontBefore = c.getState().activeId;
+    const bg = c.openTab({ url: `${base}/`, identity: 'agent', background: true, agent: true }); await sleep(1200);
+    const look = () => bg.view.webContents.executeJavaScript(`(async () => { let n = 0; await new Promise((r) => { const end = performance.now() + 400; const f = () => { n++; if (performance.now() < end) requestAnimationFrame(f); else r(); }; requestAnimationFrame(f); setTimeout(r, 700); }); return { w: innerWidth, vis: document.visibilityState, frames: n }; })()`, true);
+    const asleep = await look();
+    await c.agentApi.wake(bg);
+    const awake = await look();
+    check('agents: control - a background tab nobody woke has no size and draws nothing', asleep.w === 0 && asleep.frames === 0, asleep);
+    check('agents: a background tab an agent works in is drawn at full size', awake.w > 600 && awake.frames > 5 && awake.vis === 'visible', awake);
+    const at = bg.view.getBounds();
+    check('agents: and it never comes in front of him (drawn outside the window)', c.getState().activeId === frontBefore && at.x + at.width <= 0, { at, front: c.getState().activeId });
+    c.closeTab(bg.id); await sleep(200);
+  }
+
   const vA = c.openTab({ url: `${base}/play?va`, identity: 'vanish' }); await sleep(1500);
   await vA.view.webContents.executeJavaScript(`window.open('${base}/play?vb'); 1`, true).catch(() => {}); await sleep(2500);
   const vB = c.vanish.tabs.find((t) => t.url.includes('?vb'));

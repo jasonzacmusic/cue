@@ -27,6 +27,7 @@ const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
 const { makeWhatsApp, WA_HOST } = require('./whatsapp');
+const { makeGmail } = require('./gmail');
 const NSM_APPS = require('./nsm-apps.json');
 
 app.setName('Cue');
@@ -1371,10 +1372,12 @@ function mergeDupes() {
   return drop.length;
 }
 
-function openTab({ url, identity, background, after, agent, pinned, focusUi } = {}) {
+function openTab({ url, identity, background, after, agent, pinned, focusUi, own } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const who = IDENTITIES[identity] ? identity : folderForNewTab();
-  const only = url && isFolder(who) ? soleTab(url, who) : null;
+  // `own`: an agent's own tab, beside his. Without it, "one Gmail per folder" would hand the agent
+  // HIS inbox and move it to the agent's search while he reads.
+  const only = url && isFolder(who) && !own ? soleTab(url, who) : null;
   if (only) {
     // Go to the one that is already open, and take it where you asked to go.
     ensureView(only);
@@ -1447,6 +1450,7 @@ function closeTab(id) {
 
 function destroyView(t) {
   if (!t.view) return;
+  clearTimeout(t.awakeTimer); t.awake = false;
   const v = t.view; t.view = null;
   if (shield) { try { shield.forget(v.webContents.id); } catch {} }
   for (const w of [mainWin, stageWin, t.popout]) { try { if (w) w.contentView.removeChildView(v); } catch {} }
@@ -1555,7 +1559,9 @@ function layout() {
   for (const t of tabs) {
     if (!t.view || t.host !== 'main') continue;
     const k = shown.indexOf(t.id);
-    if (k >= 0 && rects[k]) { t.view.setBounds(rects[k]); t.view.setVisible(true); panes.push({ id: t.id, rect: rects[k] }); }
+    if (k >= 0 && rects[k]) { unsize(t); t.view.setBounds(rects[k]); t.view.setVisible(true); panes.push({ id: t.id, rect: rects[k] }); }
+    // A tab an agent is working in stays drawn, but outside the window's visible area: see wake().
+    else if (t.awake) { t.view.setBounds(offStage()); t.view.setVisible(true); }
     else { t.view.setVisible(false); t.view.setBounds(rects[0] || contentRect()); }
   }
   if (aiView) aiView.setBounds({ x: w - aiWidth(), y: TOOLBAR + AI_HEAD, width: aiWidth(), height: Math.max(0, h - TOOLBAR - AI_HEAD) });
@@ -3225,7 +3231,82 @@ function logAgent(entry) {
   pushState();
 }
 
-const whatsapp = makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId: () => programId });
+// WAKING A BACKGROUND TAB FOR AN AGENT. A tab nobody is looking at is hidden from Chromium, and a
+// hidden page does not draw: no animation frames, no scroll events, and a tab that was never on
+// screen has no size at all (innerWidth 0). Pages that draw only what fits break on that - on
+// 11-Nov-2026 Gmail in an agent's tab had all fifty search rows in the page and showed one, and a
+// walk of the school's WhatsApp list saw 25 chats of hundreds, because its list redraws on frames
+// and the hidden tab got none ("no frame in 1.5s", measured in the page).
+//
+// So while an agent works in a tab, the tab is SHOWN - but placed just outside the window's
+// visible area, at its normal size. Chromium then draws it as if it were on screen: frames, scroll
+// events, a real size. Nothing appears on his screen, nothing is brought forward, and his keyboard
+// stays where it is. Background throttling is off for the same stretch. Fifteen seconds after the
+// agent's last call it is hidden again; if he opens that tab himself, layout() puts it in its
+// normal place at once. Tried first and dropped (11-Nov-2026): webContents.incrementCapturerCount
+// no longer exists in Electron 44, and Chromium's view-size override gives a size but only one frame.
+const AWAKE_MS = 15000;
+function offStage() {
+  const r = contentRect();
+  const width = Math.max(800, r.width), height = Math.max(600, r.height);
+  return { x: -(width + 400), y: r.y, width, height };
+}
+function wake(t) {
+  if (!t || !t.view || t.host !== 'main') return Promise.resolve();
+  const wc = t.view.webContents;
+  if (wc.isDestroyed()) return Promise.resolve();
+  const first = !t.awake;
+  t.awake = true;
+  try { wc.setBackgroundThrottling(false); } catch {}
+  clearTimeout(t.awakeTimer);
+  t.awakeTimer = setTimeout(() => sleepAgain(t), AWAKE_MS);
+  const onScreen = panes.some((p) => p.id === t.id);
+  if (onScreen) return Promise.resolve();
+  // Shown afresh on every call: a page that reloaded comes back hidden inside a view that still
+  // says it is visible, and draws nothing until it is shown again.
+  const r = offStage();
+  if (!first) t.view.setVisible(false);
+  t.view.setBounds(r); t.view.setVisible(true);
+  // Chromium sizes a view by the part of it inside the window, which off stage is nothing, so the
+  // page is told its size outright with Chromium's own view-size override.
+  const size = { width: r.width, height: r.height };
+  return new Promise((ok) => setTimeout(ok, first ? 250 : 60)).then(() => wc.executeJavaScript('innerWidth', true)).then(async (w) => {
+    if (w || wc.isDestroyed() || !t.awake) return;
+    try { if (t.sized) wc.disableDeviceEmulation(); } catch {}
+    try { wc.enableDeviceEmulation({ screenPosition: 'desktop', screenSize: size, viewPosition: { x: 0, y: 0 }, deviceScaleFactor: 0, viewSize: size, scale: 1 }); t.sized = true; } catch {}
+    for (let i = 0; i < 20; i++) { await new Promise((ok) => setTimeout(ok, 50)); if (await wc.executeJavaScript('innerWidth', true).catch(() => 1)) break; }
+  }).catch(() => {});
+}
+// The size override comes off the moment the tab is on screen or asleep again.
+function unsize(t) {
+  if (!t.sized) return;
+  t.sized = false;
+  const wc = t.view && t.view.webContents;
+  if (wc && !wc.isDestroyed()) { try { wc.disableDeviceEmulation(); } catch {} }
+}
+function sleepAgain(t) {
+  clearTimeout(t.awakeTimer);
+  if (!t.awake) return;
+  t.awake = false;
+  const wc = t.view && t.view.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  unsize(t);
+  try { wc.setBackgroundThrottling(true); } catch {}
+  layout();
+}
+
+const whatsapp = makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId: () => programId, frontId: () => activeId, wake });
+// The agent's own Gmail tab in a folder: never his inbox (see `own` in openTab).
+function agentGmailTab(identity, url) {
+  const host = hostOf(url);
+  const home = url.split('#')[0].split('?')[0];
+  let t = tabs.find((x) => x.agent && x.identity === identity && x.id !== programId && !x.private && hostOf(x.url) === host && String(x.url).startsWith(home));
+  if (!t) t = openTab({ url: googleForFolder(url, identity), identity, background: true, agent: true, own: true });
+  ensureView(t);
+  t.aiBusy = Date.now(); clearTimeout(t.aiTimer); t.aiTimer = setTimeout(() => { t.aiBusy = 0; pushState(); }, 60000); pushState();
+  return t;
+}
+const gmail = makeGmail({ agentTab: agentGmailTab, wake, label: (id) => (id === 'personal' ? 'Personal' : 'School') });
 
 const agentApi = {
   doorOpen: () => doorOpen,
@@ -3273,7 +3354,9 @@ const agentApi = {
         return reuse;
       }
     }
-    return openTab({ url: googleForFolder(target, who), identity: who, background, agent: true });
+    // own: the agent's own tab. Without it the one-per-folder rule handed agents HIS Gmail and
+    // moved it to their search (11-Nov-2026: his Personal inbox was left on an agent's search).
+    return openTab({ url: googleForFolder(target, who), identity: who, background, agent: true, own: true });
   },
   safeUrl: (url) => {
     const target = resolveInput(url);
@@ -3298,6 +3381,13 @@ const agentApi = {
     if (aiPaused()) throw new Error('Jason has paused AI agents in Cue, WhatsApp included. Stop here and tell him — do not open WhatsApp another way.');
     return whatsapp(a);
   },
+  // Gmail, the same narrow way: search and read, in the agent's own Gmail tab of that folder.
+  gmail: (a) => {
+    if (aiPaused()) throw new Error('Jason has paused AI agents in Cue, Gmail included. Stop here and tell him.');
+    if ((settings().agentSites || {}).gmail === false) throw new Error('Jason has switched Gmail off for agents in Cue Settings.');
+    return gmail(a);
+  },
+  wake: (t) => wake(t),
   setMuted, setVolume,
   // ---- the teaching rig's door (Stream Deck pedal + OBS), not an AI agent's.
   // OBS captures Cue as an application, so the class sees whatever tab is

@@ -20,6 +20,7 @@ on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) h
 ## Where things are
 - `src/main/main.js`: windows, tabs, Spaces, split views, on air, Peek, AI panel, menus, every wire.
 - `src/main/agent-port.js` + `bin/cue-mcp.js`: the AI door (port 8813) and its tools. Add a tool in both.
+- `src/main/whatsapp.js` + `src/main/gmail.js`: `cue_whatsapp` and `cue_gmail`, one call each, plain lines back.
 - `src/main/vanish.js`: the Vanish window. Its tabs are kept out of Cue's tab list on purpose, so nothing that saves or shares tabs can reach them.
 - `src/main/signin.js`: where a page's new window goes (popup, same tab, new tab). `refuseOpen` stops pages opening local files or Cue's own pages. `shared-logins.js`: copies sign-ins between Personal and School, except sites with two accounts.
 - The team.nathanielschool.com password import is a one-time step for the school's own staff. It shows only if this computer is signed in to that site. Everyone else moves in from Chrome or Safari; never present it as a Cue feature.
@@ -78,6 +79,41 @@ browser per phone, so there is no second session to make — these tabs are it.
   spending it, and only read what he asked for.
 - Clicks are dispatched in the page, never aimed at x,y: these tabs live in the background with
   no geometry, and a mouse sent at a tab nobody can see hits nothing.
+
+## WhatsApp and Gmail for agents, as of 0.6.17 (11-Nov-2026)
+
+- **Opening a chat.** `cue_whatsapp` types the name into WhatsApp's own search box (it filters
+  again since 11-Nov; on 2-Nov it did not), clicks the matching row under "Chats" (then
+  "Contacts"; never a "Messages" hit) and empties the box afterwards, every time, in a `finally`.
+  If WhatsApp does not answer with its section headings, Cue walks the list instead and clicks the
+  row the moment it is drawn. A phone number works as a name ("+91 85003 50600" or "8500350600");
+  a number with no chat at all is opened with WhatsApp's `send?phone=` address, which reloads the
+  tab, so it is refused on the tab he has in front of him.
+- **The right chat, or an error.** Names are compared in FULL (letters and digits only, so emoji
+  and the invisible U+202A/U+202C marks round numbers do not matter), never by prefix. The header
+  name comes from `[data-testid="conversation-info-header-chat-title"]` with emoji pictures read
+  back from their `alt`; the header's first line is the avatar's letter on a chat without a
+  photo, which is how "Priyanshu" once read Parth's messages. Half a name is allowed only when it
+  fits ONE chat; two candidates is an error that lists them. `read` checks the header again after
+  reading, `send` checks it right before Send.
+- **One job at a time per account, both accounts at once.** Calls for the same account queue,
+  because one tab has one open chat. Personal and School are two tabs and run side by side.
+- **Never in front of him.** Nothing in `whatsapp.js` or `gmail.js` calls `activate()`, focuses a
+  window or raises one; only `status` with `show:true` does, for the one-time scan. Focusing the
+  search box inside a background page is the page's business and does not move his keyboard.
+  So Claude can work in the school's WhatsApp while he types in his own, and the other way round.
+- **Waking a background tab** (`wake()` in main.js). A hidden tab gets no animation frames, no
+  scroll events and, if never shown, no size: WhatsApp's list and Gmail's rows then do not draw.
+  While an agent works in a tab it is SHOWN outside the window's visible area at its normal size
+  (Chromium's view-size override supplies the size, since Chromium sizes a view by the part inside
+  the window), with background throttling off. Fifteen seconds after the last call it is hidden
+  again; if he opens the tab himself, `layout()` puts it in its normal place. Every agent tool
+  goes through it (`needAwake` in agent-port.js). `incrementCapturerCount` is gone in Electron 44.
+- **`cue_gmail`** (`src/main/gmail.js`): `search` (Gmail's own search words, up to 50 rows with
+  sender, subject, snippet, date and an [id]) and `read` (every message of the thread, collapsed
+  ones expanded; Gmail marks it read). It works in the agent's OWN Gmail tab of that folder, never
+  his inbox: `openTab({ own: true })` skips the one-Gmail-per-folder rule, which used to hand
+  agents his tab and leave it on their search. `cue_open` uses `own` too.
 
 ## Carrying sign-ins over from Chrome
 Google and Meta both refuse a sign-in form typed into a browser they do not recognise. Chrome on

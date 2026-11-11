@@ -61,6 +61,9 @@ async function startAgentPort({ port, tokenFile, api }) {
     api.ensure(t);
     return t.view.webContents;
   };
+  // The same checks, then the tab is woken for the agent (wake() in main.js): drawn at its real
+  // size outside the window's visible area, so a background page reads as it would on screen.
+  const needAwake = async (t, act) => { const wc = need(t, act); if (api.wake) await api.wake(t); return wc; };
   const waitLoad = async (wc, ms = 15000) => {
     const end = Date.now() + ms;
     while (wc.isLoading() && Date.now() < end) await sleep(100);
@@ -74,19 +77,19 @@ async function startAgentPort({ port, tokenFile, api }) {
       await waitLoad(t.view.webContents);
       return { id: t.id, title: t.view.webContents.getTitle(), url: t.view.webContents.getURL(), identity: t.identity };
     },
-    navigate: async (a) => { const t = api.get(a.id); const wc = need(t, true); await wc.loadURL(api.safeUrl(a.url)).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
-    back: async (a) => { const t = api.get(a.id); const wc = need(t, true); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return { url: wc.getURL() }; },
+    navigate: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); await wc.loadURL(api.safeUrl(a.url)).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
+    back: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return { url: wc.getURL() }; },
     close: async (a) => { const t = api.get(a.id); need(t, true); api.close(t); return { closed: a.id }; },
     read: async (a) => {
-      const t = api.get(a.id); const wc = need(t, false); await waitLoad(wc);
+      const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc);
       const text = await wc.executeJavaScript('document.body ? document.body.innerText : ""', true);
       const max = Math.min(Number(a.maxChars) || 20000, 200000);
       return { id: t.id, title: wc.getTitle(), url: wc.getURL(), text: text.slice(0, max), truncated: text.length > max };
     },
-    snapshot: async (a) => { const t = api.get(a.id); const wc = need(t, false); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle(), elements: await wc.executeJavaScript(SNAPSHOT_JS, true) }; },
+    snapshot: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle(), elements: await wc.executeJavaScript(SNAPSHOT_JS, true) }; },
     screenshot: async (a) => { const t = api.get(a.id); need(t, false); const img = await api.capture(t); if (!img) throw new Error('Could not take a picture of that tab yet. Try again in a moment.'); const out = a.width ? img.resize({ width: Number(a.width) }) : img; return { mime: 'image/png', base64: out.toPNG().toString('base64') }; },
     click: async (a) => {
-      const t = api.get(a.id); const wc = need(t, true);
+      const t = api.get(a.id); const wc = await needAwake(t, true);
       const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: a.text }), true);
       if (!p) throw new Error('Could not find that element. Call snapshot first and click by ref.');
       await sleep(80);
@@ -97,7 +100,7 @@ async function startAgentPort({ port, tokenFile, api }) {
       return { clicked: p.tag, url: wc.getURL() };
     },
     type: async (a) => {
-      const t = api.get(a.id); const wc = need(t, true);
+      const t = api.get(a.id); const wc = await needAwake(t, true);
       if (a.ref || a.selector || a.text) {
         const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: a.label }), true);
         if (!p) throw new Error('Could not find that field.');
@@ -110,19 +113,19 @@ async function startAgentPort({ port, tokenFile, api }) {
       if (a.submit) { wc.sendInputEvent({ type: 'keyDown', keyCode: 'Return' }); wc.sendInputEvent({ type: 'char', keyCode: '\r' }); wc.sendInputEvent({ type: 'keyUp', keyCode: 'Return' }); await sleep(300); await waitLoad(wc); }
       return { typed: true, url: wc.getURL() };
     },
-    press: async (a) => { const t = api.get(a.id); const wc = need(t, true); wc.sendInputEvent({ type: 'keyDown', keyCode: a.key }); wc.sendInputEvent({ type: 'keyUp', keyCode: a.key }); await sleep(150); return { pressed: a.key }; },
-    scroll: async (a) => { const t = api.get(a.id); const wc = need(t, false); await wc.executeJavaScript(`window.scrollBy(0, ${Number(a.dy) || 600})`, true); return { ok: true }; },
+    press: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); wc.sendInputEvent({ type: 'keyDown', keyCode: a.key }); wc.sendInputEvent({ type: 'keyUp', keyCode: a.key }); await sleep(150); return { pressed: a.key }; },
+    scroll: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, false); await wc.executeJavaScript(`window.scrollBy(0, ${Number(a.dy) || 600})`, true); return { ok: true }; },
     // Say so when the script is missing. String(undefined) is the word "undefined", which evaluates
     // to nothing and comes back as a perfectly innocent null - three calls in a row looked like the
     // page was empty when the real answer was that the caller had named the argument something else.
     eval: async (a) => {
-      const t = api.get(a.id); const wc = need(t, true);
+      const t = api.get(a.id); const wc = await needAwake(t, true);
       if (typeof a.script !== 'string' || !a.script.trim()) return { error: 'eval needs "script": the JavaScript to run, as a string.' };
       const r = await wc.executeJavaScript(a.script, true);
       return { result: r === undefined ? null : r };
     },
     wait: async (a) => {
-      const t = api.get(a.id); const wc = need(t, false); const end = Date.now() + Math.min(Number(a.ms) || 5000, 30000);
+      const t = api.get(a.id); const wc = await needAwake(t, false); const end = Date.now() + Math.min(Number(a.ms) || 5000, 30000);
       while (Date.now() < end) {
         if (a.selector) { if (await wc.executeJavaScript(`!!document.querySelector(${JSON.stringify(a.selector)})`, true)) return { found: true }; }
         else if (a.text) { if (await wc.executeJavaScript(`document.body && document.body.innerText.includes(${JSON.stringify(a.text)})`, true)) return { found: true }; }
@@ -132,11 +135,12 @@ async function startAgentPort({ port, tokenFile, api }) {
       return { found: false };
     },
     problems: async (a) => { const t = api.get(a.id); need(t, false); return { url: t.url, problems: api.problems(t) }; },
-    fullpage: async (a) => { const t = api.get(a.id); need(t, false); return api.fullPage(t); },
+    fullpage: async (a) => { const t = api.get(a.id); await needAwake(t, false); return api.fullPage(t); },
     alert: async (a) => { api.alert(a); return { ok: true }; },
     bills: async () => api.bills(),
     // One call, one answer in plain lines. No snapshot, no picture, no tab juggling.
     whatsapp: async (a) => api.whatsapp(a),
+    gmail: async (a) => api.gmail(a),
     // ---- the teaching rig (Stream Deck pedal, OBS). These change what a
     // CLASS is looking at, so they are the rig's tools, not an AI agent's:
     // never call them to get a page in front of yourself.
