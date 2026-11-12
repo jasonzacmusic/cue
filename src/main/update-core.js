@@ -302,10 +302,11 @@ function startWindowsSwap({ script, waitPid, live, staged, result, version = '',
   if (failAfterAside) command.push('-FailAfterAside');
   const encoded = Buffer.from(command.join(' ') + '; exit $LASTEXITCODE', 'utf16le').toString('base64');
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded];
-  // Node hides the detached process. PowerShell's -WindowStyle expects a
-  // console window, and inheriting Cue's cwd can lock the install directory.
+  // Windows keeps the child alive after its parent exits. Use a hidden
+  // process without DETACHED_PROCESS, which can make Windows PowerShell
+  // exit before executing the script. Its cwd must be outside the install.
   const child = spawnFn(powershellPath(env), args, {
-    cwd: path.dirname(script), detached: true, windowsHide: true, stdio: 'ignore',
+    cwd: path.dirname(script), windowsHide: true, stdio: 'ignore',
   });
   child.unref();
   return child;
