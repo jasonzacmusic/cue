@@ -67,7 +67,14 @@ packager({
     }
   }],
   prune: true,
-  ignore: [/^\/build($|\/)/, /^\/test($|\/)/, /^\/scripts($|\/)/, /^\/\.git($|\/)/, /\.md$/],
+  // Only what Cue runs on goes in. A list of things to leave out let anything else
+  // sitting in the folder ride along: on 12-Nov-2026 the studio Mac's checkout
+  // produced a 585 MB app that way.
+  ignore: (p) => {
+    if (!p) return false;
+    const top = p.split('/')[1];
+    return !['package.json', 'LICENSE', 'assets', 'bin', 'src', 'node_modules'].includes(top) || /\.md$/.test(p);
+  },
   extendInfo: {
     NSMicrophoneUsageDescription: 'Websites you allow (Zoom, Meet, YouTube Live) can use your microphone.',
     NSCameraUsageDescription: 'Websites you allow (Zoom, Meet, YouTube Live) can use your camera.',
