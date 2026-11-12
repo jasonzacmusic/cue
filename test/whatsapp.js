@@ -8,6 +8,9 @@
 // nothing reported as sent until it is seen in the conversation, and a plain refusal when the
 // account is not linked.
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
@@ -34,6 +37,8 @@ const CHATS = {
   school: [
     { name: 'Piano Batch 7', when: '18:00', last: 'See you Saturday', unread: 5 },
     { name: 'Geeth', when: '17:12', last: 'Sent the invoice', unread: 0 },
+    // Send works here, but nothing ever shows up in the chat: the honest-failure case for files.
+    { name: 'Black Hole', when: '01:00', last: 'Nothing arrives here', unread: 0 },
   ],
 };
 
@@ -48,8 +53,11 @@ function page(which, { nosearch = false } = {}) {
   <div id="main" hidden>
     <header><div class="avatar"></div><div><span data-testid="conversation-info-header-chat-title" dir="auto"></span></div></header>
     <div id="thread"></div>
-    <footer><div contenteditable="true" id="compose"></div></footer>
+    <footer>${which === 'school'
+    ? '<div role="button" title="Attach" id="att"><span data-icon="clip"></span></div>'
+    : '<button aria-label="Attach" id="att"><span data-icon="plus-rounded"></span></button>'}<div contenteditable="true" id="compose"></div></footer>
   </div>
+  <div id="menu"></div>
   <script>
     const ROLE = ${JSON.stringify(role)};
     const NOSEARCH = ${JSON.stringify(nosearch)};
@@ -73,6 +81,11 @@ function page(which, { nosearch = false } = {}) {
       main.querySelector('[data-testid]').innerHTML = withPictures(name);
       document.getElementById('thread').innerHTML = (thread[name] || []).map((m) => m.call
         ? '<div role="row"><span>Voice call</span><br><span>' + m.call + '</span><br><span>7:16 pm</span></div>'
+        // A file bubble, as WhatsApp draws one: no data-pre-plain-text, the name (with its title)
+        // on a document, only a picture on a photo, and the ticks of an outgoing message.
+        : m.file ? '<div role="row"><div class="message-out"><span data-icon="tail-out"></span>' +
+          (m.kind === 'media' ? '<img alt="" src="data:image/png;base64,iVBORw0KGgo=">' : '<div><span title="' + esc(m.file) + '">' + esc(m.file) + '</span><span>PDF • 1 page</span></div>') +
+          (m.caption ? '<span class="selectable-text">' + esc(m.caption) + '</span>' : '') + '<span aria-label="Read"><span data-icon="msg-dblcheck"></span></span></div></div>'
         : '<div role="row">' +
           '<div data-pre-plain-text="[' + m.when + ', 2/11/2026] ' + (m.out ? 'You' : m.who) + ': "></div>' +
           '<span data-icon="' + (m.out ? 'tail-out' : 'tail-in') + '"></span>' +
@@ -137,7 +150,81 @@ function page(which, { nosearch = false } = {}) {
       pane.scrollTop = 0;
       render();
     });
+    // The attach menu, in two shapes: on Personal its Document and Photos & videos items each hold
+    // a hidden file box; on School the box is only made when the item is clicked (the chooser).
+    const menu = document.getElementById('menu');
+    window.__sent = [];
+    function preview(files, kind) {
+      menu.innerHTML = '';
+      const p = document.createElement('div'); p.id = 'preview'; p.dataset.testid = 'media-editor';
+      p.innerHTML = '<div class="names">' + files.map((f) => '<span>' + esc(f.name) + '</span>').join('') + '</div>' +
+        '<div contenteditable="true" aria-label="Add a caption"></div><div role="button" aria-label="Send"><span data-icon="send"></span></div>';
+      document.body.appendChild(p);
+      p.querySelector('[aria-label="Send"]').addEventListener('click', () => {
+        const cap = (p.querySelector('[contenteditable]').innerText || '').trim();
+        window.__sent.push({ kind, chat: current, names: files.map((f) => f.name), sizes: files.map((f) => f.size), caption: cap });
+        p.remove();
+        if (current === 'Black Hole') return;
+        files.forEach((f, k) => (thread[current] = thread[current] || []).push({ out: true, file: f.name, kind, caption: k === files.length - 1 ? cap : '' }));
+        draw(current);
+      });
+    }
+    document.getElementById('att').addEventListener('click', () => {
+      if (menu.innerHTML) { menu.innerHTML = ''; return; }
+      const item = (label, icon, accept, kind) => ROLE === 'listitem'
+        ? '<li role="button"><span data-icon="' + icon + '"></span><span>' + label + '</span>' + (accept ? '<input type="file" accept="' + accept + '" multiple style="display:none" data-kind="' + kind + '">' : '') + '</li>'
+        : '<li role="button" data-kind="' + kind + '" data-accept="' + accept + '"><span data-icon="' + icon + '"></span><span>' + label + '</span></li>';
+      menu.innerHTML = '<ul>' + item('Document', 'document-filled-refreshed', '*', 'document') + item('Photos &amp; videos', 'media-filled-refreshed', 'image/*,video/mp4,video/3gpp,video/quicktime', 'media') + item('Camera', 'camera', '', 'camera') + '</ul>';
+      menu.querySelectorAll('input[type=file]').forEach((i) => i.addEventListener('change', () => preview([...i.files], i.dataset.kind)));
+      if (ROLE === 'row') menu.querySelectorAll('li[data-accept]').forEach((li) => { if (li.dataset.accept) li.addEventListener('click', () => {
+        const i = document.createElement('input'); i.type = 'file'; i.multiple = true; i.accept = li.dataset.accept;
+        i.addEventListener('change', () => preview([...i.files], li.dataset.kind)); i.click();
+      }); });
+    });
     window.__seen = () => ({ vis: document.visibilityState, w: innerWidth });
+  </script>`;
+}
+
+// Gmail's compose window, stand-in: "Attach files" makes its file box only when clicked (the
+// chooser), each chip shows a progress bar while it "uploads", Send does nothing while one is
+// still uploading (so sending too early fails the test), and a real send reaches the server.
+const COMPOSE_JS = `
+  function wire(root, subject, to) {
+    const chips = root.querySelector('.chips'), saved = root.querySelector('.oG'), files = [];
+    root.querySelector('[command="Files"]').addEventListener('click', () => {
+      const i = document.createElement('input'); i.type = 'file'; i.multiple = true; i.name = 'Filedata';
+      i.addEventListener('change', () => {
+        for (const f of i.files) {
+          files.push({ name: f.name, size: f.size });
+          const c = document.createElement('div'); c.className = 'dL';
+          c.innerHTML = '<div class="vI"></div><div class="vJ">(' + Math.ceil(f.size / 1024) + 'K)</div><div role="progressbar"></div>';
+          c.querySelector('.vI').textContent = f.name; chips.appendChild(c);
+          setTimeout(() => { c.querySelector('[role=progressbar]').remove(); saved.textContent = 'Draft saved'; }, 900);
+        }
+      });
+      i.click();
+    });
+    root.querySelector('[aria-label^="Send"]').addEventListener('click', async () => {
+      if (root.querySelector('[role=progressbar]')) return;
+      await fetch('/gmail/send', { method: 'POST', body: JSON.stringify({ to: to(), subject: subject(), body: root.querySelector('[aria-label="Message Body"]').innerText, files }) });
+      root.remove();
+      const t = document.createElement('div'); t.setAttribute('role', 'alert'); t.textContent = 'Message sent'; document.body.appendChild(t);
+    });
+    root.addEventListener('input', () => setTimeout(() => { saved.textContent = 'Draft saved'; }, 400));
+    setTimeout(() => { if (subject() || to()) saved.textContent = 'Draft saved'; }, 600);
+  }`;
+function composePage() {
+  return `<!doctype html><title>Compose Mail - school@example.com - Gmail</title>
+  <div role="dialog" id="cm"><input aria-label="To recipients" name="to"><input name="subjectbox">
+    <div aria-label="Message Body" role="textbox" contenteditable="true"></div><div class="chips"></div>
+    <div role="button" command="Files" aria-label="Attach files" data-tooltip="Attach files"></div>
+    <div role="button" aria-label="Send ‪(⌘Enter)‬" data-tooltip="Send ‪(⌘Enter)‬">Send</div><span class="oG"></span></div>
+  <script>${COMPOSE_JS}</script>
+  <script>
+    const q = new URLSearchParams(location.search), cm = document.getElementById('cm');
+    cm.querySelector('[name=to]').value = q.get('to') || ''; cm.querySelector('[name=subjectbox]').value = q.get('su') || '';
+    cm.querySelector('[aria-label="Message Body"]').innerText = q.get('body') || '';
+    wire(cm, () => cm.querySelector('[name=subjectbox]').value, () => cm.querySelector('[name=to]').value);
   </script>`;
 }
 
@@ -156,13 +243,27 @@ function gmailPage() {
     <div data-message-id="m1"><span class="gD" email="placements@example.edu" name="Placements">Placements</span><span class="g3" title="Fri, Nov 6, 2026, 10:04 AM">Nov 6</span><div class="a3s">First message body</div></div>
     <div data-message-id="m2" id="collapsed"><span class="gD" email="me@example.com" name="me">me</span><span class="g3" title="Sat, Nov 7, 2026">Nov 7</span><span class="iA">snippet only</span></div>
     <div data-message-id="m3"><span class="gD" email="placements@example.edu" name="Placements">Placements</span><span class="g3" title="Wed, Nov 11, 2026, 12:47 PM">12:47</span><div class="a3s">Please find attached the list of interested students</div></div>
+    <span class="ams bkH" role="link">Reply</span>
   </div>
+  <script>${COMPOSE_JS}</script>
   <script>
     const list = document.getElementById('list'), thread = document.getElementById('thread');
     const ROWS = ${JSON.stringify(rows(50, 'Found'))};
+    const escH = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    // Reply: a reply box in the thread, with its own Attach files and Send.
+    document.querySelector('.ams.bkH').addEventListener('click', () => {
+      const r = document.createElement('div'); r.className = 'M9';
+      r.innerHTML = '<div aria-label="Message Body" role="textbox" contenteditable="true"></div><div class="chips"></div><div role="button" command="Files" aria-label="Attach files" data-tooltip="Attach files"></div><div role="button" aria-label="Send ‪(⌘Enter)‬" data-tooltip="Send ‪(⌘Enter)‬">Send</div><span class="oG"></span>';
+      thread.appendChild(r);
+      wire(r, () => 'Re: Paid maker internship', () => 'placements@example.edu');
+    });
     function route() {
       const h = location.hash;
-      if (h.startsWith('#search/')) { document.title = 'Search results - school@example.com - Mail'; thread.style.display = 'none'; list.style.display = ''; list.innerHTML = '<table>' + ROWS + '</table>'; }
+      // The Sent folder, as the server saw it: what the stand-in really sent.
+      if (h.startsWith('#search/') && /in(%3A|:)sent/i.test(h)) {
+        document.title = 'Search results - school@example.com - Mail'; thread.style.display = 'none'; list.style.display = '';
+        fetch('/gmail/sent.json').then((r) => r.json()).then((sent) => { list.innerHTML = '<table>' + sent.map((m, i) => '<tr class="zA yO"><td><span email="school@example.com" name="me">me</span></td><td><span class="bog">' + escH(m.subject) + '</span><span class="y2"> - ' + escH(m.body) + '</span></td><td class="xW"><span title="now">now</span></td><td><span data-legacy-thread-id="5e570000' + i + '" data-legacy-last-non-draft-message-id="5e571111' + i + '"></span></td></tr>').join('') + '</table>'; });
+      } else if (h.startsWith('#search/')) { document.title = 'Search results - school@example.com - Mail'; thread.style.display = 'none'; list.style.display = ''; list.innerHTML = '<table>' + ROWS + '</table>'; }
       // Real Gmail would not open #all/<thread> for a thread just sent (11-Nov-2026); #inbox/ did.
       else if (h === '#all/1a1af2311000') { document.title = 'Search results - school@example.com - Mail'; }
       else if (h.startsWith('#all/') || h.startsWith('#inbox/')) { document.title = 'Paid maker internship - school@example.com - Mail'; list.style.display = 'none'; thread.style.display = ''; }
@@ -176,13 +277,26 @@ function gmailPage() {
   </script>`;
 }
 
-module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
+module.exports = async ({ app, agentApi, tabs, openTab, getState, userFolders, addFolder, command, setSetting }) => {
   let server;
+  const gmailSent = [];
   try {
+    // The owner's two folders, as an existing install has them: "jason" and "nathaniel" are their
+    // names for agents, and both are open to agents. A fresh profile starts with one folder.
+    if (!userFolders().some((f) => f.id === 'school')) addFolder({ id: 'school', name: 'School' });
+    for (const id of ['personal', 'school']) command('folder.agents', { id, on: true });
+    // Since 0.7 a fresh install hands nothing to agents; the owner's install hands over both.
+    setSetting('agentSites.whatsapp', true); setSetting('agentSites.gmail', true);
     // One stand-in server, two pages: /personal is Jason's phone, /school is the school's,
     // /blank is an account nobody has scanned yet.
     server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/gmail/send') {
+        let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => { gmailSent.push(JSON.parse(b)); res.end('{}'); });
+        return;
+      }
+      if (req.url === '/gmail/sent.json') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(gmailSent)); }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (req.url.startsWith('/gmail') && /[?&]view=cm\b/.test(req.url)) return res.end(composePage());
       if (req.url.startsWith('/gmail')) return res.end(gmailPage());
       const which = req.url.startsWith('/school') ? 'school' : req.url.startsWith('/blank') ? null : 'personal';
       res.end(which ? page(which, { nosearch: /nosearch/.test(req.url) }) : '<!doctype html><title>WhatsApp</title><h1>Scan the QR code with your phone’s camera</h1><p>Link with phone number instead.</p>');
@@ -201,14 +315,17 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     // ---- it will not guess whose phone to use
     let refused = '';
     try { await wa({ action: 'chats' }); } catch (e) { refused = e.message; }
-    check('it refuses to act without being told whose account', /jason|nathaniel/i.test(refused), refused.slice(0, 60));
+    check('it refuses to act without being told whose account', /folder name/i.test(refused) && /Personal/.test(refused) && /School/.test(refused), refused.slice(0, 90));
 
     // ---- the two accounts stay apart
     const his = await wa({ who: 'jason', action: 'chats' });
     check('Jason’s chats are Jason’s', his.text.includes('Jatin') && !his.text.includes('Piano Batch 7'), his.text.split('\n')[1]);
     const theirs = await wa({ who: 'nathaniel', action: 'chats' });
     check('the school’s chats are the school’s', theirs.text.includes('Piano Batch 7') && !theirs.text.includes('Mom'), theirs.text.split('\n')[1]);
-    check('each answer says which phone it came from', /^Jason ·/.test(his.text) && /^Nathaniel ·/.test(theirs.text));
+    // Every answer says the folder's own name, whichever word the agent used for it.
+    check('each answer says which folder it came from', /^Personal ·/.test(his.text) && /^School ·/.test(theirs.text), [his.text.split('\n')[0], theirs.text.split('\n')[0]]);
+    const byName = await wa({ who: 'School', action: 'chats' });
+    check('a folder can be named by its own name too', /^School ·/.test(byName.text) && byName.text.includes('Piano Batch 7'));
 
     // ---- the answer is small
     check('a chat list costs a few lines, not a page', his.text.split('\n').every((l) => l.length < 90) && his.text.length < 1500, his.text.length);
@@ -227,7 +344,7 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
 
     // ---- sending, and only claiming it when it lands
     const sent = await wa({ who: 'jason', action: 'send', chat: 'Mom', message: 'Reached home, all good.' });
-    check('it says who it sent as and to whom', /Sent on Jason's WhatsApp to Mom/.test(sent.text), sent.text);
+    check('it says who it sent as and to whom', /Sent on the WhatsApp in Personal's folder to Mom/.test(sent.text), sent.text);
     const after = await wa({ who: 'jason', action: 'read', chat: 'Mom' });
     check('the message is really in the conversation', /You: Reached home, all good\./.test(after.text), after.text.slice(-60));
     const school = await wa({ who: 'nathaniel', action: 'read', chat: 'Geeth' });
@@ -245,7 +362,7 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     // ---- 11-Nov-2026: the chats that went wrong on the real phone
     const boxOf = (t) => t.view.webContents.executeJavaScript('document.querySelector("#side input").value', true);
     const pri = await wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav' });
-    check('a chat far down the list opens (not drawn until scrolled to)', /^Jason · Priyanshu Yadav/.test(pri.text), pri.text.split('\n')[0]);
+    check('a chat far down the list opens (not drawn until scrolled to)', /^Personal · Priyanshu Yadav/.test(pri.text), pri.text.split('\n')[0]);
     check('Priyanshu never opens Parth, though the header starts with "P"', !/Parth/.test(pri.text) && /starting from Jan 1st/.test(pri.text), pri.text);
     const num = await wa({ who: 'jason', action: 'read', chat: '8500350600' });
     check('an unsaved number opens by its digits, through the invisible marks', /85003 50600/.test(num.text.split('\n')[0]), num.text.split('\n')[0]);
@@ -277,8 +394,8 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
       wa({ who: 'nathaniel', action: 'read', chat: 'Geeth' }),
     ]);
     check('reads at the same time on one account each get their own chat',
-      /^Jason · Mom/.test(a1.text) && /Did you eat/.test(a1.text) && /Different person/.test(a2.text) && /Jan 1st/.test(a3.text), [a1.text, a2.text, a3.text].map((t) => t.split('\n')[0]));
-    check('the other account works at the same time', /^Nathaniel · Geeth/.test(b1.text) && /invoice/.test(b1.text), b1.text);
+      /^Personal · Mom/.test(a1.text) && /Did you eat/.test(a1.text) && /Different person/.test(a2.text) && /Jan 1st/.test(a3.text), [a1.text, a2.text, a3.text].map((t) => t.split('\n')[0]));
+    check('the other account works at the same time', /^School · Geeth/.test(b1.text) && /invoice/.test(b1.text), b1.text);
     check('working in WhatsApp never brings a tab in front of him', getState().activeId === frontBefore, `${frontBefore} -> ${getState().activeId}`);
     const seen = await jasonTab.view.webContents.executeJavaScript('window.__seen()', true);
     check('the background WhatsApp tab is awake while an agent works in it', seen.vis === 'visible' && seen.w > 0, seen);
@@ -287,9 +404,45 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     jasonTab.view.webContents.loadURL(`${base}/personal?nosearch`);
     await sleep(1200);
     const walked = await wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav' });
-    check('with search dead, a far-down chat still opens by walking', /^Jason · Priyanshu Yadav/.test(walked.text) && /Jan 1st/.test(walked.text), walked.text.split('\n')[0]);
+    check('with search dead, a far-down chat still opens by walking', /^Personal · Priyanshu Yadav/.test(walked.text) && /Jan 1st/.test(walked.text), walked.text.split('\n')[0]);
     jasonTab.view.webContents.loadURL(`${base}/personal`);
     await sleep(1200);
+
+    // ---- files: documents and media, in both markups, and "sent" only when the bubbles are seen
+    const fdir = path.join(process.env.CUE_OUT || os.tmpdir(), 'wa-files'); fs.mkdirSync(fdir, { recursive: true });
+    const inv = path.join(fdir, 'Jolly invoice.pdf'); const rec = path.join(fdir, 'Jolly receipt.pdf'); const pic = path.join(fdir, 'chord chart.png');
+    fs.writeFileSync(inv, '%PDF-1.4\n% invoice\n%%EOF\n'); fs.writeFileSync(rec, '%PDF-1.4\n% receipt\n%%EOF\n');
+    fs.writeFileSync(pic, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+    const schoolWa = tabs.find((t) => t.identity === 'school' && String(t.url).includes('/school'));
+    const sentIn = (t) => t.view.webContents.executeJavaScript('window.__sent', true);
+    const pdfs = await wa({ who: 'jason', action: 'send', chat: 'Mom', files: [inv, rec], caption: 'Invoice and receipt' });
+    check('files: two PDFs go to the chat asked for, as documents, with the caption', /^Sent on the WhatsApp in Personal's folder to Mom: 2 files, with the caption “Invoice and receipt”\./.test(pdfs.text) && (pdfs.text.match(/as a document/g) || []).length === 2, pdfs.text);
+    const s1 = (await sentIn(jasonTab)).slice(-1)[0] || {};
+    check('files: WhatsApp\'s Document box got both, and the caption (boxes in the menu)', s1.kind === 'document' && s1.chat === 'Mom' && s1.names.join('|') === 'Jolly invoice.pdf|Jolly receipt.pdf' && s1.caption === 'Invoice and receipt', s1);
+    const bubbles = await jasonTab.view.webContents.executeJavaScript('[...document.querySelectorAll("#main [role=row] span[title]")].map((e) => e.title)', true);
+    check('files: the document bubbles are in the conversation', bubbles.includes('Jolly invoice.pdf') && bubbles.includes('Jolly receipt.pdf'), bubbles);
+    const photo = await wa({ who: 'jason', action: 'send', chat: 'Jatin', files: [pic] });
+    const s2 = (await sentIn(jasonTab)).slice(-1)[0] || {};
+    check('files: a picture goes as a photo, through Photos & videos', /to Jatin: 1 file\./.test(photo.text) && /as a photo/.test(photo.text) && s2.kind === 'media' && s2.chat === 'Jatin', [photo.text, s2]);
+    const mixed = await wa({ who: 'nathaniel', action: 'send', chat: 'Geeth', files: [inv, pic], message: 'Both attached' });
+    const s3 = (await sentIn(schoolWa)).slice(-2);
+    check('files: the other markup (box made on click) takes a document and a photo in one call', /^Sent on the WhatsApp in School's folder to Geeth: 2 files, with the caption “Both attached”/.test(mixed.text), mixed.text);
+    check('files: one round per kind, the words as the caption once', s3.length === 2 && s3[0].kind === 'document' && s3[0].names[0] === 'Jolly invoice.pdf' && s3[0].caption === 'Both attached' && s3[1].kind === 'media' && s3[1].caption === '', s3);
+    const asDoc = await wa({ who: 'nathaniel', action: 'send', chat: 'Geeth', files: [pic], as: 'document' });
+    const s4 = (await sentIn(schoolWa)).slice(-1)[0] || {};
+    check('files: as:"document" sends a picture as a file', /as a document/.test(asDoc.text) && s4.kind === 'document', [asDoc.text, s4]);
+    let lost = '';
+    try { await wa({ who: 'nathaniel', action: 'send', chat: 'Black Hole', files: [inv] }); } catch (e) { lost = e.message; }
+    const s5 = (await sentIn(schoolWa)).slice(-1)[0] || {};
+    check('files: when the bubble never shows, it says so and never "sent"', /pressed Send to Black Hole but could not see the file arrive/.test(lost) && !/^Sent/.test(lost) && s5.chat === 'Black Hole', lost);
+    let bad = '';
+    const sentBefore = (await sentIn(jasonTab)).length;
+    try { await wa({ who: 'jason', action: 'send', chat: 'Mom', files: ['/etc/hosts'] }); } catch (e) { bad = e.message; }
+    check('files: a path Cue may not use is refused before WhatsApp is touched', /only attaches files from your home folder/.test(bad) && (await sentIn(jasonTab)).length === sentBefore, bad);
+    let pdfMedia = '';
+    try { await wa({ who: 'jason', action: 'send', chat: 'Mom', files: [inv], as: 'media' }); } catch (e) { pdfMedia = e.message; }
+    check('files: a PDF asked to go as media is refused in words', /can only go as a document/.test(pdfMedia), pdfMedia);
+    check('files: still never in front of him', getState().activeId === frontBefore, `${frontBefore} -> ${getState().activeId}`);
 
     // ---- Gmail: every row, and whole emails, in the agent's own tab
     process.env.CUE_GMAIL_URL = `${base}/gmail`;
@@ -314,6 +467,27 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     check('the agent Gmail tab is awake while it works', mailSeen && mailSeen.vis === 'visible' && mailSeen.w > 0, mailSeen);
     const asleep = await hisMail.view.webContents.executeJavaScript('document.visibilityState', true);
     check('control: a background tab no agent touched stays asleep', asleep === 'hidden', asleep);
+
+    // ---- Gmail: writing, with attachments. A draft unless send:true; sent only from Gmail's word.
+    const gd = await agentApi.gmail({ identity: 'school', action: 'compose', to: 'jolly@example.com', subject: 'Your invoice', body: 'Hi Jolly,\nBoth attached.', files: [inv, rec] });
+    check('Gmail compose leaves a draft with both files attached, and says so', /^Draft saved in School Gmail \(school@example\.com\): to jolly@example\.com, “Your invoice”, with 2 attachments: Jolly invoice\.pdf/.test(gd.text) && /Nothing was sent/.test(gd.text), gd.text);
+    check('Gmail: a draft sends nothing', gmailSent.length === 0, gmailSent.length);
+    const gsend = await agentApi.gmail({ identity: 'school', action: 'compose', to: 'jolly@example.com', subject: 'Your receipt', body: 'Receipt attached.', files: [rec, pic], send: true });
+    const g0 = gmailSent[0] || {};
+    check('Gmail send:true waits for the uploads, sends, and confirms from "Message sent" and Sent', /^Sent from School Gmail/.test(gsend.text) && /Message sent/.test(gsend.text) && /in Sent \[[0-9a-f]+\]/.test(gsend.text), gsend.text);
+    check('Gmail: the server got that email with both files', g0.to === 'jolly@example.com' && g0.subject === 'Your receipt' && (g0.files || []).map((f) => f.name).join('|') === 'Jolly receipt.pdf|chord chart.png', g0);
+    const greply = await agentApi.gmail({ identity: 'school', action: 'reply', id, body: 'Thanks, our list is attached.', files: [pic], send: true });
+    const g1 = gmailSent[1] || {};
+    check('Gmail reply sends in the thread, with the file', /^Sent from School Gmail.*a reply in “Paid maker internship”/.test(greply.text) && g1.subject === 'Re: Paid maker internship' && (g1.files || [])[0] && g1.files[0].name === 'chord chart.png' && /our list is attached/.test(g1.body), [greply.text, g1]);
+    const gdraft = await agentApi.gmail({ identity: 'school', action: 'reply', id, body: 'A reply to think about.' });
+    check('Gmail: a reply without send:true stays a draft', /^Draft saved/.test(gdraft.text) && gmailSent.length === 2, gdraft.text);
+    let gwrong = '';
+    try { await agentApi.gmail({ identity: 'school', action: 'search', query: 'x', files: [inv] }); } catch (e) { gwrong = e.message; }
+    check('Gmail: files with search are refused in words', /Files go with action "compose" or "reply"/.test(gwrong), gwrong);
+    let gpath = '';
+    try { await agentApi.gmail({ identity: 'school', action: 'compose', to: 'a@b.co', subject: 'x', files: [path.join(os.homedir(), '.ssh', 'id_rsa')] }); } catch (e) { gpath = e.message; }
+    check('Gmail: a guarded path is refused before Gmail is touched', /private keys/.test(gpath) && gmailSent.length === 2, gpath);
+    check('Gmail: his own Gmail tab is still where he left it', hisMail.view.webContents.getURL() === hisUrl, hisMail.view.webContents.getURL());
 
     // ---- an account nobody has scanned
     process.env.CUE_WA_URL = `${base}/blank`;
@@ -350,6 +524,26 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState }) => {
     const elsewhere = agentApi.open({ url: `${base}/blank`, identity: 'personal' });
     check('a different page gets its own tab, his stays put',
       elsewhere.id !== jasonTab.id && jasonTab.url === `${base}/personal`, jasonTab.url);
+
+    // ---- a folder whose only WhatsApp tab is private: refused, and no second WhatsApp is opened
+    process.env.CUE_WA_URL = `${base}/personal`;
+    // Every Personal tab on the stand-in host counts as a WhatsApp tab here, so all of them go private.
+    const standIns = tabs.filter((t) => t.identity === 'personal' && String(t.url).startsWith(base));
+    standIns.forEach((t) => { t.private = true; });
+    const count = tabs.length;
+    let priv = '';
+    try { await wa({ who: 'jason', action: 'chats' }); } catch (e) { priv = e.message; }
+    check('a private WhatsApp tab is refused in words, not worked round', /private/.test(priv) && /second WhatsApp/.test(priv), priv);
+    check('and no second WhatsApp tab was opened beside it', tabs.length === count, `${count} -> ${tabs.length}`);
+    standIns.forEach((t) => { t.private = false; });
+    const again2 = await wa({ who: 'jason', action: 'chats' });
+    check('control: the same tab works again once it is not private', /^Personal ·/.test(again2.text));
+    // ---- a folder the person has not opened to agents is not reachable at all
+    command('folder.agents', { id: 'school', on: false });
+    let closed = '';
+    try { await wa({ who: 'nathaniel', action: 'chats' }); } catch (e) { closed = e.message; }
+    check('a folder not open to agents is refused, by name', /School's folder is not open to AI agents/.test(closed), closed);
+    command('folder.agents', { id: 'school', on: true });
 
     // ---- the deliberate failure, so a silent pass is never mistaken for a run
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');

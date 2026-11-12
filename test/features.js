@@ -81,6 +81,9 @@ function walkFind(dir, token) {
 }
 
 module.exports = async function run(c) {
+  // The owner's world, stated: since 0.7 a fresh profile is a stranger's, with one folder and no
+  // School (sessionFor('school') throws). test/first-run.js covers the stranger.
+  require('./world').asOwner(c);
   const srv = await server();
   const base = `http://127.0.0.1:${srv.address().port}`;
   const ud = c.app.getPath('userData');
@@ -295,10 +298,12 @@ module.exports = async function run(c) {
   // ---- archive
   const ar = c.openTab({ url: `${base}/note?old`, identity: 'personal', background: true }); await loaded(ar);
   ar.lastActive = Date.now() - 30 * 86400000;
+  c.setSetting('archiveDays', 2); // putting tabs away is a choice now (0 = never, the default)
   c.archiveOldTabs();
   check('archive: old tab is put away', !c.byId(ar.id) && c.store.data.archived.some((a) => a.url.includes('old')));
   await c.internal['library.restore']({ id: c.store.data.archived[0].id }); await sleep(300);
   check('archive: can be brought back', c.tabs.some((t) => t.url.includes('old')));
+  c.setSetting('archiveDays', 0);
 
   // ---- peek and AI
   const pk = c.openTab({ url: `${base}/note?peekhost`, identity: 'personal' }); await loaded(pk);

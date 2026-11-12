@@ -47,7 +47,12 @@ function tabEl(t) {
     const to = strip.indexOf(el);
     if (to >= 0) send('move', { id: dragging, to });
   };
-  el.append(name, x);
+  if (t.muted) {
+    const m = document.createElement('span');
+    m.className = 'hush'; m.title = 'Muted';
+    m.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h2.5L9 3v10L5.5 10H3z"/><path d="m11 6 4 4m0-4-4 4"/></svg>';
+    el.append(name, m, x);
+  } else el.append(name, x);
   return el;
 }
 
@@ -67,4 +72,28 @@ window.vanish.onState((s) => {
   lastTabs = shown;
   $('#tabs').replaceChildren(...s.tabs.map(tabEl));
   $('#tabs').style.flexBasis = `${s.tabs.length * 222}px`; // tabs measure themselves, so the strip is told its full width
+});
+
+// Find on the page: Cmd+F (Ctrl+F) opens it, Enter goes to the next match, Shift+Enter back,
+// Escape or the X closes it.
+const findText = $('#findText');
+const closeFind = () => { document.body.classList.remove('finding'); findText.value = ''; $('#findCount').textContent = ''; send('find-close'); };
+window.vanish.onFindOpen(() => { document.body.classList.add('finding'); findText.focus(); findText.select(); });
+findText.oninput = () => send('find', { text: findText.value });
+findText.onkeydown = (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); send('find', { text: findText.value, back: e.shiftKey }); }
+  if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+};
+$('#findClose').onclick = closeFind;
+window.vanish.onFindResult((r) => {
+  if (r.closed) { document.body.classList.remove('finding'); findText.value = ''; $('#findCount').textContent = ''; return; }
+  $('#findCount').textContent = findText.value ? (r.total ? `${r.active} of ${r.total}` : 'None') : '';
+});
+
+// A plain line for things Vanish has to tell you, shown here rather than in Cue's main window.
+let noteTimer = null;
+window.vanish.onNote((text) => {
+  const n = $('#note');
+  n.textContent = text; n.title = text; n.hidden = false;
+  clearTimeout(noteTimer); noteTimer = setTimeout(() => { n.hidden = true; }, 6000);
 });

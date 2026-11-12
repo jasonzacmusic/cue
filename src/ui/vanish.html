@@ -37,6 +37,14 @@
   .tab .x svg { width: 10px; height: 10px; }
   @container (max-width: 76px) { .tab .name { display: none; } .tab:not(.on):not(:hover) .x { display: none; } }
   #new { flex: none; margin-bottom: 3px; }
+  .tab .hush { width: 12px; height: 12px; flex: none; color: var(--dim); }
+  #find { display: none; align-items: center; gap: 6px; flex: none; }
+  body.finding #find { display: flex; }
+  #findText { width: 180px; height: 30px; border: 1px solid var(--line); border-radius: 15px; background: #0B0B0D; padding: 0 12px; outline: 0; user-select: text; }
+  #findText:focus { border-color: var(--dim); }
+  #findCount { min-width: 44px; color: var(--dim); font-size: 12px; text-align: right; }
+  #note { flex: none; max-width: 46%; padding: 5px 12px; border-radius: 13px; background: var(--line); color: var(--ink); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #note[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -50,6 +58,12 @@
   <button id="fwd" class="nav" aria-label="Forward"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg></button>
   <button id="reload" class="nav" aria-label="Reload"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.5-3.5L13 6V2.5"/></svg></button>
   <input id="url" type="text" spellcheck="false" autocomplete="off" placeholder="Search or type an address. Nothing here is saved." aria-label="Address">
+  <div id="find" role="search">
+    <input id="findText" type="text" spellcheck="false" autocomplete="off" placeholder="Find on this page" aria-label="Find on this page">
+    <span id="findCount" aria-live="polite"></span>
+    <button id="findClose" class="nav" aria-label="Close find"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m2 2 6 6M8 2 2 8"/></svg></button>
+  </div>
+  <div id="note" role="status" aria-live="polite" hidden></div>
 </div>
 <script src="vanish.js"></script>
 </body>

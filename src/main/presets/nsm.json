@@ -1,0 +1,64 @@
+{
+  "id": "nsm",
+  "name": "Nathaniel School of Music",
+  "about": "For the school's own staff: its Spaces, its apps in search and on the start page, its number keys, and its own sites trusted to sign in and use MIDI.",
+
+  "spaces": ["Teach", "Create", "Finance", "Build"],
+  "spaceLogins": { "Teach": "school", "Create": "personal", "Finance": "school", "Build": "personal" },
+  "startSpace": "Teach",
+  "startFolder": "school",
+  "schoolFolder": { "id": "school", "name": "School", "color": "#C2410C", "picture": "folder-school.png", "about": "The school account" },
+
+  "quickKeys": [
+    { "key": "1", "name": "WhatsApp", "url": "https://web.whatsapp.com/" },
+    { "key": "2", "name": "Email", "url": "https://mail.google.com/" },
+    { "key": "3", "name": "Instagram", "url": "https://www.instagram.com/" },
+    { "key": "4", "name": "Codex", "url": "https://chatgpt.com/codex" },
+    { "key": "5", "name": "Pitara", "url": "https://pitara.nathanielschool.com" },
+    { "key": "6", "name": "Prima Vista", "url": "https://sightsinging.nathanielschool.com" },
+    { "key": "7", "name": "Lipi", "url": "https://lipi.nathanielschool.com" },
+    { "key": "8", "name": "Learning Portal", "url": "https://learning-portal.nathanielschool.com" },
+    { "key": "9", "name": "New tab", "url": "" }
+  ],
+  "pinned": ["https://mail.google.com/", "https://www.facebook.com/", "https://www.instagram.com/", "https://web.whatsapp.com/"],
+  "alwaysPinned": ["web.whatsapp.com", "mail.google.com", "instagram.com", "facebook.com"],
+  "kits": { "teacher": true, "music": true, "creator": true, "designer": true, "video": true, "business": true },
+  "currency": "INR",
+  "usdRate": 88,
+
+  "groups": [{ "id": "nsm", "name": "Nathaniel School", "hosts": ["nathanielschool.com"] }],
+  "groupHosts": { "ai": ["finance.jasonzacmusic.com"] },
+  "siteNames": [
+    ["^learning-portal\\.nathanielschool\\.com$", "Learning Portal"],
+    ["^students\\.nathanielschool\\.com$", "Students"],
+    ["^leads\\.nathanielschool\\.com$", "Leads"],
+    ["^labs\\.nathanielschool\\.com$", "Nathaniel Labs"]
+  ],
+  "siteLogos": [
+    ["^learning-portal\\.nathanielschool\\.com$", "learning-portal.png"],
+    ["^chord-trees\\.nathanielschool\\.com$", "chord-trees.svg"],
+    ["(^|\\.)nathanielschool\\.com$", "nsm-apps.png"]
+  ],
+  "brand": { "hosts": ["nathanielschool.com"], "name": "Nathaniel School of Music" },
+  "titleTails": ["Nathaniel School of Music"],
+  "apps": "nsm-apps.json",
+  "appLabel": "NSM app",
+
+  "startTiles": {
+    "heading": "Nathaniel School",
+    "tiles": [
+      { "href": "https://learning-portal.nathanielschool.com", "logo": "learning-portal.png", "name": "Learning Portal", "note": "Classes and students" },
+      { "href": "https://apps.nathanielschool.com", "logo": "nsm-apps.png", "name": "NSM Apps", "note": "Every practice app" },
+      { "href": "https://chord-trees.nathanielschool.com", "logo": "chord-trees.svg", "name": "Chord Trees", "note": "Teaching app" }
+    ],
+    "replace": { "https://github.com": { "href": "https://github.com/jasonzacmusic", "note": "Our code" } }
+  },
+  "commands": [
+    { "name": "Vercel deploys", "url": "https://vercel.com/dashboard" },
+    { "name": "Learning portal", "url": "https://learning-portal.nathanielschool.com" }
+  ],
+
+  "ownHosts": ["nathanielschool.com"],
+  "adblockHosts": ["nathanielschool.com"],
+  "teamSite": "https://team.nathanielschool.com"
+}

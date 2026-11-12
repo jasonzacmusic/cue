@@ -25,33 +25,38 @@
     const d = Math.floor(s / 86400); if (d === 1) return 'yesterday'; if (d < 7) return d + ' days ago';
     return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   }
-  const inr = (n) => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+  // Amounts are kept in the person's own currency (the field is still called amountINR, which is
+  // what it held when Cue only knew rupees). The currency comes from main with the bills.
+  let currency = 'USD';
+  const money = (n) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(Math.round(Number(n) || 0)); } catch { return currency + ' ' + Math.round(Number(n) || 0).toLocaleString(); } };
+  const symbol = () => { try { return (new Intl.NumberFormat(undefined, { style: 'currency', currency }).formatToParts(0).find((x) => x.type === 'currency') || {}).value || currency; } catch { return currency; } };
+  const inr = money;
 
   // ---- sample data ----
   const sample = (() => {
     if (!SAMPLE) return null;
     const now = Date.now();
     const db = {
-      usdToInr: 88.4,
+      usdToInr: 1, currency: 'USD',
       bills: [
-        { id: 'a', name: 'Adobe Creative Cloud', url: 'https://account.adobe.com', amountINR: 4230, renews: isoDay(2), status: 'due', note: 'Card ending 4417' },
-        { id: 'b', name: 'Claude Max', url: 'https://claude.ai/settings', amountINR: 17680, renews: isoDay(5), status: 'ok', note: '' },
-        { id: 'c', name: 'Zoom Pro', url: 'https://zoom.us/billing', amountINR: 1560, renews: isoDay(-1), status: 'failed', note: 'Bank declined it. Try the other card.' },
-        { id: 'd', name: 'Google Workspace', url: 'https://admin.google.com', amountINR: 2100, renews: isoDay(21), status: 'ok', note: '' },
-        { id: 'e', name: 'Vercel Pro', url: 'https://vercel.com/account', amountINR: 1768, renews: isoDay(12), status: 'paid', note: 'Paid by Luna' },
-        { id: 'f', name: 'Final Cut Pro cloud storage', url: '', amountINR: 790, renews: isoDay(0), status: 'due', note: '' },
+        { id: 'a', name: 'Photo editing plan', url: 'https://example.com/billing', amountINR: 23, renews: isoDay(2), status: 'due', note: 'Card ending 0000' },
+        { id: 'b', name: 'Cloud storage', url: 'https://example.com/plan', amountINR: 10, renews: isoDay(5), status: 'ok', note: '' },
+        { id: 'c', name: 'Video calls', url: 'https://example.com/account', amountINR: 15, renews: isoDay(-1), status: 'failed', note: 'Bank declined it. Try the other card.' },
+        { id: 'd', name: 'Email for work', url: 'https://example.com/admin', amountINR: 7, renews: isoDay(21), status: 'ok', note: '' },
+        { id: 'e', name: 'Music streaming', url: 'https://example.com/subscription', amountINR: 11, renews: isoDay(12), status: 'paid', note: 'Paid' },
+        { id: 'f', name: 'Website hosting', url: '', amountINR: 5, renews: isoDay(0), status: 'due', note: '' },
       ],
       alerts: [
         { id: '1', source: 'gmail.com', title: 'Your Zoom payment did not go through', body: 'We could not charge the card on file for your Zoom Pro plan. Update your payment details to keep hosting meetings.', at: now - 25 * 60000, url: 'https://zoom.us/billing', held: true },
-        { id: '2', source: 'web.whatsapp.com', title: 'Jatin', body: 'Sir, the interns are ready for tomorrow.', at: now - 3 * 3600000, url: '', held: true },
-        { id: '3', source: 'studio.youtube.com', title: 'New comment on Circle of Fifths in 10 minutes', body: 'This finally made it click, thank you.', at: now - 26 * 3600000, url: 'https://studio.youtube.com', held: false },
+        { id: '2', source: 'web.whatsapp.com', title: 'Sam', body: 'Running ten minutes late, see you soon.', at: now - 3 * 3600000, url: '', held: true },
+        { id: '3', source: 'studio.youtube.com', title: 'New comment on your latest video', body: 'This finally made it click, thank you.', at: now - 26 * 3600000, url: 'https://studio.youtube.com', held: false },
         { id: '4', source: 'github.com', title: 'Build passed', body: '', at: now - 5 * 86400000, url: '', held: false },
       ],
     };
     return db;
   })();
   async function fake(cmd, a) {
-    if (cmd === 'bills.list') return JSON.parse(JSON.stringify({ bills: sample.bills, usdToInr: sample.usdToInr }));
+    if (cmd === 'bills.list') return JSON.parse(JSON.stringify({ bills: sample.bills, usdToInr: sample.usdToInr, currency: sample.currency }));
     if (cmd === 'bills.save') {
       const b = Object.assign({}, a.bill);
       if (!b.id) { b.id = 'n' + Date.now(); sample.bills.push(b); } else { const i = sample.bills.findIndex((x) => x.id === b.id); if (i >= 0) sample.bills[i] = b; }
@@ -67,14 +72,14 @@
   const call = (cmd, args) => (window.cueInternal ? window.cueInternal.invoke(cmd, args || {}) : fake(cmd, args || {}));
 
   // ---- state ----
-  let bills = []; let rate = 83; let alerts = [];
+  let bills = []; let rate = 1; let alerts = [];
   let editing = null;      // bill id being edited, or 'new'
   let confirmDel = null;
 
   async function load() {
     try {
       const r = (await call('bills.list')) || {};
-      bills = r.bills || []; if (r.usdToInr > 0) rate = r.usdToInr;
+      bills = r.bills || []; if (r.usdToInr > 0) rate = r.usdToInr; if (r.currency) currency = r.currency;
     } catch (e) { bills = []; toast('Could not load your bills.'); }
     try { alerts = (await call('alerts.list')) || []; } catch (e) { alerts = []; }
     render();
@@ -105,14 +110,15 @@
     t2.append(el('div', 'k', 'Cards that failed'), el('div', 'v', String(failed)), el('div', 's', failed ? 'Fix these first, the service may stop' : 'All cards are working'));
     const t3 = el('div', 'tile rate-tile'); t3.append(el('div', 'k', 'Dollar price'));
     const row = el('label', 'rate'); const inp = el('input'); inp.type = 'number'; inp.min = '1'; inp.step = '0.01'; inp.value = String(rate);
-    inp.setAttribute('aria-label', 'Rupees per US dollar');
-    row.append(el('span', null, '1 US dollar = ₹'), inp);
+    inp.setAttribute('aria-label', currency + ' per US dollar');
+    row.append(el('span', null, '1 US dollar = ' + symbol()), inp);
     inp.addEventListener('change', async () => {
       const v = parseFloat(inp.value); if (!(v > 0)) { inp.value = String(rate); return; }
-      rate = v; try { await call('bills.setRate', { usdToInr: v }); toast('Saved. 1 US dollar is ₹' + v + '.'); } catch (e) { toast('Could not save the rate.'); }
+      rate = v; try { await call('bills.setRate', { usdToInr: v }); toast('Saved. 1 US dollar is ' + symbol() + v + '.'); } catch (e) { toast('Could not save the rate.'); }
     });
     t3.append(row, el('div', 's', 'Used when you type a price in dollars'));
-    s.append(t1, t2, t3);
+    s.append(t1, t2);
+    if (currency !== 'USD') s.append(t3);
   }
 
   function field(label, input, cls) { const l = el('label', 'field' + (cls ? ' ' + cls : '')); l.append(el('span', null, label), input); return l; }
@@ -130,7 +136,7 @@
     const st = el('select'); [['ok', 'Fine, not due yet'], ['due', 'Due, needs paying'], ['paid', 'Paid'], ['failed', 'Card failed']].forEach(([v, t]) => { const o = el('option', null, t); o.value = v; st.appendChild(o); });
     st.value = b.status || 'ok';
     const note = mkInput('text', b.note, 'Anything to remember'); note.maxLength = 200;
-    f.append(field('Name', name, 'span3'), field('Renews on', date, 'span3'), field('Amount in rupees (₹)', amt, 'span2'), field('Or amount in US dollars', usd, 'span2'), field('Status', st, 'span2'), field('Payment page', url, 'span3'), field('Note', note, 'span3'));
+    f.append(field('Name', name, 'span3'), field('Renews on', date, 'span3'), field('Amount (' + symbol() + ')', amt, 'span2'), ...(currency === 'USD' ? [] : [field('Or amount in US dollars', usd, 'span2')]), field('Status', st, 'span2'), field('Payment page', url, 'span3'), field('Note', note, 'span3'));
     const act = el('div', 'actions');
     const save = el('button', 'btn primary', isNew ? 'Add bill' : 'Save changes'); save.type = 'submit';
     const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button';

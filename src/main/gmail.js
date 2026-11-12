@@ -14,6 +14,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // No /u/0/ in the address: Cue adds the folder's own account (?authuser=), so Personal's search
 // never lands in the school's mailbox (googleForFolder in main.js).
 const BASE = () => process.env.CUE_GMAIL_URL || 'https://mail.google.com/mail/';
+const { human } = require('./attach');
 
 // Rows of the list Gmail is showing now. Gmail keeps the lists it showed before in the page,
 // hidden with display:none, so only rows with no hidden ancestor count.
@@ -68,25 +69,100 @@ const THREAD = `(async () => {
   return { subject, messages: out };
 })()`;
 
-function makeGmail({ agentTab, wake, label }) {
+// ---------------------------------------------------------------- writing, with attachments
+// A new email is opened with Gmail's own compose address (?view=cm&to=&su=&body=, the one every
+// mailto: link uses), which has outlived every Gmail redesign. A reply uses the thread's own Reply
+// button. Files go in through the compose window's "Attach files" (attach.js answers the chooser
+// it opens; no dialog), and nothing is sent or called a draft until Gmail's own chips say every
+// file is uploaded. Selectors list alternatives, because Gmail renames things.
+const BODY_SEL = 'div[aria-label="Message Body"][contenteditable="true"], div[role="textbox"][contenteditable="true"][aria-label*="Body" i], div.editable[contenteditable="true"]';
+const SEND_SEL = '[role="button"][data-tooltip^="Send"], [role="button"][aria-label^="Send"], .T-I.aoO';
+const FILES_SEL = '[command="Files"], [aria-label^="Attach files"], [data-tooltip^="Attach files"]';
+// Mark the compose window (the newest one holding a body box and a Send button) so every later
+// step is scoped to it and never to another draft open beside it.
+const MARK_COMPOSE = `(() => {
+  const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  document.querySelectorAll('[data-cue-compose]').forEach((e) => e.removeAttribute('data-cue-compose'));
+  const bodies = [...document.querySelectorAll(${JSON.stringify(BODY_SEL)})].filter(shown);
+  const body = bodies[bodies.length - 1];
+  if (!body) return null;
+  let root = body;
+  while (root.parentElement && !root.querySelector(${JSON.stringify(SEND_SEL)})) root = root.parentElement;
+  if (!root.querySelector(${JSON.stringify(SEND_SEL)})) return null;
+  root.setAttribute('data-cue-compose', '1');
+  const subj = root.querySelector('input[name="subjectbox"]') || document.querySelector('input[name="subjectbox"]');
+  const to = [...root.querySelectorAll('[email]')].map((e) => e.getAttribute('email'))
+    .concat([...root.querySelectorAll('input[name="to"], textarea[name="to"], input[aria-label*="To" i], input[peoplekit-id]')].map((i) => i.value));
+  return { to: to.filter(Boolean).join(', '), subject: subj ? subj.value : '', body: (body.innerText || '').trim() };
+})()`;
+const SET_FIELDS = (f) => `(() => {
+  const f = ${JSON.stringify(f)};
+  const root = document.querySelector('[data-cue-compose]');
+  if (!root) return 'no-compose';
+  const setVal = (el, v) => { const p = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p, 'value').set.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
+  if (f.subject !== undefined) { const s = root.querySelector('input[name="subjectbox"]') || document.querySelector('input[name="subjectbox"]'); if (s && s.value !== f.subject) setVal(s, f.subject); }
+  if (f.to) { const t = root.querySelector('input[name="to"], textarea[name="to"], input[aria-label*="To" i], input[peoplekit-id]'); if (t && !t.value) { t.focus(); setVal(t, f.to + ','); t.blur(); } }
+  if (f.body !== undefined) {
+    const b = [...root.querySelectorAll(${JSON.stringify(BODY_SEL)})].pop();
+    if (b && !(b.innerText || '').trim()) { b.focus(); for (const [k, line] of f.body.split('\\n').entries()) { if (k) document.execCommand('insertLineBreak'); if (line) document.execCommand('insertText', false, line); } }
+  }
+  return 'ok';
+})()`;
+// The attachment chips: which file names show, and whether any is still uploading.
+const CHIPS = `(() => {
+  const root = document.querySelector('[data-cue-compose]');
+  if (!root) return { gone: true, text: '', uploading: 0 };
+  const text = (root.innerText || '') + ' ' + [...root.querySelectorAll('[aria-label], [title]')].map((e) => (e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '')).join(' ');
+  const uploading = root.querySelectorAll('[role="progressbar"], .dQ:not([style*="display: none"])').length + (/\\b(uploading|attaching)\\b/i.test(root.innerText || '') ? 1 : 0);
+  return { gone: false, text, uploading };
+})()`;
+const PRESS_SEND = `(() => {
+  const fire = (el) => { for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window, button: 0, detail: 1 })); };
+  const root = document.querySelector('[data-cue-compose]');
+  const btn = root && root.querySelector(${JSON.stringify(SEND_SEL)});
+  if (!btn) return 'no-button';
+  fire(btn); return 'pressed';
+})()`;
+const SAID = (re) => `(() => new RegExp(${JSON.stringify(re)}, 'i').test((document.body && document.body.innerText) || ''))()`;
+const REPLY_BUTTON = `(() => {
+  const fire = (el) => { for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window, button: 0, detail: 1 })); };
+  const shown = (el) => { for (let n = el; n && n !== document.body; n = n.parentElement) { if (n.style && n.style.display === 'none') return false; } const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const list = [...document.querySelectorAll('span.ams.bkH, [role="button"][aria-label="Reply"], [role="button"][data-tooltip="Reply"]')].filter(shown);
+  const el = list.find((e) => /^reply$/i.test((e.innerText || '').trim())) || list[list.length - 1];
+  if (!el) return 'no-button';
+  fire(el); return 'pressed';
+})()`;
+
+// `who(said)` is main.js's answer to "which folder": by name or id, refusing a locked folder or one
+// not opened to agents. `label(id)` is that folder's own name.
+function makeGmail({ agentTab, wake, label, who, vetFiles, attachFiles }) {
   const js = (wc, script) => wc.executeJavaScript(script, true);
-  const who = (identity) => {
-    const id = String(identity || '').toLowerCase();
-    if (id === 'personal' || id === 'jason' || id === 'me') return 'personal';
-    if (id === 'school' || id === 'nathaniel' || id === 'nsm') return 'school';
-    throw new Error('Say whose Gmail: "personal" (Jason\'s own) or "school" (the school\'s).');
-  };
 
   // Go to an address inside Gmail and wait for it to be the page shown. A change of the part after
   // # is Gmail's own navigation, so it is quick and keeps the inbox loaded.
   async function go(identity, hash) {
     const t = agentTab(identity, BASE() + '#inbox');
     const wc = t.view.webContents;
-    const end = Date.now() + 30000;
+    let end = Date.now() + 30000;
     while (wc.isLoading() && Date.now() < end) await sleep(150);
+    // Left on a compose page by compose: back to the mailbox itself, keeping the folder's account.
+    if (/[?&]view=cm\b/.test(wc.getURL())) {
+      const u = new URL(wc.getURL());
+      const home = new URL(u.origin + u.pathname);
+      if (u.searchParams.get('authuser')) home.searchParams.set('authuser', u.searchParams.get('authuser'));
+      home.hash = 'inbox';
+      // Only a compose Cue saw saved or sent may be left without Gmail's "leave this page?".
+      const leave = (e) => { if (t.composeDone) e.preventDefault(); };
+      wc.on('will-prevent-unload', leave);
+      await wc.loadURL(home.toString()).catch(() => {});
+      wc.removeListener('will-prevent-unload', leave);
+      if (/[?&]view=cm\b/.test(wc.getURL())) throw new Error(`The ${label(identity)} folder's agent Gmail tab still has an unsaved email open, so Cue left it alone. Nothing was done.`);
+      end = Date.now() + 30000;
+      while (wc.isLoading() && Date.now() < end) await sleep(150);
+    }
     await wake(t);
     if (/accounts\.google\.com/.test(wc.getURL())) {
-      throw new Error(`The ${label(identity)} folder is not signed in to Gmail in Cue. Jason signs in once in that folder; nothing was searched.`);
+      throw new Error(`The ${label(identity)} folder is not signed in to Gmail in Cue. The person signs in once in that folder; nothing was searched.`);
     }
     // Same page, new place: Gmail answers a change after the # without reloading.
     await js(wc, `if (location.hash !== ${JSON.stringify(hash)}) location.hash = ${JSON.stringify(hash)}; true`).catch(() => {});
@@ -94,6 +170,64 @@ function makeGmail({ agentTab, wake, label }) {
   }
   // Gmail puts the mailbox's address in the page title, which proves which account answered.
   const mailbox = (wc) => ((wc.getTitle() || '').match(/[\w.+-]+@[\w-]+\.[\w.-]+/) || [''])[0];
+  const flat = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  // A long file name may be cut short on its chip; its first 24 letters and digits are enough.
+  const shows = (text, f) => { const k = flat(f.name); const t = flat(text); return t.includes(k) || (k.length > 24 && t.includes(k.slice(0, 24))); };
+  const listFiles = (vetted) => vetted.map((f) => `${f.name} (${human(f.size)})`).join(', ');
+
+  // Files into the marked compose window: its own file box if it has one, else the chooser its
+  // "Attach files" opens. Then Gmail's chips must show every file, none still uploading.
+  async function attachHere(wc, identity, vetted) {
+    let fed = null; let why = '';
+    for (const opts of [{ selector: 'input[type="file"]', scope: '[data-cue-compose]', drop: false }, { selector: FILES_SEL, scope: '[data-cue-compose]', drop: false, chooserMs: 5000 }]) {
+      try { fed = await attachFiles(wc, vetted, opts); break; } catch (e) { why = e.message; }
+    }
+    if (!fed) throw new Error(`Gmail's compose window would not take the files (${why.replace(/\s*Nothing was attached\.$/, '')}). Nothing was sent; the email is left open in the ${label(identity)} folder's agent Gmail tab.`);
+    let chips = { text: '', uploading: 1 };
+    const end = Date.now() + 180000;
+    while (Date.now() < end) {
+      await sleep(400);
+      chips = await js(wc, CHIPS).catch(() => chips);
+      if (chips.gone) throw new Error('Gmail\'s compose window closed while the files were going in. Nothing was sent.');
+      if (vetted.every((f) => shows(chips.text, f)) && !chips.uploading) return;
+    }
+    const missing = vetted.filter((f) => !shows(chips.text, f)).map((f) => f.name);
+    throw new Error(`${missing.length ? `Gmail never showed ${missing.join(', ')} attached` : 'Gmail was still uploading the attachments'} after three minutes. Nothing was sent; the email is left open in the ${label(identity)} folder's agent Gmail tab.`);
+  }
+
+  // A draft is left and said so; a send is reported only from Gmail's "Message sent" and the Sent row.
+  async function finish(t, wc, identity, { send, subject, to, vetted, kind }) {
+    const what = kind === 'reply' ? `a reply in “${subject || '(no subject)'}”` : `to ${to}, “${subject || '(no subject)'}”`;
+    const files = vetted.length ? `, with ${vetted.length} attachment${vetted.length === 1 ? '' : 's'}: ${listFiles(vetted)}` : '';
+    const box = `${label(identity)} Gmail${mailbox(wc) ? ' (' + mailbox(wc) + ')' : ''}`;
+    if (!send) {
+      let saved = false;
+      for (let i = 0; i < 30 && !saved; i++) {
+        await sleep(400);
+        saved = await js(wc, `(() => { const r = document.querySelector('[data-cue-compose]'); return /\\b(draft saved|saved)\\b/i.test((r && r.innerText) || '') || /\\bdraft saved\\b/i.test(document.body.innerText || ''); })()`).catch(() => false);
+      }
+      t.composeDone = saved;
+      return { text: `${saved ? 'Draft saved' : 'Draft written, but Gmail has not said “Draft saved” yet'} in ${box}: ${what}${files}. Nothing was sent. Call again with send:true to send it, or the person sends it from Drafts.` };
+    }
+    if ((await js(wc, PRESS_SEND)) !== 'pressed') throw new Error(`Gmail's Send button was not found, so nothing was sent. The email is left open in the ${label(identity)} folder's agent Gmail tab.`);
+    let said = false;
+    for (let i = 0; i < 75 && !said; i++) { await sleep(400); said = await js(wc, SAID('message sent|your message has been sent')).catch(() => false); }
+    if (!said) throw new Error(`Cue pressed Send, but Gmail never said “Message sent”. Look in Drafts and Sent in the ${label(identity)} folder before trying again.`);
+    t.composeDone = true;
+    // The Sent folder is the proof that stays.
+    let row = null;
+    if (subject) {
+      const q = `in:sent subject:"${subject.replace(/"/g, '')}"`;
+      const { wc: w2 } = await go(identity, `#search/${encodeURIComponent(q).replace(/%20/g, '+')}`);
+      const end = Date.now() + 20000;
+      while (Date.now() < end && !row) {
+        await sleep(500);
+        const got = await js(w2, ROWS(10)).catch(() => ({ rows: [] }));
+        row = got.rows.find((r) => flat(r.subject).includes(flat(subject))) || null;
+      }
+    }
+    return { text: `Sent from ${box}: ${what}${files}. Gmail said “Message sent”${row ? `, and it is in Sent [${row.id}].` : '; Cue could not find it in Sent yet, so look there before sending it again.'}` };
+  }
 
   const actions = {
     async search({ identity, query, limit }) {
@@ -134,6 +268,60 @@ function makeGmail({ agentTab, wake, label }) {
       const parts = got.messages.map((m) => `— ${m.when} · ${m.from}${m.to ? ' → ' + m.to : ''}\n${m.body.slice(0, 6000)}`);
       return { text: `${label(identity)} Gmail${mailbox(wc) ? ' (' + mailbox(wc) + ')' : ''} · ${got.subject || '(no subject)'} · ${got.messages.length} message${got.messages.length === 1 ? '' : 's'}\n${parts.join('\n\n')}` };
     },
+
+    // A new email, in Gmail's own compose page, with any files attached. A draft unless send:true.
+    async compose({ identity, to, cc, bcc, subject, body, send, vetted }) {
+      const addrs = String(to || '').trim();
+      if (!addrs || !/@/.test(addrs)) throw new Error('Say who the email is to: "to", with one or more addresses. Nothing was written.');
+      const subj = String(subject || '').replace(/\s+/g, ' ').trim();
+      const text = String(body || '').replace(/\r\n?/g, '\n');
+      if (!subj && !text.trim() && !vetted.length) throw new Error('There is nothing to write: give a subject, a body or files. Nothing was written.');
+      const { t, wc } = await go(identity, '#inbox');
+      const u = new URL(wc.getURL());
+      const cm = new URL(u.origin + u.pathname);
+      if (u.searchParams.get('authuser')) cm.searchParams.set('authuser', u.searchParams.get('authuser'));
+      for (const [k, v] of [['view', 'cm'], ['fs', '1'], ['tf', '1'], ['to', addrs], ['cc', cc], ['bcc', bcc], ['su', subj], ['body', text]]) if (v) cm.searchParams.set(k, String(v));
+      t.composeDone = false;
+      await wc.loadURL(cm.toString()).catch(() => {});
+      const end = Date.now() + 30000;
+      while (wc.isLoading() && Date.now() < end) await sleep(150);
+      await wake(t);
+      let state = null;
+      for (let i = 0; i < 60 && !state; i++) { await sleep(400); state = await js(wc, MARK_COMPOSE).catch(() => null); }
+      if (!state) throw new Error(`Gmail's compose window did not open in the ${label(identity)} folder. Nothing was written.`);
+      await js(wc, SET_FIELDS({ to: addrs, subject: subj, body: text }));
+      await sleep(300);
+      state = await js(wc, MARK_COMPOSE);
+      const missing = addrs.split(/[,;\s]+/).filter((x) => /@/.test(x)).filter((x) => !String(state.to).toLowerCase().includes(x.toLowerCase()));
+      if (missing.length) throw new Error(`Gmail's To box does not show ${missing.join(', ')}, so Cue stopped. Nothing was sent; the email is left open in the ${label(identity)} folder's agent Gmail tab.`);
+      if (subj && state.subject.trim() !== subj) throw new Error(`Gmail's subject box says “${state.subject}”, not “${subj}”, so Cue stopped. Nothing was sent.`);
+      if (vetted.length) await attachHere(wc, identity, vetted);
+      return finish(t, wc, identity, { send, subject: subj, to: addrs, vetted, kind: 'compose' });
+    },
+
+    // A reply in the thread, with its Reply button. A draft unless send:true.
+    async reply({ identity, id, body, send, vetted }) {
+      const thread = String(id || '').trim();
+      if (!/^[0-9a-f]{8,}$/i.test(thread)) throw new Error('Pass the [id] that search printed for the email to reply to.');
+      const text = String(body || '').replace(/\r\n?/g, '\n');
+      if (!text.trim() && !vetted.length) throw new Error('There is nothing to reply with: give a body or files. Nothing was written.');
+      let got = { messages: [] }, wc, t;
+      for (const [place, wait] of [['all', 9000], ['inbox', 6000], ['sent', 6000]]) {
+        ({ t, wc } = await go(identity, `#${place}/${thread}`));
+        const end = Date.now() + wait;
+        while (Date.now() < end && !got.messages.length) { await sleep(500); got = await js(wc, THREAD).catch(() => got); }
+        if (got.messages.length) break;
+      }
+      if (!got.messages.length) throw new Error(`Gmail did not open that email (${thread}) in the ${label(identity)} folder. Nothing was written.`);
+      t.composeDone = false;
+      if ((await js(wc, REPLY_BUTTON)) !== 'pressed') throw new Error('Gmail\'s Reply button was not found on that email. Nothing was written.');
+      let state = null;
+      for (let i = 0; i < 30 && !state; i++) { await sleep(300); state = await js(wc, MARK_COMPOSE).catch(() => null); }
+      if (!state) throw new Error('Gmail did not open a reply box on that email. Nothing was written.');
+      await js(wc, SET_FIELDS({ body: text }));
+      if (vetted.length) await attachHere(wc, identity, vetted);
+      return finish(t, wc, identity, { send, subject: got.subject, vetted, kind: 'reply' });
+    },
   };
 
   // One job at a time per folder: each folder has one agent Gmail tab, showing one page.
@@ -142,8 +330,15 @@ function makeGmail({ agentTab, wake, label }) {
     const action = String(a.action || 'search').toLowerCase();
     if (!actions[action]) throw new Error(`Gmail can do: ${Object.keys(actions).join(', ')}.`);
     const identity = who(a.identity || a.who || a.account);
+    // Files are checked before Gmail is touched: a bad path never opens a compose window.
+    let vetted = [];
+    if (a.files !== undefined && a.files !== null && !(Array.isArray(a.files) && !a.files.length)) {
+      if (!['compose', 'reply'].includes(action)) throw new Error('Files go with action "compose" or "reply". Nothing was done.');
+      if (!vetFiles || !attachFiles) throw new Error('This Cue cannot attach files to Gmail. Nothing was written.');
+      vetted = vetFiles(a.files);
+    }
     const prev = queues.get(identity) || Promise.resolve();
-    const next = prev.catch(() => {}).then(() => actions[action]({ ...a, identity }));
+    const next = prev.catch(() => {}).then(() => actions[action]({ ...a, identity, vetted, send: a.send === true }));
     queues.set(identity, next.catch(() => {}));
     return next;
   };

@@ -3,7 +3,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 function install(init) {
-  if (window.__cue) return;
+  if (Object.getOwnPropertyDescriptor(window, init.key)) return;
   const clamp = (v) => Math.max(0, Math.min(1, v));
   let tabVol = init.volume;
   let originalSound = init.originalSound;
@@ -23,6 +23,12 @@ function install(init) {
   });
   const origPlay = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { seen.add(this); apply(this); return origPlay.apply(this, arguments); };
+  // A film that starts by itself (autoplay, or one the page adds later) never calls play(),
+  // and used to sound at full volume whatever the tab was set to. Catch it as it loads and
+  // again as it starts, so the tab's volume is there from the first sound.
+  for (const type of ['loadstart', 'play']) {
+    document.addEventListener(type, (e) => { const el = e.target; if (el instanceof HTMLMediaElement) { seen.add(el); apply(el); } }, true);
+  }
 
   const gains = new Map();
   const origConnect = AudioNode.prototype.connect;
@@ -95,7 +101,7 @@ function install(init) {
   // the message still reaches Cue's alert tray and the sidebar count, it just
   // never jumps in front of what he is doing. Settings holds the list.
   let quiet = !!init.quiet;
-  const report = (title, body) => document.dispatchEvent(new CustomEvent('cue-note', { detail: JSON.stringify({ title: String(title || ''), body: String(body || '') }) }));
+  const report = (title, body) => document.dispatchEvent(new CustomEvent(`${init.key}n`, { detail: JSON.stringify({ title: String(title || ''), body: String(body || '') }) }));
   if (window.Notification) {
     const RealN = window.Notification;
     const Quiet = function Notification(title, opts) {
@@ -204,7 +210,8 @@ function install(init) {
       effective() { return media().map((e) => desc.get.call(e)); },
       setSafe,
   };
-  Object.defineProperty(window, '__cue', {
+  // Under a name made fresh for every page, so nothing a site can look for says "Cue".
+  Object.defineProperty(window, init.key, {
     enumerable: false,
     value: Object.freeze({ call(k, n, ...a) { return k === init.key && api[n] ? api[n](...a) : null; } }),
   });
@@ -249,29 +256,9 @@ function quietYouTube() {
   }, true);
 }
 
-// Google asks the page itself which browser this is before it will let you sign in, and Electron
-// answers "Chromium" where a real Chrome answers "Google Chrome" too. This adds the missing name,
-// so the answer matches the user agent and the headers Cue already send.
-function sayChrome() {
-  const data = navigator.userAgentData;
-  if (!data || data.brands.some((b) => b.brand === 'Google Chrome')) return;
-  const major = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1];
-  if (!major) return;
-  const brands = Object.freeze([...data.brands.map((b) => ({ brand: b.brand, version: b.version })), { brand: 'Google Chrome', version: major }]);
-  const high = data.getHighEntropyValues.bind(data);
-  const patched = {
-    brands,
-    mobile: data.mobile,
-    platform: data.platform,
-    getHighEntropyValues: (hints) => high(hints).then((v) => {
-      if (v.brands) v.brands = brands.map((b) => ({ brand: b.brand, version: b.version }));
-      if (v.fullVersionList) v.fullVersionList = [...v.fullVersionList, { brand: 'Google Chrome', version: v.uaFullVersion || major }];
-      return v;
-    }),
-    toJSON: () => ({ brands: brands.map((b) => ({ brand: b.brand, version: b.version })), mobile: data.mobile, platform: data.platform }),
-  };
-  Object.defineProperty(navigator, 'userAgentData', { configurable: true, get: () => patched });
-}
+// Which browser this is - navigator.userAgent, navigator.userAgentData, the headers - is no longer
+// answered here: src/main/identity.js sets it for the page, its iframes and its workers through
+// Chromium itself, and a preload written from the same file covers service workers.
 
 // The name and the headers were never the whole question. Google's sign-in page also reaches for
 // window.chrome, and in a real Chrome that object carries loadTimes, csi, app and the three sync
@@ -400,16 +387,16 @@ function skipGooglePasskey() {
     // shows the step before. A reload paints it, and then the one link that
     // leads anywhere - "Try another way" - is there to take.
     if (onPasskey()) {
-      if (n('cue-pk-done') >= 3) return;
+      if (n('gpk-d') >= 3) return;
       const link = other();
-      if (link) { bump('cue-pk-done'); press(link); since = Date.now(); return; }
+      if (link) { bump('gpk-d'); press(link); since = Date.now(); return; }
       if (!since) since = Date.now();
-      if (Date.now() - since > 2500 && n('cue-pk-reload') < 2) { bump('cue-pk-reload'); location.reload(); }
+      if (Date.now() - since > 2500 && n('gpk-r') < 2) { bump('gpk-r'); location.reload(); }
       return;
     }
     // Off the passkey step but still showing it: paint the page he is actually on.
     if (since && /Complete sign-in using your passkey|Use your passkey to confirm/i.test(document.body.innerText || '')
-        && Date.now() - since > 2000 && n('cue-pk-after') < 2) { bump('cue-pk-after'); location.reload(); }
+        && Date.now() - since > 2000 && n('gpk-a') < 2) { bump('gpk-a'); location.reload(); }
   };
   setInterval(tick, 500);
   if (document.readyState !== 'loading') tick();
@@ -420,13 +407,12 @@ const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
 contextBridge.executeInMainWorld({ func: noPasskeys });
 contextBridge.executeInMainWorld({ func: skipGooglePasskey });
-contextBridge.executeInMainWorld({ func: sayChrome });
 contextBridge.executeInMainWorld({ func: wearChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
 if (init.ytAds && /^(www|m|music)\.youtube\.com$/.test(location.hostname)) contextBridge.executeInMainWorld({ func: quietYouTube });
 
 const call = (name, ...args) => contextBridge.executeInMainWorld({
-  func: (k, n, a) => (window.__cue ? window.__cue.call(k, n, ...a) : null), args: [KEY, name, args],
+  func: (k, n, a) => (window[k] ? window[k].call(k, n, ...a) : null), args: [KEY, name, args],
 });
 
 ipcRenderer.on('cue:volume', (_e, v) => call('setVolume', v));
@@ -471,7 +457,7 @@ for (const type of ['play', 'pause']) {
 ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
 ipcRenderer.on('cue:quiet', (_e, on) => call('setQuiet', on));
 ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));
-document.addEventListener('cue-note', (e) => {
+document.addEventListener(`${KEY}n`, (e) => {
   try { const n = JSON.parse(e.detail); ipcRenderer.send('cue:note', n); } catch {}
 });
 

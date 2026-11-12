@@ -17,8 +17,12 @@ fs.mkdirSync(OUT, { recursive: true });
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); console.log(`[cue-folders] ${ok ? 'PASS' : 'FAIL'} ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ''}`); };
 
+const { asOwner } = require('./world');
 module.exports = async (c) => {
   await sleep(1200);
+  asOwner(c); // Personal and School, the four apps in the strip, the school's setup
+  c.setSetting('sharedPairs', []); // this test pairs them itself, after proving nothing is shared before
+  await sleep(300);
   const ui = () => c.ui().webContents;
   const js = (code) => ui().executeJavaScript(code, true);
   // Tests run at zero opacity so they never appear over Jason's work, and a
@@ -35,6 +39,12 @@ module.exports = async (c) => {
     if (img) fs.writeFileSync(path.join(OUT, `${name}.png`), img.toPNG());
     return !!img;
   };
+  // A fresh profile starts with one folder. This test is about the owner's two, so it sets them
+  // up the way an existing install has them (test/people.js proves the upgrade itself).
+  if (!c.userFolders().some((f) => f.id === 'school')) c.addFolder({ id: 'school', name: 'School', color: '#C2410C' });
+  Object.assign(c.userFolders().find((f) => f.id === 'personal'), { color: '#2A64CC', picture: 'folder-personal.png' });
+  Object.assign(c.userFolders().find((f) => f.id === 'school'), { picture: 'folder-school.png' });
+  for (const id of ['personal', 'school']) c.command('folder.agents', { id, on: true }); // as on his install
   // Give the pictures the real labels, so the sidebar reads the way his does.
   c.setSetting('label.personal', 'jasonzac@gmail.com');
   c.setSetting('label.school', 'music@nathanielschool.com');
@@ -59,18 +69,25 @@ module.exports = async (c) => {
   const inSchool = await rows();
   check('folder: the sidebar shows the tabs in it, and only those', inSchool === schoolTabs && schoolTabs > 1, { shown: inSchool, inFolder: schoolTabs, allTabs: c.tabs.length });
   const tiles = await js(`[...document.querySelectorAll('#folders .folder')].map((b) => ({ who: b.dataset.who, on: b.classList.contains('on'), name: b.querySelector('.ftext b').textContent, acct: (b.querySelector('.facct')||{}).textContent || '', n: (b.querySelector('.fct')||{}).textContent || '0' }))`);
-  check('folder: three folders, each with a picture and a name', tiles.length === 3, tiles);
+  const want = c.lastState().folders;
+  check('folder: one tile per folder, each with a picture and a name', tiles.length === want.length && tiles.length >= 2 && tiles.every((t) => t.name), { tiles, want });
   check('folder: the open one is marked', tiles.filter((t) => t.on).map((t) => t.who).join() === 'school', tiles.map((t) => `${t.who}${t.on ? '*' : ''}`));
-  check('folder: each says whose account it is', tiles[0].acct === 'jasonzac@gmail.com' && tiles[1].acct === 'music@nathanielschool.com', tiles.map((t) => t.acct));
+  // The open folder says whose account it is. Another folder never shows its account: that is
+  // somebody else's, and the sidebar is not told it.
+  const tileOf = (k) => tiles.find((t) => t.who === k) || {};
+  check('folder: the open one says whose account it is', tileOf('school').acct === 'music@nathanielschool.com', tiles.map((t) => t.acct));
+  check('folder: the other one does not show its account', tileOf('personal').acct === '', tileOf('personal'));
   const count = (k) => String(c.tabs.filter((t) => t.identity === k).length);
-  check('folder: each shows how many tabs live in it', tiles.every((t) => t.n === count(t.who) || (t.n === '' && count(t.who) === '0')), tiles.map((t) => `${t.who}: says ${t.n}, really ${count(t.who)}`));
+  check('folder: each shows how many tabs live in it', tiles.every((t) => t.n === count(t.who) || (t.n === '0' && count(t.who) === '0')), tiles.map((t) => `${t.who}: says ${t.n}, really ${count(t.who)}`));
   const pics = await js(`[...document.querySelectorAll('#folders .fpic')].map((i) => [i.getAttribute('src'), i.naturalWidth])`);
-  check('folder: the pictures actually load', pics.length === 3 && pics.every((p) => p[1] > 0), pics);
+  check('folder: the pictures actually load', pics.length === 2 && pics.every((p) => p[1] > 0), pics);
   check('folder: the sidebar can be photographed', await shot('folders-school'));
 
   // ---- nothing can go quiet: the rest are named, and one click goes there
   const away = await js(`[...document.querySelectorAll('#elsewhere button')].map((b) => b.textContent)`);
-  check('folder: tabs in the other folders are named, not hidden', away.join(' ').includes('Personal 1'), away);
+  // Closing the last tab of a folder leaves a new tab in that same folder, so count rather than assume one.
+  const pHere = c.tabs.filter((t) => t.identity === 'personal' && t.space === c.store.data.space).length;
+  check('folder: tabs in the other folders are named, not hidden', pHere > 0 && away.join(' ').includes(`Personal ${pHere}`), { away, pHere });
 
   // ---- the other folder, at the same time, with its own sign-ins
   c.command('folder', { name: 'personal' }); await sleep(500);
@@ -91,6 +108,10 @@ module.exports = async (c) => {
     const [x, y] = [await got(a, host), await got(b, host)];
     check(`folder: ${host} stays two separate accounts`, x === 'personal' && y === 'school', [x, y]);
   }
+  // Shared only because the two folders are paired, as the owner's are.
+  await put(a, 'unpaired.test', 'personal'); await sleep(400);
+  check('folder: control - nothing is shared before the pair is listed', (await got(b, 'unpaired.test')) === '', await got(b, 'unpaired.test'));
+  c.setSetting('sharedPairs', [['personal', 'school']]); await sleep(300);
   await put(a, 'example.test', 'personal'); await sleep(400);
   check('folder: a site with one account is shared, so you sign in once', (await got(b, 'example.test')) === 'personal', await got(b, 'example.test'));
 
@@ -111,13 +132,14 @@ module.exports = async (c) => {
 
   // ---- moving a tab between folders keeps the page, and never happens quietly
   const before = { url: mine.url, name: mine.name, space: mine.space, order: mine.order };
+  const pBefore = c.tabs.filter((t) => t.identity === 'personal').length;
   await c.moveToFolder({ id: mine.id, to: 'school', confirmed: true });
   await sleep(900);
   const moved = c.byId(mine.id);
   check('move: the tab is in the other folder', moved && moved.identity === 'school', moved && moved.identity);
   check('move: it is the same tab, same page', moved && moved.url === before.url && moved.space === before.space && moved.order === before.order, moved && moved.url);
   check('move: it is built in the new folder\'s cookie jar', moved && moved.view && moved.view.webContents.session === c.sessionFor('school'));
-  check('move: nothing moved on its own', c.tabs.filter((t) => t.identity === 'personal').length === 0);
+  check('move: nothing moved on its own', c.tabs.filter((t) => t.identity === 'personal').length === pBefore - 1, { before: pBefore, now: c.tabs.filter((t) => t.identity === 'personal').length });
 
   // ---- switching folders keeps you on the same job
   // He switches Personal -> School while looking at WhatsApp and expects the

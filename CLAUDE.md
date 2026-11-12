@@ -8,6 +8,18 @@ Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source 
 Cue replaces Helium as Jason's daily browser. Jason does not want Helium or Brave data moved in. Helium is removed only after Cue is proven better
 on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) has not started.
 
+## 0.7.0: Cue is for everyone (12-Nov-2026)
+Read this before anything below; several older sections describe the two-folder Cue.
+- **People's folders.** `store.data.folders` is the list (id, name, colour, picture, email, lock, agents). Any number. Each has its own `persist:<id>` session, so its own Google, WhatsApp, cookies; history, bookmarks, Boards, passwords, downloads, closed tabs and alerts are per folder too. `sessionFor` throws on an unknown folder. Nothing is shared unless the pair is in `settings().sharedPairs` (the owner's Personal+School only). Optional passcode per folder (scrypt); a locked folder is absent from `sendState`. `test/people.js`.
+- **A fresh install is plain.** One folder, one Space, empty number keys, nothing pinned, AI door off, Teacher and Business kits off, a first-run sheet. Everything school-specific lives in `src/main/presets/nsm.json` and applies only when `settings().preset === 'nsm'`. An upgraded install is frozen first (`freezeLegacy`, once) so the owner sees no change. Tests say which world they are in with `test/world.js` (`asOwner` / `asStranger`). `test/first-run.js`.
+- **WhatsApp and Gmail tools** take `who` = any folder name or id from `cue_identities`. "jason"/"nathaniel" still work on the owner's install.
+- **Files for agents** (`src/main/attach.js`). `cue_attach` puts real files on any page through Chromium's DevTools protocol, sharing the debugger connection `wearIdentity` already holds, never detaching it: a file box (hidden, iframe or shadow root), then an intercepted file chooser, then a drag-and-drop of real paths. No native dialog ever opens. Paths only from home, `/tmp` or `/Volumes`; never `~/Library`, keys or Cue's data. `cue_whatsapp send files` and `cue_gmail compose/reply files` use the same path; WhatsApp is "sent" only once the bubbles are seen, Gmail is a draft unless `send:true`. `cue_download` saves into `Downloads/Cue Agents`. Proven on stand-in pages (`test/attach.js`); check the live sites after any WhatsApp or Gmail redesign.
+- **One Chrome identity** for every session, frame, worker and pop-up comes from `src/main/identity.js` (shared workers are the one gap in Electron 44). Google refusals clear that folder's Google state and retry once per 10 minutes.
+- **Vanish** has its own settings room and one shortcut table (`src/main/vanish-keys.js`); main-window keys do nothing while Vanish has focus. "Only one video plays at a time" is off by default.
+- **Tabs.** Ordinary tabs stay (`archiveDays: 0`). "Just for now" tabs (`temp`, Cmd/Ctrl+Alt+T) are never saved. Spaces are `{ name, tint }`. Pinned apps have volume (Option-scroll, level bar, hover control).
+- **Updates on every system** (`updater.js`, `update-core.js`, `settle.js`, `win-swap.ps1`). Mac reads the old labs-downloads feed as before. Windows and Linux read `releases/latest/download/cue-feed.json` on this repo, written and Ed25519-signed by CI with the secret `CUE_FEED_KEY` (public key in `update-core.js`; a backup of the private key is in the print-room Mac's login keychain, item "Cue update feed signing key"). Never change that key: older Windows/Linux copies would stop updating. The tag's release must not be a prerelease.
+- Run tests with their own `CUE_AGENT_PORT` so they never fight the installed Cue for 8813.
+
 ## How to work
 - Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
 - Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.
@@ -177,12 +189,12 @@ and Cue says on screen when an agent reaches into a tab he did not hand it.
    (`.github/workflows/build.yml`; not code-signed, smoke test must pass) AND it is where
    labs.nathanielschool.com reads Cue's version from, so without the tag the Labs page keeps
    showing the old release however the registry reads.
-6. `nsm-publish.sh` does NOT write the in-app update feed. Write `cue-update.json` by hand
-   (version, date, notes, sha256, size, the rolling `downloads/Cue.dmg` url) and
+6. `nsm-publish.sh` does NOT write the Mac update feed. Write `cue-update.json` by hand
+   (version, date, notes, sha256, size, the rolling `downloads/Cue.dmg` url; `size` must be exact, the app checks it) and
    `gh release upload downloads cue-update.json --repo jasonzacmusic/labs-downloads --clobber`.
-7. Check the registry really changed: its "registry.yaml: cue -> x" line can print while the
-   file is untouched. `release.version`, `asset_patterns` and `stable_download_urls` in
-   `product-registry/registry.yaml` all carry the version; commit and push them yourself.
+   The Windows/Linux feed (`cue-feed.json`) is written and signed by CI on the tag; nothing to do by hand.
+7. Check the registry really changed: `release.version` in `product-registry/registry.yaml`. The Windows and
+   Linux links should be the fixed `releases/latest/download/Cue-win-x64.zip` and `Cue-linux-x64.tar.gz`.
 8. Prove it from outside: the Labs page, the three download links and the feed, each with a
    cache-busting `?t=`. The script's own "shows x ✓" line has been wrong.
 
@@ -200,6 +212,7 @@ Helium installed and report the numbers.
 - History keeps the newest 50,000 pages. Logs rotate.
 
 ## Honest limits today
+- A Vanish page asking to share the screen is refused, but on some runs Chromium never calls Cue's handler and the page's request simply never answers (seen 12-Nov-2026, intermittent, same code passes and hangs). `test/vanish-settings.js` gives it 8 seconds and then fails that one check rather than hanging the suite. Cause not found.
 - YouTube's own ads are removed inside the page (`quietYouTube` in `src/preload/tab.js`), on youtube.com only, never Studio. YouTube can change its page and break this. Videos embedded on other sites aren't covered, and neither are sponsored posts inside Instagram or Facebook feeds.
 - Blocked ad scripts can retry in a tight loop, which costs more than the ad. `CUE_TEST=speed` shows it; a tiny exception in `shield.js` stops it, as with CNN.
 - Google will not run its sign-in form inside Cue, as in every browser built this way: it answers "this browser or app may not be secure". Cue says the user agent and the client hints Chrome says, which is not enough, so from 0.5.3 Cue replaces Google's dead end with `cue://signin-blocked` and carries the Google sign-in over from Chrome instead.

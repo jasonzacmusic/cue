@@ -43,6 +43,7 @@ async function realClick(wc, id) {
 }
 
 module.exports = async function run(c) {
+  require('./world').asOwner(c); // the school's own sites are left alone only with its starting setup
   fs.mkdirSync(OUT, { recursive: true });
   const srv = await server();
   const port = srv.address().port;
@@ -105,6 +106,34 @@ module.exports = async function run(c) {
   check('Meta: the pixel on another site is still blocked',
     shield.matches('https://www.facebook.com/tr/?id=1', 'https://www.cnn.com/', 'image')
     && shield.matches('https://connect.facebook.net/en_US/fbevents.js', 'https://shop.example/', 'script'));
+
+  // Google's sign-in on Google's own pages. Measured 12-Nov-2026: these three were blocked on
+  // accounts.google.com / mail.google.com before the exceptions in NEVER_TOUCH.
+  const onAcc = 'https://accounts.google.com/v3/signin/identifier';
+  const onMail = 'https://mail.google.com/mail/u/0/';
+  const googleOwn = [
+    ['https://play.google.com/log?format=json&hasfast=true', onAcc, 'xhr'],
+    ['https://play.google.com/log?format=json&hasfast=true', onMail, 'xhr'],
+    ['https://www.google.com/log?format=json&hasfast=true', onAcc, 'xhr'],
+    ['https://csp.withgoogle.com/csp/gaia-signin', onAcc, 'ping'],
+    // the safety net: never blocked today, and must stay that way
+    ['https://accounts.google.com/v3/signin/_/AccountsSignInUi/data/batchexecute', onAcc, 'xhr'],
+    ['https://www.gstatic.com/_/mss/boq-identity/_/js/k=x', onAcc, 'script'],
+    ['https://lh3.googleusercontent.com/a/x=s96-c', onAcc, 'image'],
+    ['https://www.google.com/recaptcha/enterprise/anchor?k=x', onAcc, 'sub_frame'],
+    ['https://ogs.google.com/widget/app/so', onMail, 'sub_frame'],
+    ['https://accounts.youtube.com/accounts/CheckConnection', onAcc, 'sub_frame'],
+  ];
+  const stuck = googleOwn.filter(([u, src, type]) => shield.matches(u, src, type)).map(([u, src]) => `${u} on ${src}`);
+  check('Google: its sign-in can reach its own addresses on its own pages', stuck.length === 0, stuck);
+  check('WhatsApp: its own files on whatsapp.net are reachable on WhatsApp',
+    !shield.matches('https://static.whatsapp.net/rsrc.php/v4/x.js', 'https://web.whatsapp.com/', 'script')
+    && !shield.matches('https://mmg.whatsapp.net/v/t62/x.enc', 'https://web.whatsapp.com/', 'xhr'));
+  // ...and Google watching from someone else's page is still stopped.
+  check('Google: its logging and tags on another site are still blocked',
+    shield.matches('https://play.google.com/log?format=json&hasfast=true', 'https://shop.example/', 'xhr')
+    && shield.matches('https://www.googletagmanager.com/gtag/js?id=G-1', 'https://shop.example/', 'script')
+    && shield.matches('https://www.google-analytics.com/g/collect?v=2', 'https://shop.example/', 'ping'));
 
   // Allowing one site must not loosen anything anywhere else.
   shield.setAllowed(['example.com']);

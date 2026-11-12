@@ -6,28 +6,46 @@
 // already open and already linked, and it answers in short lines of plain text rather than a
 // page of JSON. Listing the chats costs about as much as this comment.
 //
-// WHICH TAB. Jason keeps WhatsApp pinned in Personal and in School. These tools use those very
-// tabs, in the background, without taking his window. The two accounts never mix: every call
-// names one, and the name is checked against the tab's login before anything is sent.
+// WHICH TAB. Every folder in Cue keeps its own WhatsApp tab, linked to that person's phone. These
+// tools use those very tabs, in the background, without taking anyone's window. Accounts never mix:
+// every call names a folder, by its name or id, and nothing is guessed.
 // The real address, always, outside the test rig: the two variables exist so test/whatsapp.js
 // can point the same code at a stand-in page that copies WhatsApp's markup.
 const WA = () => process.env.CUE_WA_URL || 'https://web.whatsapp.com/';
 const WA_HOST = () => process.env.CUE_WA_HOST || 'web.whatsapp.com';
+const { isMedia, human } = require('./attach');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// "jason" is the personal phone, "nathaniel" is the school's. Spell it any of these ways.
-const WHO = {
-  jason: 'personal', personal: 'personal', me: 'personal', mine: 'personal',
-  nathaniel: 'school', school: 'school', nsm: 'school', work: 'school', business: 'school',
-};
-function whoOf(name) {
-  const key = String(name || '').trim().toLowerCase();
-  const id = WHO[key];
-  if (!id) throw new Error('Say whose WhatsApp: "jason" (his own number) or "nathaniel" (the school\'s).');
-  return id;
+// The two words the owner's agents have always used. They only mean anything while the owner's two
+// folders are still there under their own names: rename School and "nathaniel" stops meaning it,
+// rather than quietly meaning whatever folder is called School now.
+const LEGACY_ALIASES = { jason: { id: 'personal', name: 'personal' }, nathaniel: { id: 'school', name: 'school' } };
+
+// Which folder an agent means. `folders` is [{ id, name }]. By id or by name, any case; never by a
+// part of a name, and never a guess: two folders that could be meant, or none, is an error that
+// lists the names that would work.
+function resolveWho(said, folders, what = 'WhatsApp') {
+  const key = String(said || '').trim().toLowerCase();
+  const names = folders.map((f) => f.name).join(', ') || 'none yet';
+  if (!key) throw new Error(`Say whose ${what}: a folder name or id from cue_identities (${names}).`);
+  const hits = new Set();
+  for (const f of folders) {
+    if (String(f.id).toLowerCase() === key || String(f.name || '').trim().toLowerCase() === key) hits.add(f.id);
+  }
+  // Only while BOTH of the owner's folders are there under their own names.
+  const owners = Object.values(LEGACY_ALIASES).every((x) => folders.some((f) => f.id === x.id && String(f.name || '').trim().toLowerCase() === x.name));
+  const alias = LEGACY_ALIASES[key];
+  if (alias && owners) hits.add(alias.id);
+  if (hits.size === 1) return [...hits][0];
+  if (hits.size > 1) {
+    const which = folders.filter((f) => hits.has(f.id)).map((f) => `${f.name} (${f.id})`).join(', ');
+    throw new Error(`“${said}” could be more than one folder: ${which}. Say the folder's id. Nothing was done.`);
+  }
+  throw new Error(`There is no folder called “${said}”. Say one of: ${names}. Nothing was done.`);
 }
-const label = (identity) => (identity === 'personal' ? 'Jason' : 'Nathaniel');
+// "Asha's", "James'".
+const possessive = (name) => (/s$/i.test(String(name)) ? `${name}'` : `${name}'s`);
 
 // The same comparison the page scripts make (NAME_FN below), for the checks that happen out here.
 // Two spellings of one chat meet once everything but letters and digits is gone: the list keeps
@@ -498,19 +516,109 @@ const OPEN_CHAT_NAME = `(() => {
   return CHAT_NAME();
 })()`;
 
+// ---------------------------------------------------------------- sending files
+// WhatsApp's own way, never a dialog: the attach (+ / paperclip) button opens a menu whose
+// "Document" and "Photos & videos" items each sit on a hidden file box; Cue feeds the files to the
+// right one (attach.js, through Chromium's DevTools protocol), or, where WhatsApp only makes the
+// box when the item is clicked, answers the chooser that click asks for. WhatsApp then shows its
+// preview with a caption box and its own Send button. Every selector below lists alternatives,
+// because WhatsApp renames things: icons by data-icon, buttons by aria-label or title.
+const ATTACH_SEL = ['[data-icon="plus-rounded"]', '[data-icon="plus"]', '[data-icon="attach-menu-plus"]', '[data-icon="clip"]', '[data-icon="attach"]',
+  'button[aria-label="Attach"]', '[role="button"][aria-label="Attach"]', '[title="Attach"]', 'button[aria-label*="attach" i]', '[role="button"][aria-label*="attach" i]'];
+const OPEN_ATTACH = `(() => {
+  ${FIRE}
+  const scope = document.querySelector('#main footer') || document.querySelector('#main');
+  if (!scope) return 'no-chat';
+  for (const s of ${JSON.stringify(ATTACH_SEL)}) {
+    const el = scope.querySelector(s);
+    if (el) { fire(el.closest('button, [role="button"]') || el); return 'clicked'; }
+  }
+  return 'no-button';
+})()`;
+const MENU_OPEN = `[...document.querySelectorAll('li, [role="button"], [role="menuitem"], div[aria-label], span')].some((e) => !e.closest('#side') && /^(document|photos (&|and) videos)$/i.test((e.innerText || e.getAttribute('aria-label') || '').trim()))`;
+// The hidden file boxes, by what they take. Never one in the side panel (a profile picture).
+const INPUTS = {
+  document: ['input[type="file"][accept="*"]:not(#side input)', 'input[type="file"]:not([accept*="image"]):not([accept*="video"]):not(#side input)'],
+  media: ['input[type="file"][accept*="video"]:not(#side input)', 'input[type="file"][accept*="image"]:not(#side input)'],
+};
+const ITEMS = { document: '^\\s*documents?\\s*$', media: '^\\s*(photos (&|and) videos|photos|gallery)\\s*$' };
+// WhatsApp's preview: a Send button that is NOT the conversation's own.
+const SEND_SEL = '[data-icon="send"], [data-icon="wds-ic-send-filled"], [aria-label="Send"], [role="button"][aria-label*="send" i], button[aria-label*="send" i]';
+const PREVIEW = `(() => {
+  const away = (el) => !el.closest('#main footer') && !el.closest('#side');
+  return [...document.querySelectorAll(${JSON.stringify(SEND_SEL)})].some(away);
+})()`;
+const CAPTION = (text) => `(async () => {
+  const want = ${JSON.stringify(text)};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const plain = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+  const boxes = [...document.querySelectorAll('div[contenteditable="true"]')].filter((b) => !b.closest('#main footer') && !b.closest('#side'));
+  const box = boxes.find((b) => /caption|message/i.test((b.getAttribute('aria-label') || '') + (b.getAttribute('aria-placeholder') || '') + (b.getAttribute('data-placeholder') || ''))) || boxes[boxes.length - 1];
+  if (!box) return 'no-box';
+  box.focus();
+  const dt = new DataTransfer(); dt.setData('text/plain', want);
+  box.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  await sleep(150);
+  if (plain(box.innerText || '') === plain(want)) return 'ok';
+  document.execCommand('selectAll', false, null); document.execCommand('insertText', false, want);
+  await sleep(150);
+  return plain(box.innerText || '') === plain(want) ? 'ok' : 'mangled';
+})()`;
+const SEND_PREVIEW = `(() => {
+  ${FIRE}
+  const el = [...document.querySelectorAll(${JSON.stringify(SEND_SEL)})].find((e) => !e.closest('#main footer') && !e.closest('#side'));
+  if (!el) return 'no-button';
+  fire(el.closest('button, [role="button"]') || el);
+  return 'pressed';
+})()`;
+// The outgoing bubbles in the open chat: every letter and digit of each (titles too, where a long
+// file name is cut short on screen), whether it holds a picture or video, and whether WhatsApp
+// still shows the clock on it. Outgoing is told the way READ tells it.
+const BUBBLES = `(() => {
+  const rows = [...document.querySelectorAll('#main [role="row"]')];
+  return rows.map((n) => {
+    const icons = [...n.querySelectorAll('[data-icon]')].map((e) => e.getAttribute('data-icon') || '');
+    const labels = [...n.querySelectorAll('[aria-label]')].map((e) => (e.getAttribute('aria-label') || '').trim());
+    const mine = !!n.querySelector('.message-out') || labels.some((l) => /^you:/i.test(l)) || labels.some((l) => /^(read|delivered|sent|pending)$/i.test(l))
+      || icons.some((i) => i === 'tail-out' || /^msg-(check|dblcheck|time)/.test(i));
+    if (!mine) return null;
+    const titles = [...n.querySelectorAll('[title]')].map((e) => e.getAttribute('title') || '').join(' ');
+    const flat = ((n.innerText || '') + ' ' + titles).toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+    const media = !!n.querySelector('video, img[src^="blob:"], img[src^="data:image"], [data-icon="media-play"], [data-icon="media-gif"]');
+    const pending = icons.some((i) => /^msg-time/.test(i)) || labels.some((l) => /^pending$/i.test(l));
+    return { flat, media, pending };
+  }).filter(Boolean);
+})()`;
+
 // ---------------------------------------------------------------- the engine
-function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, frontId, wake }) {
+// `who(said)` turns what the agent said into a folder id, or throws (see resolveWho, and main.js,
+// which also refuses a locked folder or one the person has not opened to agents). `nameOf(id)` is
+// the folder's own name, which is what every answer says.
+function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, frontId, wake, who, nameOf, vetFiles, attachFiles }) {
   // Never the tab a class is looking at, and never a private one.
   const onAir = () => (typeof programId === 'function' ? programId() : programId);
-  // The tab he is looking at right now, if any. Cue never reloads that one under him.
+  // The tab the person is looking at right now, if any. Cue never reloads that one under them.
   const inFront = (t) => typeof frontId === 'function' && frontId() === t.id;
-  const tabFor = (identity) => tabs.find((t) => t.identity === identity && hostOf(t.url) === WA_HOST()
-    && !t.private && t.id !== onAir());
+  const label = (identity) => (typeof nameOf === 'function' && nameOf(identity)) || identity;
+  const whose = (identity) => `${possessive(label(identity))} folder`;
+  // A folder's WhatsApp is ONE tab: the one its phone is linked to. If that tab is private or on
+  // air, agents may not use it - and opening a second WhatsApp beside it is no way round that,
+  // because WhatsApp then shuts one of the two ("WhatsApp is open in another window").
+  const tabFor = (identity) => {
+    const all = tabs.filter((t) => t.identity === identity && hostOf(t.url) === WA_HOST());
+    const ok = all.find((t) => !t.private && t.id !== onAir());
+    if (ok) return ok;
+    if (all.length) {
+      const why = all.some((t) => t.id === onAir()) ? 'on air' : 'marked private';
+      throw new Error(`The WhatsApp tab in ${whose(identity)} is ${why}, so agents may not use it, and Cue will not open a second WhatsApp beside it. Nothing was done.`);
+    }
+    return null;
+  };
 
   // Everything here works in the tab's page and nothing else: no activate(), no focus(), no window
-  // raised. That is what lets Claude work in the school's WhatsApp while Jason types in his own
-  // (or the other way round): each account is its own tab with its own page, and the only action
-  // allowed to bring a tab forward is status with show:true, for the one-time scan.
+  // raised. That is what lets an agent work in one folder's WhatsApp while the person types in
+  // another's: each account is its own tab with its own page, and the only action allowed to bring
+  // a tab forward is status with show:true, for the one-time scan.
   async function wcFor(identity) {
     let t = tabFor(identity);
     if (!t) t = openTab({ url: WA(), identity, background: true, agent: true });
@@ -526,7 +634,6 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
   }
 
   const js = (wc, script) => wc.executeJavaScript(script, true);
-  let sendPressed = false;
 
   async function ready(identity) {
     const { tab, wc } = await wcFor(identity);
@@ -536,19 +643,19 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       while (Date.now() < end && state !== 'ready' && state !== 'unlinked') { await sleep(500); state = await js(wc, LINKED); }
     }
     if (state !== 'ready') {
-      throw new Error(`${label(identity)}'s WhatsApp is not linked in Cue yet. Jason opens the pinned WhatsApp tab in ${identity === 'personal' ? 'Personal' : 'School'} once and scans the code with that phone; after that it stays linked and nobody has to touch it again.`);
+      throw new Error(`WhatsApp in ${whose(identity)} is not linked yet. The person opens the WhatsApp tab in that folder once and scans the code with their phone; after that it stays linked and nobody has to touch it again.`);
     }
     return { tab, wc };
   }
 
   const refuseChoices = (want, identity, choices) => {
-    throw new Error(`More than one chat on ${label(identity)}'s WhatsApp could be “${want}”: ${choices.join(', ')}. Say the full name. Nothing was opened.`);
+    throw new Error(`More than one chat on the WhatsApp in ${whose(identity)} could be “${want}”: ${choices.join(', ')}. Say the full name. Nothing was opened.`);
   };
 
   // A number with no chat yet: WhatsApp's own /send?phone= address opens it. That reloads the tab,
   // so it is never done to the tab he is looking at.
   async function openByNumber(tab, wc, want, identity) {
-    if (inFront(tab)) throw new Error(`There is no chat with ${want} on ${label(identity)}'s WhatsApp yet, and opening one means reloading the WhatsApp tab Jason has in front of him. Nothing was opened.`);
+    if (inFront(tab)) throw new Error(`There is no chat with ${want} on the WhatsApp in ${whose(identity)} yet, and opening one means reloading the WhatsApp tab you have in front of you. Nothing was opened.`);
     const url = new URL(`send?phone=${digitsOf(want)}`, WA()).toString();
     await wc.loadURL(url).catch(() => {});
     const end = Date.now() + 30000;
@@ -594,7 +701,7 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       // Say what IS there, by name, so the mistake is obvious: a typo, or the wrong account.
       const near = [...new Set([...(viaSearch.offered || []), ...((walked && walked.offered) || [])])].slice(0, 5);
       const total = walked ? walked.total : 0;
-      throw new Error(`No chat called “${want}” on ${label(identity)}'s WhatsApp${total ? `, among ${total} chat${total === 1 ? '' : 's'}` : ''}.${near.length ? ` Nearest: ${near.join(', ')}.` : ''}`);
+      throw new Error(`No chat called “${want}” on the WhatsApp in ${whose(identity)}${total ? `, among ${total} chat${total === 1 ? '' : 's'}` : ''}.${near.length ? ` Nearest: ${near.join(', ')}.` : ''}`);
     }
     if (hit.mismatch) {
       throw new Error(`Cue clicked “${hit.name}” but WhatsApp opened “${hit.opened || 'nothing'}” instead. Nothing was read or sent.`);
@@ -611,7 +718,82 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
   // wrong-chat read fails loudly; it is never returned as if it were the right one.
   async function stillIn(wc, name, identity) {
     const now = await js(wc, OPEN_CHAT_NAME);
-    if (!sameChat(now, name)) throw new Error(`The chat open on ${label(identity)}'s WhatsApp is “${now || 'nothing'}”, not “${name}”. Nothing was read or sent.`);
+    if (!sameChat(now, name)) throw new Error(`The chat open on the WhatsApp in ${whose(identity)} is “${now || 'nothing'}”, not “${name}”. Nothing was read or sent.`);
+  }
+
+  // The header is checked while WhatsApp's preview covers the chat too, but there the name may not
+  // be drawn at all; only a DIFFERENT chat's name is a failure then.
+  async function notMoved(wc, name, identity) {
+    const now = await js(wc, OPEN_CHAT_NAME);
+    if (now && !sameChat(now, name)) throw new Error(`The chat open on the WhatsApp in ${whose(identity)} changed to “${now}” while Cue was sending files to “${name}”. Nothing more was sent; read both chats.`);
+  }
+  const ESCAPE = `(() => { for (const t of ['keydown', 'keyup']) (document.activeElement || document.body).dispatchEvent(new KeyboardEvent(t, { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true })); return true; })()`;
+
+  // Files to a chat: one round per kind (documents, then photos and videos), each through
+  // WhatsApp's own attach menu and preview, and "sent" only once the bubbles are seen.
+  async function sendFiles({ tab, wc, identity, chat, job, vetted, as, caption }) {
+    const kindOf = (f) => (as === 'document' || as === 'media' ? as : isMedia(f.path) ? 'media' : 'document');
+    const groups = ['document', 'media'].map((k) => [k, vetted.filter((f) => kindOf(f) === k)]).filter(([, l]) => l.length);
+    const words = String(caption || '').replace(/\r\n?/g, '\n').trim();
+    const name = await openChat(tab, wc, chat, identity);
+    const draft = await js(wc, `((document.querySelector('#main footer div[contenteditable="true"]') || {}).innerText || '').trim()`).catch(() => '');
+    if (draft) throw new Error(`There are unsent words already in the box for ${name}. Cue left them alone and sent nothing.`);
+    const flatOf = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+    // A long name is cut short in the bubble, so its first 24 letters and digits are enough there.
+    const hits = (bubbles, f) => { const k = flatOf(f.name); return bubbles.filter((b) => b.flat.includes(k) || (k.length > 24 && b.flat.includes(k.slice(0, 24)))).length; };
+    const before = await js(wc, BUBBLES);
+    const docBefore = new Map(vetted.map((f) => [f.name, hits(before, f)]));
+    const mediaBefore = before.filter((b) => b.media).length;
+    let captioned = !words;
+    for (const [kind, list] of groups) {
+      await stillIn(wc, name, identity);
+      const opened = await js(wc, OPEN_ATTACH);
+      if (opened !== 'clicked') throw new Error(`WhatsApp's attach button was not found in the chat with ${name}, so nothing was sent.`);
+      for (let i = 0; i < 15 && !(await js(wc, MENU_OPEN)); i++) await sleep(150);
+      let fed = null; let why = '';
+      for (const selector of INPUTS[kind]) {
+        try { fed = await attachFiles(wc, list, { selector, drop: false }); break; } catch (e) { why = e.message; }
+      }
+      if (!fed) {
+        try { fed = await attachFiles(wc, list, { controlText: ITEMS[kind], controlsOnly: true, drop: false, chooserMs: 4000 }); } catch (e) { why = e.message; }
+      }
+      if (!fed) {
+        await js(wc, ESCAPE).catch(() => {});
+        throw new Error(`WhatsApp's ${kind === 'media' ? '“Photos & videos”' : '“Document”'} would not take the files (${why.replace(/\s*Nothing was attached\.$/, '')}). Nothing was sent to ${name}.`);
+      }
+      let preview = false;
+      for (let i = 0; i < 40 && !preview; i++) { await sleep(250); preview = await js(wc, PREVIEW); }
+      if (!preview) throw new Error(`WhatsApp took the files but never showed its preview with a Send button, so nothing was sent to ${name}. Look at that chat in the WhatsApp tab.`);
+      if (!captioned) {
+        const said = await js(wc, CAPTION(words));
+        if (said !== 'ok') { await js(wc, ESCAPE).catch(() => {}); throw new Error(`WhatsApp's caption box would not take the words, so nothing was sent to ${name}.`); }
+        captioned = true;
+      }
+      await notMoved(wc, name, identity);
+      // Per job: a retry of this job must never press Send twice.
+      if (job) job.sendPressed = true;
+      if ((await js(wc, SEND_PREVIEW)) !== 'pressed') throw new Error(`WhatsApp's Send button in the preview went away before Cue could press it. Read the chat with ${name} before trying again.`);
+      for (let i = 0; i < 40 && (await js(wc, PREVIEW).catch(() => false)); i++) await sleep(250);
+    }
+    const docs = vetted.filter((f) => kindOf(f) === 'document');
+    const media = vetted.filter((f) => kindOf(f) === 'media');
+    let seen = null;
+    const end = Date.now() + 60000;
+    while (Date.now() < end && !seen) {
+      await sleep(500);
+      const now = await js(wc, BUBBLES).catch(() => []);
+      const docsIn = docs.every((f) => hits(now, f) > docBefore.get(f.name));
+      const mediaNew = now.filter((b) => b.media).length - mediaBefore;
+      // Four or more photos sent together come back as one album bubble.
+      const mediaIn = !media.length || mediaNew >= (media.length >= 4 ? 1 : media.length);
+      if (docsIn && mediaIn) seen = { pending: now.slice(-vetted.length).filter((b) => b.pending).length };
+    }
+    const names = vetted.map((f) => f.name).join(', ');
+    if (!seen) throw new Error(`Cue pressed Send to ${name} but could not see ${vetted.length === 1 ? 'the file' : 'the files'} arrive in the chat (${names}). Read that chat before sending again.`);
+    const lines = vetted.map((f) => `- ${f.name} · ${human(f.size)} · as ${kindOf(f) === 'media' ? (/^video\//.test(f.type) ? 'a video' : 'a photo') : 'a document'}`);
+    return { text: [`Sent on the WhatsApp in ${whose(identity)} to ${name}: ${vetted.length} file${vetted.length === 1 ? '' : 's'}${words ? `, with the caption “${words.replace(/\s+/g, ' ').slice(0, 60)}${words.length > 60 ? '…' : ''}”` : ''}.`, ...lines,
+      seen.pending ? `WhatsApp still shows the clock on ${seen.pending} of them: still uploading.` : '',
+      media.length ? 'Photos and videos are confirmed by their new bubbles (WhatsApp shows no file name on them); documents by name.' : ''].filter(Boolean).join('\n') };
   }
 
   // ---- the five things anyone actually wants
@@ -639,7 +821,8 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       return { text: `${label(identity)} · ${name}\n${lines.join('\n')}` };
     },
 
-    async send({ tab, wc, identity, chat, message }) {
+    async send({ tab, wc, identity, chat, message, job, vetted, caption, as }) {
+      if (vetted && vetted.length) return sendFiles({ tab, wc, identity, chat, job, vetted, as, caption: caption !== undefined && caption !== null ? caption : message });
       const body = String(message || '').replace(/\r\n?/g, '\n').trim();
       if (!body) throw new Error('There is nothing to send.');
       const name = await openChat(tab, wc, chat, identity);
@@ -663,7 +846,9 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       await sleep(120);
       // The last look before the one step that cannot be undone.
       await stillIn(wc, name, identity);
-      sendPressed = true;
+      // Per job, never one flag for every account: Send pressed in one folder must not decide a
+      // retry in another, and a retry here must never press Send twice.
+      if (job) job.sendPressed = true;
       const how = await js(wc, SEND_IT);
       if (how === 'no-box') throw new Error('WhatsApp\'s message box disappeared before Cue could send.');
       const short = body.replace(/\s+/g, ' ').slice(0, 60);
@@ -671,7 +856,7 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       while (Date.now() < end) {
         await sleep(400);
         if ((await landed()) > before) {
-          return { text: `Sent on ${label(identity)}'s WhatsApp to ${name}: ${short}${body.length > 60 ? '…' : ''}` };
+          return { text: `Sent on the WhatsApp in ${whose(identity)} to ${name}: ${short}${body.length > 60 ? '…' : ''}` };
         }
       }
       throw new Error(`Cue pressed Send to ${name} but could not see the message arrive. Read that chat before sending it again.`);
@@ -713,17 +898,17 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
       const said = state === 'ready' ? 'linked and ready'
         : state === 'unlinked' ? 'not linked — scan the code in that tab once with the phone'
         : 'still loading';
-      return { text: `${label(identity)}'s WhatsApp: ${said}.`, state, tabId: tab.id };
+      return { text: `WhatsApp in ${whose(identity)}: ${said}.`, state, tabId: tab.id };
     },
   };
 
-  async function run(action, a, identity) {
+  async function run(action, a, identity, job) {
     // status has to answer for an account that is not linked, so it skips the ready() check.
     const { tab, wc } = action === 'status' ? await wcFor(identity) : await ready(identity);
     // A search left in the box (his, or an earlier job's) hides most of the list from every action.
     if (action !== 'status' && !inFront(tab)) await js(wc, CLEAR_SEARCH).catch(() => {});
     try {
-      return await actions[action]({ ...a, identity, tab, wc });
+      return await actions[action]({ ...a, identity, tab, wc, job });
     } finally {
       if (action !== 'status') await js(wc, CLEAR_SEARCH).catch(() => {});
     }
@@ -745,20 +930,33 @@ function makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId, 
   return async function whatsapp(a = {}) {
     const action = String(a.action || 'chats').toLowerCase();
     if (!actions[action]) throw new Error(`WhatsApp can do: ${Object.keys(actions).join(', ')}.`);
-    const identity = whoOf(a.who || a.account || a.identity);
+    const identity = who(a.who || a.account || a.identity);
+    // Files are checked before WhatsApp is touched: a bad path never opens a chat.
+    let vetted = null;
+    const hasFiles = a.files !== undefined && a.files !== null && !(Array.isArray(a.files) && !a.files.length);
+    if (hasFiles && action !== 'send') throw new Error('Files go with action "send". Nothing was done.');
+    if (hasFiles) {
+      if (!vetFiles || !attachFiles) throw new Error('This Cue cannot attach files to WhatsApp. Nothing was sent.');
+      vetted = vetFiles(a.files);
+      if (a.as === 'media') {
+        const odd = vetted.filter((f) => !isMedia(f.path)).map((f) => f.name);
+        if (odd.length) throw new Error(`Only photos and videos can go as media; ${odd.join(', ')} can only go as a document. Leave out "as", or say as:"document". Nothing was sent.`);
+      }
+      a = { ...a, vetted };
+    }
     return inLine(identity, async () => {
       // A page that died under us ("Object has been destroyed") gets one fresh try - except a send
       // that already pressed Send, which is never repeated, so nobody gets the same message twice.
-      sendPressed = false;
+      const job = { sendPressed: false };
       try {
-        return await run(action, a, identity);
+        return await run(action, a, identity, job);
       } catch (e) {
-        if (!/destroyed/i.test(String(e && e.message)) || sendPressed) throw e;
+        if (!/destroyed/i.test(String(e && e.message)) || job.sendPressed) throw e;
         await sleep(800);
-        return run(action, a, identity);
+        return run(action, a, identity, job);
       }
     });
   };
 }
 
-module.exports = { makeWhatsApp, WHO, WA_HOST, sameChat };
+module.exports = { makeWhatsApp, resolveWho, possessive, LEGACY_ALIASES, WA_HOST, sameChat };

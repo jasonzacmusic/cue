@@ -4,9 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const page = (n) => `data:text/html,<title>Pane ${n}</title>`;
+const { asOwner } = require('./world');
 module.exports = async (c) => {
   await sleep(500);
   if (process.env.CUE_PHASE === '1') {
+    asOwner(c); // his Spaces (Teach, Create) and folders; phase 2 reopens the same profile
     ['A', 'B', 'C'].forEach((n) => c.openTab({ url: page(n), identity: 'personal' }));
     c.setSplit('cols3');
     c.switchSpace('Create');

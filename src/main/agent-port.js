@@ -6,6 +6,7 @@
 const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
+const path = require('path');
 
 function loadToken(file) {
   try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); if (j.token) return j.token; } catch {}
@@ -55,9 +56,9 @@ async function startAgentPort({ port, tokenFile, api }) {
 
   const need = (t, act) => {
     if (!t) throw new Error('No tab with that id.');
-    if (!api.canRead(t)) throw new Error('That tab is private or in a Vanish window. Agents cannot use it.');
-    if (act && api.paused && api.paused()) throw new Error('Jason has paused AI agents in Cue. He is working in these tabs himself. Stop here and say so — do not try another way in. He resumes them with the AI row in the sidebar.');
-    if (act && !api.canAct(t)) throw new Error('Agents can only act in tabs they opened, or tabs marked "Let AI agents use this tab". Open your own tab with the open tool (it can use the Personal or School logins).');
+    if (!api.canRead(t)) throw new Error('That tab is private, in a Vanish window, or in a folder that is locked or not open to AI agents. Agents cannot use it.');
+    if (act && api.paused && api.paused()) throw new Error('AI agents are paused in Cue. The person is working in these tabs themselves. Stop here and say so — do not try another way in. They resume agents with the AI row in the sidebar.');
+    if (act && !api.canAct(t)) throw new Error('Agents can only act in tabs they opened, or tabs marked "Let AI agents use this tab". Open your own tab with the open tool (it can use the sign-ins of any folder cue_identities lists).');
     api.ensure(t);
     return t.view.webContents;
   };
@@ -86,7 +87,16 @@ async function startAgentPort({ port, tokenFile, api }) {
       const max = Math.min(Number(a.maxChars) || 20000, 200000);
       return { id: t.id, title: wc.getTitle(), url: wc.getURL(), text: text.slice(0, max), truncated: text.length > max };
     },
-    snapshot: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle(), elements: await wc.executeJavaScript(SNAPSHOT_JS, true) }; },
+    snapshot: async (a) => {
+      const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc);
+      const out = { url: wc.getURL(), title: wc.getTitle(), elements: await wc.executeJavaScript(SNAPSHOT_JS, true) };
+      // Where files can go (hidden boxes, iframes and shadow roots included), for cue_attach.
+      try {
+        const f = api.fileTargets ? await api.fileTargets(t) : null;
+        if (f && (f.inputs.length || f.openers.length || f.dropZones.length)) out.files = { ...f, how: 'Put files here with cue_attach: files:[full paths], and selector if there is more than one place.' };
+      } catch {}
+      return out;
+    },
     screenshot: async (a) => { const t = api.get(a.id); need(t, false); const img = await api.capture(t); if (!img) throw new Error('Could not take a picture of that tab yet. Try again in a moment.'); const out = a.width ? img.resize({ width: Number(a.width) }) : img; return { mime: 'image/png', base64: out.toPNG().toString('base64') }; },
     click: async (a) => {
       const t = api.get(a.id); const wc = await needAwake(t, true);
@@ -141,6 +151,22 @@ async function startAgentPort({ port, tokenFile, api }) {
     // One call, one answer in plain lines. No snapshot, no picture, no tab juggling.
     whatsapp: async (a) => api.whatsapp(a),
     gmail: async (a) => api.gmail(a),
+    // Real files from this computer onto a page, with no dialog: a file box (hidden, in an iframe
+    // or a shadow root), the chooser a button opens, or a drop zone. The files are checked first.
+    attach: async (a) => {
+      const files = api.vetFiles(a.files);
+      let t;
+      if (a.id !== undefined || a.tab !== undefined) t = api.get(a.id ?? a.tab);
+      else if (a.url) { t = api.open({ url: a.url, identity: a.identity, background: true }); await waitLoad(t.view.webContents); }
+      else throw new Error('Say which tab: id (from cue_tabs or cue_open), or identity and url to open the page first. Nothing was attached.');
+      const wc = await needAwake(t, true);
+      await waitLoad(wc);
+      const r = await api.attachFiles(t, files, { selector: a.selector || null, submit: !!a.submit });
+      const said = api.sayAttached(r, files);
+      return { text: `${said.text}\n(tab ${t.id})`, confirmed: said.confirmed };
+    },
+    // Save a file into Downloads/Cue Agents with no save dialog; the answer is its full path.
+    download: async (a) => { const t = api.get(a.id ?? a.tab); await needAwake(t, true); return api.download(t, a); },
     // ---- the teaching rig (Stream Deck pedal, OBS). These change what a
     // CLASS is looking at, so they are the rig's tools, not an AI agent's:
     // never call them to get a page in front of yourself.
@@ -169,7 +195,7 @@ async function startAgentPort({ port, tokenFile, api }) {
     // as Cue is open.
     if (!api.doorOpen()) {
       api.knock(String(req.headers['x-agent'] || 'An AI tool').slice(0, 40));
-      return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays on until he switches it off.' });
+      return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays on until the person switches it off.' });
     }
     const m = req.url.match(/^\/tool\/(\w+)$/);
     if (!m || req.method !== 'POST' || !tools[m[1]]) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
@@ -178,12 +204,16 @@ async function startAgentPort({ port, tokenFile, api }) {
     req.on('end', async () => {
       let args = {}; try { args = body ? JSON.parse(body) : {}; } catch { return send(400, { error: 'Body must be JSON.' }); }
       const agent = String(req.headers['x-agent'] || 'AI agent').slice(0, 40);
+      // The NAMES of any files an agent hands a page go in the log, never what is in them.
+      const list = Array.isArray(args.files) ? args.files : typeof args.files === 'string' ? [args.files] : [];
+      const files = list.length ? { files: list.slice(0, 25).map((f) => path.basename(String(f))) } : {};
+      const tab = args.id ?? (typeof args.tab === 'number' || /^\d+$/.test(String(args.tab ?? '')) ? args.tab : undefined);
       try {
         const out = await tools[m[1]](args);
-        api.log({ agent, tool: m[1], tab: args.id, url: args.url, ok: true });
+        api.log({ agent, tool: m[1], tab, url: args.url, ...files, ok: true });
         send(200, out);
       } catch (e) {
-        api.log({ agent, tool: m[1], tab: args.id, ok: false, error: e.message });
+        api.log({ agent, tool: m[1], tab, ...files, ok: false, error: e.message });
         send(400, { error: e.message });
       }
     });

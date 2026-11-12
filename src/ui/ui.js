@@ -16,6 +16,8 @@ function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function hostOf(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } }
 function ringColor(t) { return t.identity === 'vanish' ? 'var(--muted)' : (S.identities[t.identity] || {}).color; }
+// The people's folders that are open to pick from right now (not the AI agent lane, not locked ones).
+const personFolders = () => (S.folders || []).filter((k) => k !== 'agent' && S.identities[k] && !S.identities[k].locked);
 
 const ICON = (d) => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 const ICONS = {
@@ -194,6 +196,8 @@ function render() {
   if (!S) return;
   document.body.dataset.live = S.live ? '1' : '';
   document.body.dataset.space = S.space;
+  // The sidebar's colour is the Space's own tint (Settings > Spaces), never read off its name.
+  document.body.dataset.tint = ((S.spaceList || []).find((x) => x.name === S.space) || {}).tint || 'rose';
   applySide();
   lastSpace = S.space;
   if (!editingName) { renderSpaces(); renderFolders(); renderAI(); renderPins(); renderGroups(); renderElsewhere(); }
@@ -206,7 +210,8 @@ function render() {
   renderExtras();
   const a = S.agent;
   const portBusy = a.last && a.last.tool === 'port';
-  $('#agentline').innerHTML = portBusy ? 'AI agents: another Cue has the door'
+  $('#agentline').innerHTML = !a.listening && !a.on ? ''
+    : portBusy ? 'AI agents: another Cue has the door'
     : a.last ? `<b>${esc(a.last.agent)}</b> · ${esc(a.last.tool)}${a.last.ok ? '' : ' (stopped)'}`
     : (a.on ? 'AI agents ready' : 'AI agents off');
 }
@@ -288,30 +293,43 @@ function renderGutters() {
 // Clicking a folder opens it: the sidebar below shows that folder's tabs, the
 // next new tab is born in it, and it is signed in to its own Gmail, Instagram,
 // YouTube and WhatsApp — all three at once, nothing to toggle.
+// A folder's face: its picture, or the first letter of its name on its own colour.
+function folderFace(v) {
+  const face = el('span', 'fface');
+  const letter = () => face.prepend(el('i', 'fltr', esc((v.name || '?')[0].toUpperCase())));
+  if (v.picture) {
+    const img = el('img', 'fpic'); img.src = `../../assets/logos/${v.picture}`; img.alt = '';
+    img.onerror = () => { img.remove(); letter(); };
+    face.append(img);
+  } else letter();
+  return face;
+}
+const LOCK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
+
 function renderFolders() {
   const box = $('#folders'); box.innerHTML = '';
   for (const id of (S.pickFolders || S.folders)) {
     const v = S.identities[id]; if (!v) continue;
     const mine = id === S.folder;
-    const all = S.tabs.filter((t) => t.identity === id).length;
-    const b = el('button', `folder${mine ? ' on' : ''}`);
+    const info = (S.folderInfo || {})[id] || {};
+    // Another folder is a name, a colour and counts. A locked one is not even counted.
+    const all = info.tabs || 0;
+    const b = el('button', `folder${mine ? ' on' : ''}${v.locked ? ' locked' : ''}`);
     b.style.setProperty('--c', v.color);
     b.dataset.who = id;
     b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', mine);
 
-    const face = el('span', 'fface');
-    const img = el('img', 'fpic'); img.src = `../../assets/logos/${v.picture}`; img.alt = '';
-    img.onerror = () => { img.remove(); face.prepend(el('i', 'fltr', esc(v.name[0]))); };
-    face.append(img);
+    const face = folderFace(v);
     const txt = el('span', 'ftext');
     const top = el('span', 'frow');
     top.append(el('b', '', esc(v.name)));
-    if (all) top.append(el('span', 'fct', String(all)));
+    if (v.locked) top.append(el('span', 'flock', LOCK));
+    else if (all) top.append(el('span', 'fct', String(all)));
     txt.append(top);
-    // Whose it is, in words, under the name. No one should have to remember
-    // that "School" means music@nathanielschool.com. It wraps rather than
-    // cutting off mid-word: half an address tells you nothing.
-    const acct = S.labels[id] || v.about || '';
+    // Whose it is, in words, under the name - for the folder that is open. No one should have
+    // to remember that "School" means music@nathanielschool.com. Another person's folder never
+    // shows the account it holds.
+    const acct = mine ? (S.labels[id] || v.about || '') : '';
     if (acct) txt.append(el('span', 'facct', esc(acct)));
     // The accounts this folder is holding, one mark each, read off the pages
     // themselves. They stay on the folder after the tab is closed, so you can
@@ -335,21 +353,40 @@ function renderFolders() {
     face.append(txt);
     b.append(face);
 
-    const held = live.map(([, x]) => `${x.label}: ${x.who}`).join(' \u00b7 ');
-    tip(b, `${v.name}${acct ? ` \u00b7 ${acct}` : ''}`,
-      `${held ? `${held}\n` : ''}${mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
-        : `${all} tab${all === 1 ? '' : 's'} in here. Click to open this folder \u2014 new tabs go in it and it stays signed in as ${acct || v.name}.`}`);
+    const held = live.map(([, x]) => `${x.label}: ${x.who}`).join(' · ');
+    const unread = info.unread ? ` · ${info.unread} unread` : '';
+    tip(b, `${v.name}${acct ? ` · ${acct}` : ''}`,
+      v.locked ? 'Locked. Click to type its passcode.'
+        : `${held ? `${held}\n` : ''}${mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
+          : `${all} tab${all === 1 ? '' : 's'} in here${unread}. Click to open this folder — new tabs go in it and it stays signed in as its own account.`}${id !== 'agent' ? '\nRight-click to lock it now.' : ''}`);
     b.onclick = () => send('folder', { name: id });
+    if (id !== 'agent') b.oncontextmenu = (e) => { e.preventDefault(); send('folder-menu', { id }); };
     box.append(b);
   }
+  const foot = el('div', 'fbottom');
+  // A new person gets a folder of their own: their own sign-ins, WhatsApp, Google, tabs,
+  // history and passwords. Click, type a name, press Enter.
+  const add = el('button', 'addperson', `${ICONS.plus}<span class="ap">Add a person</span>`);
+  tip(add, 'Add a person', 'A private folder of their own: own sign-ins, WhatsApp, Google, tabs, history and passwords');
+  add.onclick = () => {
+    if (add.querySelector('input')) return;
+    inlineEdit({
+      hide: add.querySelector('.ap'), value: '', cls: 'rename newperson', max: 40,
+      place: (inp) => { inp.placeholder = 'Their name'; add.append(inp); },
+      save: (name) => { if (name) send('folder.add', { name }); },
+    });
+  };
+  foot.append(add);
   // Vanish is not a folder: it keeps nothing, so it holds no tabs and stays
-  // signed in to nothing. It is a window you open, so it stays a button.
+  // signed in to nothing. It is a window you open, so it stays a button - a
+  // dashed circle, where adding a person is a plain labelled button beside it.
   const van = el('button', 'vanish');
   van.style.setProperty('--c', (S.identities.vanish || {}).color || 'var(--muted)');
   tip(van, 'Vanish window', 'A window that saves nothing — no history, no cookies, no files');
   van.setAttribute('aria-label', 'Open a Vanish window');
   van.onclick = () => send('new-tab', { identity: 'vanish' });
-  box.append(van);
+  foot.append(van);
+  box.append(foot);
 }
 
 // Tabs in this Space that are sitting in one of the other folders. The folder
@@ -357,9 +394,10 @@ function renderFolders() {
 // names where the rest are and takes you there in one click.
 function renderElsewhere() {
   const box = $('#elsewhere'); box.innerHTML = '';
+  // Counts only: the main side sends a number for each other folder, never its tabs.
   const others = (S.pickFolders || S.folders)
     .filter((id) => id !== S.folder)
-    .map((id) => ({ id, n: S.tabs.filter((t) => t.space === S.space && t.identity === id).length }))
+    .map((id) => ({ id, n: ((S.folderInfo || {})[id] || {}).here || 0 }))
     .filter((x) => x.n);
   box.hidden = !others.length;
   if (!others.length) return;
@@ -377,10 +415,13 @@ function renderSpaces() {
   // Two levels, not one wrapped row: the Space you are in is the heading, the
   // others are a quiet row underneath you can tab across.
   const box = $('#spaces'); box.innerHTML = '';
+  // One Space is no choice at all, so the row stays out of the way until there is a second.
+  box.hidden = S.spaces.length <= 1;
+  if (box.hidden) return;
   const rest = el('div', 'spacerow', '');
   rest.setAttribute('role', 'tablist');
   S.spaces.forEach((n, i) => {
-    const count = S.tabs.filter((t) => t.space === n).length;
+    const count = S.tabs.filter((t) => t.space === n && !t.away).length;
     const here = n === S.space;
     const b = el('button', here ? 'on' : '', '');
     b.append(el('span', 'nm', esc(n)));
@@ -407,7 +448,8 @@ function renderUpdate() {
   // With updating left to itself there is nothing to show: the new version is
   // fetched in the background and goes in when you close Cue. Only a failure
   // is worth a line. Switch it off and the old bar comes back, where nothing
-  // happens until you click it.
+  // happens until you click it. A failure is said once per version, in the
+  // updater's own plain words (never a raw error), and can be put away.
   const u = S.update; const bar = $('#updatebar');
   if (!u || u.state === 'idle' || u.state === 'checking') { bar.hidden = true; return; }
   if (S.settings.autoUpdate !== false && u.state !== 'error') { bar.hidden = true; return; }
@@ -426,9 +468,10 @@ function renderUpdate() {
     const go = el('button', '', 'Install and reopen'); go.onclick = () => send('update-install');
     act.append(go);
   } else if (u.state === 'error') {
-    say.textContent = u.error || 'The update could not be checked.';
+    say.textContent = u.error || 'Cue could not check for a new version just now. It will try again later.';
     const again = el('button', 'ghost', 'Try again'); again.onclick = () => send('update-check');
-    act.append(again);
+    const ok = el('button', 'ghost', 'OK'); ok.onclick = () => send('update-dismiss');
+    act.append(again, ok);
   }
   bar.append(say, act);
   if (u.state === 'ready' && u.error) bar.append(el('span', 'u-wait', u.error));
@@ -511,8 +554,11 @@ function renderPins() {
       const id = Number(e.dataTransfer.getData('text/cue-tab'));
       if (id && id !== t.id) send('reorder', { id, beforeId: t.id });
     };
-    tip(p, `${shortName(t)}${t.muted ? ' \u00b7 muted' : ''}`, here(t) ? (hostOf(t.url) || '')
-      : `Opens as ${(S.identities[S.folder] || {}).name || 'this folder'}`);
+    p.dataset.id = t.id;
+    const v = volOf(t);
+    const where = here(t) ? (hostOf(t.url) || '') : `Opens as ${(S.identities[S.folder] || {}).name || 'this folder'}`;
+    tip(p, `${shortName(t)}${t.muted ? ' \u00b7 muted' : v < 1 ? ` \u00b7 ${pctOf(v)}%` : ''}`,
+      `${where ? `${where} \u00b7 ` : ''}${OPT}-scroll to change volume \u00b7 ${OPT}-click to mute`);
     if (t.id === S.activeId) p.classList.add('active');
     if (t.id === S.programId) p.classList.add('onair');
     const letter = () => p.prepend(el('i', 'ltr', esc((shortName(t)[0] || '?').toUpperCase())));
@@ -525,20 +571,201 @@ function renderPins() {
     // The strip is where he looks first, so a muted app says so here too - and
     // the badge is a real button, because the whole point of seeing it is being
     // able to silence WhatsApp without first hunting for its row.
-    const pm = el('button', 'pinmute' + (t.muted ? ' off' : ''), t.muted ? SPK.off : SPK.on);
-    tip(pm, t.muted ? `Unmute ${shortName(t)}` : `Mute ${shortName(t)}`, 'Click the speaker');
+    // Muted, it is the same crossed-out speaker the tab rows carry (.favsound.off),
+    // so one look - and one test - finds a muted app wherever it is drawn.
+    const pm = el('button', 'pinmute' + (t.muted ? ' off favsound' : ''), t.muted ? SPK.off : SPK.on);
+    tip(pm, t.muted ? `Unmute ${shortName(t)}` : `Mute ${shortName(t)}`, t.muted ? 'Click to hear it again' : 'Click the speaker');
     pm.onclick = (e) => { e.preventDefault(); e.stopPropagation(); send('mute', { id: t.id }); };
     pm.onmousedown = (e) => e.stopPropagation();
     p.append(pm);
+    // The level: a thin bar along the bottom edge, as long as the volume is loud.
+    // Drawn while the app is making sound or is set below 100%; a quiet app at
+    // full volume carries nothing extra. A shape, not a colour - red means on air.
+    if (!t.muted && (t.audible || v < 1)) {
+      const lv = el('i', 'lvl', '<i></i>');
+      lv.style.setProperty('--lvl', String(v));
+      p.append(lv);
+    }
     if (t.muted) p.classList.add('ismuted');
-    else if (t.audible) { p.append(el('b', 'favsound')); p.classList.add('issounding'); }
+    else if (t.audible) p.classList.add('issounding');
     if (!here(t)) p.classList.add('elsewhere');
-    p.onclick = () => (here(t) ? send('activate', { id: t.id }) : send('app-open', { url: t.url }));
+    // Option-click silences or wakes the app without opening it.
+    p.onclick = (e) => {
+      if (e.altKey) { e.preventDefault(); send('mute', { id: t.id }); return; }
+      if (here(t)) send('activate', { id: t.id }); else send('app-open', { url: t.url });
+    };
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
+    p.addEventListener('wheel', altWheel(t), { passive: false });
+    // Resting on an app that is playing brings up its volume, close to the tile
+    // but never over it, so the click you were aiming still lands on the app.
+    p.addEventListener('mouseenter', () => {
+      clearTimeout(VP.openT);
+      if (VP.id === t.id) return;
+      if (t.audible || t.playing) VP.openT = setTimeout(() => openVolPop(t.id, 'hover'), 450);
+    });
+    p.addEventListener('mouseleave', () => clearTimeout(VP.openT));
+    p.addEventListener('mousedown', () => clearTimeout(VP.openT));
     stripIds.add(t.id);
     box.append(p);
   }
+  // The strip is rebuilt on every state push; the open volume control is not, so
+  // it follows the new tile and shows the new level.
+  if (VP.id != null) refreshVolPop();
 }
+
+// ---------------------------------------------------------------- volume on the pinned apps
+// The key is called Option on a Mac and Alt everywhere else, and the words say so.
+const OPT = window.cue.platform === 'darwin' ? 'Option' : 'Alt';
+const pctOf = (v) => Math.round((v ?? 1) * 100);
+// What he has just asked for, ahead of the state push that confirms it, so five
+// quick scroll steps are five steps and not the same step five times.
+const volAsked = new Map();
+function volOf(t) {
+  const a = volAsked.get(t.id);
+  return a && Date.now() - a.at < 1500 ? a.v : (t.volume ?? 1);
+}
+function setVol(t, v) {
+  v = Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+  volAsked.set(t.id, { v, at: Date.now() });
+  send('volume', { id: t.id, value: v });
+  const lv = document.querySelector(`.pin[data-id="${t.id}"] .lvl`);
+  if (lv) lv.style.setProperty('--lvl', String(v));
+  if (VP.id === t.id) fillVolPop(t, v);
+}
+// One step is 5%, landing on the 5% marks, so 37% goes to 40% or 35%.
+function stepVol(t, dir) { setVol(t, Math.round((pctOf(volOf(t)) + dir * 5) / 5) * 5 / 100); }
+
+// Option + scroll over a tile (or a tab row) changes that tab's volume. A plain
+// scroll is left alone so the sidebar still scrolls. A trackpad sends dozens of
+// tiny deltas and a mouse wheel a few big ones, so small ones are added up first.
+const wheelAcc = new Map();
+const altWheel = (t) => (e) => { if (e.altKey) wheelStep(t, e); };
+function wheelStep(t, e) {
+  e.preventDefault(); e.stopPropagation();
+  const dy = (e.deltaMode === 1 ? 40 : 1) * (Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX);
+  const w = wheelAcc.get(t.id) || { acc: 0, at: 0 };
+  if (Date.now() - w.at > 400) w.acc = 0;
+  w.at = Date.now();
+  let dir = 0;
+  if (Math.abs(dy) >= 50) { dir = Math.sign(dy); w.acc = 0; } else { w.acc += dy; if (Math.abs(w.acc) >= 50) { dir = Math.sign(w.acc); w.acc = 0; } }
+  wheelAcc.set(t.id, w);
+  if (dir) stepVol(t, -dir); // scrolling up is louder
+}
+
+// The volume control for one pinned app: speaker (mute), slider, the number,
+// and a way back to 100%. One of them, made once, anchored under the tile.
+const VP = { id: null, mode: null, openT: 0, closeT: 0, dragging: false, entered: false };
+const vpEl = el('div', 'tvol');
+vpEl.hidden = true;
+vpEl.setAttribute('role', 'dialog');
+vpEl.innerHTML = `<div class="tv-row"><button class="tv-spk" type="button"></button><input class="tv-range" type="range" min="0" max="100" step="1"><span class="tv-pct"></span><button class="tv-reset" type="button">100%</button></div>
+  <div class="tv-hint">${OPT}-scroll the app · M mutes · Esc</div>`;
+document.body.append(vpEl);
+const vpSpk = vpEl.querySelector('.tv-spk'); const vpRange = vpEl.querySelector('.tv-range');
+const vpPct = vpEl.querySelector('.tv-pct'); const vpReset = vpEl.querySelector('.tv-reset');
+const vpTab = () => S && S.tabs.find((x) => x.id === VP.id);
+const vpTile = () => (VP.id == null ? null : document.querySelector(`.pin[data-id="${VP.id}"]`));
+
+function fillVolPop(t, v = volOf(t)) {
+  const n = pctOf(v);
+  vpSpk.innerHTML = t.muted ? SPK.off : SPK.on;
+  vpSpk.classList.toggle('off', !!t.muted);
+  vpSpk.setAttribute('aria-label', t.muted ? `Unmute ${shortName(t)}` : `Mute ${shortName(t)}`);
+  if (!VP.dragging) vpRange.value = n;
+  vpRange.setAttribute('aria-label', `Volume for ${shortName(t)}`);
+  vpRange.style.setProperty('--fill', `${n}%`);
+  vpPct.textContent = t.muted ? 'Muted' : `${n}%`;
+  vpReset.disabled = n === 100 && !t.muted;
+  vpReset.setAttribute('aria-label', 'Back to 100%');
+  vpEl.setAttribute('aria-label', `Volume for ${shortName(t)}`);
+}
+function placeVolPop() {
+  const tile = vpTile();
+  if (!tile) { closeVolPop(); return; }
+  const r = tile.getBoundingClientRect();
+  const side = $('#side').getBoundingClientRect();
+  const w = vpEl.offsetWidth;
+  const x = Math.max(side.left + 6, Math.min(side.right - w - 6, r.left + r.width / 2 - w / 2));
+  vpEl.style.left = `${Math.round(x)}px`;
+  vpEl.style.top = `${Math.round(r.bottom + 6)}px`;
+  document.querySelectorAll('.pin.volopen').forEach((p) => { if (p !== tile) p.classList.remove('volopen'); });
+  tile.classList.add('volopen');
+}
+function openVolPop(id, mode) {
+  const t = S && S.tabs.find((x) => x.id === id);
+  if (!t) return;
+  clearTimeout(VP.closeT); VP.closeT = 0;
+  VP.id = id; VP.mode = mode; VP.entered = mode === 'hover';
+  hideTip();
+  fillVolPop(t);
+  vpEl.hidden = false;
+  placeVolPop();
+  // Opened on purpose (the menu), it takes the keyboard; opened by resting the
+  // pointer, it leaves the keyboard with the page he is typing in.
+  VP.at = Date.now();
+  if (mode === 'held') vpRange.focus();
+}
+function closeVolPop() {
+  clearTimeout(VP.closeT); clearTimeout(VP.openT); VP.closeT = 0;
+  VP.id = null; VP.mode = null; VP.dragging = false;
+  vpEl.hidden = true;
+  document.querySelectorAll('.pin.volopen').forEach((p) => p.classList.remove('volopen'));
+}
+function refreshVolPop() {
+  const t = vpTab();
+  if (!t) { closeVolPop(); return; }
+  fillVolPop(t); placeVolPop();
+}
+vpSpk.onclick = () => { const t = vpTab(); if (t) send('mute', { id: t.id }); };
+// Back to 100% also unmutes: main's setVolume switches the sound back on for any level above 0.
+vpReset.onclick = () => { const t = vpTab(); if (t) setVol(t, 1); };
+vpRange.addEventListener('pointerdown', () => { VP.dragging = true; });
+addEventListener('pointerup', () => { VP.dragging = false; });
+vpRange.oninput = () => { const t = vpTab(); if (t) setVol(t, Number(vpRange.value) / 100); };
+// On the document, not the control: pressing 100% disables that button and the
+// keyboard falls back to the page body, and Esc must still close it.
+document.addEventListener('keydown', (e) => {
+  const t = vpTab();
+  if (!t) return;
+  const f = document.activeElement;
+  if (!(vpEl.contains(f) || !f || f === document.body)) return;
+  const k = e.key;
+  if (k === 'Escape') { e.preventDefault(); closeVolPop(); return; }
+  if (k === 'ArrowUp' || k === 'ArrowRight') { e.preventDefault(); stepVol(t, 1); return; }
+  if (k === 'ArrowDown' || k === 'ArrowLeft') { e.preventDefault(); stepVol(t, -1); return; }
+  if (k === 'm' || k === 'M') { e.preventDefault(); send('mute', { id: t.id }); }
+});
+vpEl.addEventListener('wheel', (e) => { const t = vpTab(); if (t) wheelStep(t, e); }, { passive: false });
+// It closes when the pointer has left both the tile and the control. Measured
+// against where they are drawn rather than with enter/leave events, because the
+// tile under the pointer is replaced on every state push.
+const inRect = (r, x, y, pad) => x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
+function overVol(x, y) {
+  const tile = vpTile();
+  const a = tile && inRect(tile.getBoundingClientRect(), x, y, 4);
+  const b = inRect(vpEl.getBoundingClientRect(), x, y, 6);
+  if (b) VP.entered = true;
+  return a || b;
+}
+const closeSoon = () => { if (VP.id != null && !VP.closeT) VP.closeT = setTimeout(closeVolPop, 300); };
+document.addEventListener('mousemove', (e) => {
+  if (VP.id == null || VP.dragging) return;
+  if (overVol(e.clientX, e.clientY)) { clearTimeout(VP.closeT); VP.closeT = 0; return; }
+  // Opened from the menu, the pointer may start anywhere; it closes once it has
+  // been in the control and left, or on Esc, or on a click somewhere else.
+  if (VP.mode === 'held' && !VP.entered) return;
+  closeSoon();
+});
+document.addEventListener('mouseout', (e) => { if (!e.relatedTarget && VP.mode === 'hover') closeSoon(); });
+document.addEventListener('mousedown', (e) => {
+  if (VP.id == null) return;
+  if (vpEl.contains(e.target) || (vpTile() && vpTile().contains(e.target))) return;
+  closeVolPop();
+}, true);
+// A click on a page moves the keyboard away from the sidebar: that closes it too
+// (but not the focus shuffle of the menu that has just opened it).
+addEventListener('blur', () => { if (VP.id != null && Date.now() - (VP.at || 0) > 400) closeVolPop(); });
+addEventListener('resize', () => { if (VP.id != null) placeVolPop(); });
 
 function renderGroups() {
   const box = $('#groups');
@@ -546,7 +773,7 @@ function renderGroups() {
   box.innerHTML = '';
   const splitIds = S.split.mode !== 'single' ? S.split.ids : [];
   for (const g of S.groups) {
-    const list = S.tabs.filter((t) => !t.pinned && !stripIds.has(t.id) && t.group === g.id && here(t));
+    const list = S.tabs.filter((t) => !t.pinned && !t.temp && !stripIds.has(t.id) && t.group === g.id && here(t));
     if (!list.length) continue;
     const wrap = el('section', 'group' + (S.collapsed[g.id] ? ' closed' : ''));
     const head = el('div', 'ghead', `<span class="caret">▾</span>${esc(g.name)}<span class="n">${list.length}</span>`);
@@ -560,14 +787,57 @@ function renderGroups() {
     head.ondragover = (e) => { e.preventDefault(); head.classList.add('drop'); };
     head.ondragleave = () => head.classList.remove('drop');
     // Dragging a pinned tab down onto a group takes it off the strip again.
-    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id) return; const d = S.tabs.find((x) => x.id === id); if (d && d.pinned) send('pin', { id, on: false }); send('reorder', { id, group: g.id }); };
+    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id) return; const d = S.tabs.find((x) => x.id === id); if (d && d.pinned) send('pin', { id, on: false }); if (d && d.temp) send('tab-temp', { id, on: false }); send('reorder', { id, group: g.id }); };
     wrap.append(head);
     const ul = el('div', 'tablist');
     for (const t of list) ul.append(tabRow(t, splitIds));
     wrap.append(ul);
     box.append(wrap);
   }
+  box.append(tempSection(splitIds));
   box.scrollTop = scroll;
+}
+
+// The second tier: tabs that are just for now. Same folder and sign-ins as the tabs above, but
+// cleared when Cue closes (or after the hours set in Settings > Keeping tabs) and never archived.
+// Drag a tab here to make it just for now; drag it up into the groups, pin it, or right-click >
+// Keep this tab to keep it.
+function tempSection(splitIds) {
+  const list = S.tabs.filter((t) => t.temp && !t.pinned && !stripIds.has(t.id) && here(t));
+  const sec = el('section', 'tempsec' + (list.length ? '' : ' empty'));
+  sec.setAttribute('aria-label', 'Just for now');
+  const head = el('div', 'thead');
+  const title = el('span', 'tt', 'Just for now');
+  head.append(title);
+  if (list.length) head.append(el('span', 'n', String(list.length)));
+  const add = el('button', 'tadd', ICONS.plus || '+'); add.type = 'button';
+  tip(add, 'New tab just for now', `${/Mac/i.test(navigator.platform || '') ? '⌥⌘T' : 'Ctrl+Alt+T'} · cleared when its time is up, never archived`);
+  add.onclick = (e) => { e.stopPropagation(); send('new-tab', { temp: true }); };
+  head.append(add);
+  if (list.length) {
+    const clr = el('button', 'tclear', 'Clear'); clr.type = 'button';
+    tip(clr, `Close these ${list.length} tab${list.length === 1 ? '' : 's'} now`, 'They are not archived and Reopen Closed Tab will not bring them back');
+    clr.onclick = (e) => { e.stopPropagation(); send('temp-clear'); };
+    head.append(clr);
+  }
+  sec.append(head);
+  const hours = S.settings.tempClear;
+  const when = hours === 'quit' || hours == null ? 'cleared when Cue closes' : `cleared after ${hours} hour${Number(hours) === 1 ? '' : 's'}`;
+  const sub = el('div', 'tsub', esc(when));
+  tip(sub, 'Just for now', 'Change when in Settings > Keeping tabs');
+  sec.append(sub);
+  const ul = el('div', 'tablist');
+  for (const t of list) ul.append(tabRow(t, splitIds));
+  sec.append(ul);
+  sec.ondragover = (e) => { e.preventDefault(); sec.classList.add('drop'); };
+  sec.ondragleave = (e) => { if (!sec.contains(e.relatedTarget)) sec.classList.remove('drop'); };
+  sec.ondrop = (e) => {
+    e.preventDefault(); sec.classList.remove('drop');
+    const id = Number(e.dataTransfer.getData('text/cue-tab'));
+    const d = S.tabs.find((x) => x.id === id);
+    if (d && !d.temp) send('tab-temp', { id, on: true });
+  };
+  return sec;
 }
 
 function tabRow(t, splitIds) {
@@ -596,7 +866,7 @@ function tabRow(t, splitIds) {
   if (t.badge) ctl.append(el('span', 'badge', t.badge > 99 ? '99+' : String(t.badge)));
   if (S.live && t.id === S.programId) ctl.append(el('span', 'tally on', 'ON AIR'));
   else if (S.live && t.id === S.activeId) ctl.append(el('span', 'tally cue', 'CUED'));
-  else if (t.private) ctl.append(el('span', 'tally priv', 'PRIVATE'));
+  else if (t.private) ctl.append(tip(el('span', 'tally priv', 'OFF AIR'), 'Off air', 'This tab is never shown to the class. Right-click to change.'));
 
   // Handing a tab to Claude Code or Codex used to mean finding a checkbox three levels into a
   // right-click menu, so nobody did it. It is a button on the row now: lit means agents may work
@@ -636,12 +906,14 @@ function tabRow(t, splitIds) {
   }
   const hasSound = t.audible || t.muted || t.playing || t.volume < 1;
   const spk = el('button', 'spk' + (t.muted ? ' muted' : t.audible ? ' live' : ''), t.muted ? SPK.off : SPK.on);
-  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${Math.round(t.volume * 100)}%`, 'Click to mute · scroll to change · hold still for the slider');
+  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${pctOf(volOf(t))}%`, `Click to mute · scroll here, or ${OPT}-scroll anywhere on the row, to change · hold still for the slider`);
   // Silent tabs keep the speaker too, just faded: you can set a tab quiet
   // before it ever makes a sound, and the control is always in the same place.
   if (!hasSound) spk.classList.add('idle');
   spk.onclick = (e) => { e.stopPropagation(); if (e.altKey) { toggleVol(); return; } send('mute', { id: t.id }); };
-  spk.onwheel = (e) => { e.preventDefault(); send('volume', { id: t.id, value: Math.round((t.volume + (e.deltaY < 0 ? 0.05 : -0.05)) * 100) / 100 }); };
+  spk.onwheel = (e) => wheelStep(t, e);
+  // Option-scroll anywhere on the row does the same; a plain scroll still scrolls the list.
+  row.addEventListener('wheel', altWheel(t), { passive: false });
 
   const pop = el('div', 'volpop');
   const r = el('input'); r.type = 'range'; r.min = 0; r.max = 100; r.value = Math.round(t.volume * 100);
@@ -696,7 +968,14 @@ function tabRow(t, splitIds) {
   row.ondragend = () => row.classList.remove('dragging');
   row.ondragover = (e) => { e.preventDefault(); row.classList.add('dropbefore'); };
   row.ondragleave = () => row.classList.remove('dropbefore');
-  row.ondrop = (e) => { e.preventDefault(); row.classList.remove('dropbefore'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (id && id !== t.id) send('reorder', { id, beforeId: t.id }); };
+  row.ondrop = (e) => {
+    e.preventDefault(); e.stopPropagation(); row.classList.remove('dropbefore');
+    const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id || id === t.id) return;
+    // Dropping between the two tiers moves the tab into that tier.
+    const d = S.tabs.find((x) => x.id === id);
+    if (d && !!d.temp !== !!t.temp) send('tab-temp', { id, on: !!t.temp });
+    send('reorder', { id, beforeId: t.id });
+  };
   return row;
 }
 
@@ -786,7 +1065,7 @@ function renderLive() {
   const box = $('#livebox');
   // Always there, always ready. Off air it is a landing strip: drop a tab on it
   // and that tab goes up, which is the whole gesture — no switch to find first.
-  box.hidden = false;
+  box.hidden = S.settings.kits.teacher === false && !S.live; // the Teacher kit off takes the on-air box with it
   box.classList.toggle('off', !S.live);
   const p = S.tabs.find((t) => t.id === S.programId);
   const cued = (S.cue || []).map((id) => S.tabs.find((t) => t.id === id)).filter(Boolean);
@@ -866,7 +1145,8 @@ function renderAI() {
       : 'They stop at once and the tabs stay yours. Nothing has to be set up again when you resume.');
   p.onclick = () => send('setting', { key: 'aiPaused', value: !S.aiPaused });
   box.append(b, p);
-  box.hidden = !n && !S.aiPaused;
+  // Nothing about agents shows until AI tools are switched on in Settings (the port is listening).
+  box.hidden = !S.agent.listening || (!n && !S.aiPaused);
 }
 
 function renderDownloads() {
@@ -958,7 +1238,7 @@ function libraryHits(r) {
     ...r.bookmarks.map((x) => ({ k: 'Bookmark', v: x.title || x.url, url: x.url, run: openUrl(x.url) })),
     ...r.history.map((x) => ({ k: 'History', v: x.title || x.url, url: x.url, run: openUrl(x.url) })),
     ...r.boards.map((x) => ({ k: 'Board', v: x.title || x.url, run: openUrl(x.url) })),
-    ...r.apps.map((x) => ({ k: 'NSM app', v: x.name, icon: new URL('/favicon.ico', x.url).href, run: openUrl(x.url) })),
+    ...r.apps.map((x) => ({ k: (S.preset && S.preset.appLabel) || 'App', v: x.name, icon: new URL('/favicon.ico', x.url).href, run: openUrl(x.url) })),
     ...r.repos.map((x) => ({ k: 'GitHub', v: x.name, icon: 'https://github.com/favicon.ico', run: openUrl(x.url) })),
   ];
 }
@@ -968,7 +1248,7 @@ async function showSuggest() {
   const box = $('#suggest');
   if (!q) { hideSuggest(); return; }
   const ql = q.toLowerCase();
-  const tabHits = S.tabs.filter((t) => (t.title + ' ' + t.url).toLowerCase().includes(ql) && t.id !== S.activeId).slice(0, 5)
+  const tabHits = S.tabs.filter((t) => !t.away && (t.title + ' ' + t.url).toLowerCase().includes(ql) && t.id !== S.activeId).slice(0, 5)
     .map((t) => ({ k: 'Switch to', v: t.title, run: () => send('activate', { id: t.id }) }));
   const engines = Object.keys(ENGINE_NAMES).map((e) => ({ k: ENGINE_NAMES[e], v: q, run: () => send('navigate', { text: q, engine: e }) }));
   const lib = libraryHits(await window.cue.invoke('suggest', { q }));
@@ -1038,17 +1318,25 @@ omni.addEventListener('drop', async (e) => {
 });
 
 // ---------------------------------------------------------------- Cmd+K
-const COMMANDS = [
-  ['Go live', () => send('live', { on: !S.live })], ['New Vanish tab', () => send('new-tab', { identity: 'vanish' })],
-  ['Side by side', () => send('split', { mode: 'cols2' })], ['Grid of four', () => send('split', { mode: 'grid4' })], ['One tab', () => send('split', { mode: 'single' })],
-  ['Move in from another browser', () => openImport()], ['Settings', () => openSettings()], ['Boards', () => send('tool', { name: 'boards' })],
-  ['Bookmarks, history and archived tabs', () => send('tool', { name: 'library' })], ['Bills and alerts', () => send('tool', { name: 'bills' })],
-  ['Thumbnail check', () => send('tool', { name: 'thumbcheck' })], ['AI side panel', () => send('ai')], ['Ask AI about this page', () => send('ai-ask')],
-  ['Music bar', () => send('strip')], ['Pick a colour', () => send('tool', { name: 'colour' })], ['Find a font', () => send('tool', { name: 'font' })], ['Ruler', () => send('tool', { name: 'ruler' })],
-  ['Save whole page as a picture', () => send('tool', { name: 'fullpage' })], ['Record this tab', () => send('tool', { name: 'record' })], ['Make a GIF', () => send('tool', { name: 'gif' })],
-  ['Vercel deploys', () => send('navigate', { text: 'https://vercel.com/dashboard', newTab: true })], ['Learning portal', () => send('navigate', { text: 'https://learning-portal.nathanielschool.com', newTab: true })],
-  ...['Teach', 'Create', 'Business', 'Build'].map((n) => [`Space: ${n}`, () => send('space', { name: n })]),
-];
+// What Cmd+K can do. A kit that is off takes its commands with it, the Spaces are the ones you
+// have, and a starting setup adds its own (S.preset.commands); with no setup there are none.
+function commands() {
+  const k = (S && S.settings && S.settings.kits) || {};
+  const on = (kit) => k[kit] !== false;
+  return [
+    ...(on('teacher') ? [['Go live', () => send('live', { on: !S.live })]] : []), ['New Vanish tab', () => send('new-tab', { identity: 'vanish' })],
+    ['New tab just for now', () => send('new-tab', { temp: true })],
+    ['Side by side', () => send('split', { mode: 'cols2' })], ['Grid of four', () => send('split', { mode: 'grid4' })], ['One tab', () => send('split', { mode: 'single' })],
+    ['Move in from another browser', () => openImport()], ['Settings', () => openSettings()], ...(on('designer') ? [['Boards', () => send('tool', { name: 'boards' })]] : []),
+    ['Bookmarks, history and archived tabs', () => send('tool', { name: 'library' })], ...(on('business') ? [['Bills and alerts', () => send('tool', { name: 'bills' })]] : []),
+    ...(on('creator') ? [['Thumbnail check', () => send('tool', { name: 'thumbcheck' })]] : []), ['AI side panel', () => send('ai')], ['Ask AI about this page', () => send('ai-ask')],
+    ...(on('music') ? [['Music bar', () => send('strip')]] : []),
+    ...(on('designer') ? [['Pick a colour', () => send('tool', { name: 'colour' })], ['Find a font', () => send('tool', { name: 'font' })], ['Ruler', () => send('tool', { name: 'ruler' })]] : []),
+    ...(on('video') ? [['Save whole page as a picture', () => send('tool', { name: 'fullpage' })], ['Record this tab', () => send('tool', { name: 'record' })], ['Make a GIF', () => send('tool', { name: 'gif' })]] : []),
+    ...((S && S.preset && S.preset.commands) || []).filter((c) => /^https:\/\//.test(c.url || '')).map((c) => [c.name, () => send('navigate', { text: c.url, newTab: true })]),
+    ...((S && S.spaces) || []).map((n) => [`Space: ${n}`, () => send('space', { name: n })]),
+  ];
+}
 
 function openPalette() {
   openModal((sh) => {
@@ -1066,9 +1354,9 @@ function openPalette() {
     };
     const update = async () => {
       const q = box.value.trim(); const ql = q.toLowerCase();
-      const tabs = S.tabs.filter((t) => (t.title + ' ' + t.url).toLowerCase().includes(ql)).slice(0, q ? 6 : 8)
+      const tabs = S.tabs.filter((t) => !t.away && (t.title + ' ' + t.url).toLowerCase().includes(ql)).slice(0, q ? 6 : 8)
         .map((t) => ({ k: t.space === S.space ? 'Tab' : t.space, v: t.title, run: () => send('activate', { id: t.id }) }));
-      const cmds = COMMANDS.filter(([n]) => n.toLowerCase().includes(ql)).slice(0, q ? 5 : 3).map(([n, run]) => ({ k: 'Do', v: n, run }));
+      const cmds = commands().filter(([n]) => n.toLowerCase().includes(ql)).slice(0, q ? 5 : 3).map(([n, run]) => ({ k: 'Do', v: n, run }));
       const lib = q ? libraryHits(await window.cue.invoke('suggest', { q })) : [];
       if (box.value.trim() !== q) return;
       const web = q ? [{ k: 'Search', v: q, run: () => send('navigate', { text: q, newTab: true }) }, { k: 'GitHub', v: q, run: () => send('navigate', { text: q, engine: 'github', newTab: true }) }] : [];
@@ -1115,7 +1403,7 @@ async function openImport() {
         });
         card.append(opts);
         const row = el('div', 'row'); const who = el('select');
-        ['personal', 'school'].forEach((k) => { const o = el('option', '', `Into ${S.identities[k].name}`); o.value = k; o.selected = k === p.identity; who.append(o); });
+        personFolders().forEach((k) => { const o = el('option', '', `Into ${S.identities[k].name}`); o.value = k; o.selected = k === p.identity; who.append(o); });
         const go = el('button', 'btn', 'Move in'); const out = el('span', 'note');
         go.onclick = async () => {
           go.disabled = true; out.textContent = 'Moving in…';
@@ -1307,330 +1595,803 @@ function openModal(build) {
 function closeModal() { const m = $('#modal'); if (m.hidden) return; m.hidden = true; m.innerHTML = ''; overlay(false); }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) { if (sharePending) { send('share-choose', {}); sharePending = false; } closeModal(); } });
 
-function settingRow(label, input, note) {
-  const r = el('div', 'row'); const l = el('label', '', esc(label)); r.append(l, input);
-  if (note) { const wrap = el('div'); wrap.append(r, el('div', 'note', esc(note))); return wrap; }
+// ---------------------------------------------------------------- settings
+// Settings is a list of rooms on the left and one room at a time on the right, sized to fit a
+// laptop screen: the room list stays put and only the room scrolls. Every room opens with one
+// short line; anything longer waits behind a small "?" that opens in place. The search box above
+// the rooms finds a setting by its words in every room at once.
+let indexing = false; // true while Settings reads every room for the search box: nothing is asked of the main side
+const ask = (cmd, a) => (indexing ? new Promise(() => {}) : window.cue.invoke(cmd, a));
+const MAC_KEYS = /Mac/i.test(navigator.platform || '');
+let fieldN = 0;
+const fieldId = () => `sf${++fieldN}`;
+
+// A small "?" and the words it opens, under the row it belongs to.
+function helpPair(text) {
+  const b = el('button', 'qhelp', '?'); b.type = 'button';
+  b.setAttribute('aria-label', 'More about this'); b.setAttribute('aria-expanded', 'false');
+  const n = el('div', 'note help', esc(text)); n.hidden = true;
+  b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); n.hidden = !n.hidden; b.classList.toggle('on', !n.hidden); b.setAttribute('aria-expanded', String(!n.hidden)); };
+  return [b, n];
+}
+// The one sentence a room opens with, and its "?".
+function intro(p, line, more) {
+  const box = el('div', 'intro');
+  box.append(el('span', '', esc(line)));
+  p.append(box);
+  if (more) { const [b, n] = helpPair(more); box.append(b); p.append(n); }
+}
+const heading = (p, text) => p.append(el('h3', '', esc(text)));
+// One setting: its name on the left (and a "?" when there is more to say), the control on the right.
+function settingRow(label, input, help, hint) {
+  const r = el('div', 'srow unit');
+  const left = el('div', 'slab');
+  const l = el('label', '', esc(label));
+  const field = !input ? null : /^(INPUT|SELECT|TEXTAREA)$/.test(input.tagName) ? input : input.querySelector('input, select, textarea');
+  if (field) { field.id = field.id || fieldId(); l.htmlFor = field.id; }
+  left.append(l);
+  let note = null;
+  if (help) { const [b, n] = helpPair(help); left.append(b); note = n; }
+  if (hint) left.append(el('div', 'hint', esc(hint)));
+  const ctl = el('div', 'sctl');
+  if (input) ctl.append(input);
+  r.append(left, ctl);
+  if (note) r.append(note);
   return r;
+}
+// An on/off setting is a switch, and switches sit two to a line.
+function toggle(key, val, label, help, onChange) {
+  const r = el('div', 'tg unit');
+  const i = el('input', 'switch'); i.type = 'checkbox'; i.checked = !!val; i.id = fieldId(); i.setAttribute('role', 'switch');
+  i.onchange = onChange ? () => onChange(i.checked, i) : () => send('setting', { key, value: i.checked });
+  const l = el('label', '', esc(label)); l.htmlFor = i.id;
+  r.append(l);
+  let note = null;
+  if (help) { const [b, n] = helpPair(help); r.append(b); note = n; } else r.append(el('span'));
+  r.append(i);
+  if (note) r.append(note);
+  return r;
+}
+function toggles(p, ...items) { const g = el('div', 'tgrid'); g.append(...items.filter(Boolean)); p.append(g); return g; }
+// The technical knobs, out of the way until asked for.
+function advanced(p, build) {
+  const d = el('details', 'adv'); d.append(el('summary', '', 'Advanced'));
+  const box = el('div', 'advbox'); build(box); d.append(box); p.append(d);
+  return d;
+}
+// A line under an action that says what happened, so Settings never has to close to tell you.
+function said(node) {
+  const s = el('span', 'said'); s.setAttribute('role', 'status');
+  node.append(s);
+  return (msg, bad) => { s.textContent = msg || ''; s.classList.toggle('bad', !!bad); };
+}
+// A button that asks once, in place, before it does something that cannot be undone.
+function confirmButton(label, question, run) {
+  const b = el('button', 'btn danger', esc(label)); b.type = 'button';
+  let sure = false; let timer = null;
+  b.onclick = async () => {
+    if (!sure) { sure = true; b.textContent = question; b.classList.add('sure'); timer = setTimeout(() => { sure = false; b.textContent = label; b.classList.remove('sure'); }, 5000); return; }
+    clearTimeout(timer); b.disabled = true;
+    await run();
+  };
+  return b;
 }
 function check(key, val) { const i = el('input'); i.type = 'checkbox'; i.checked = !!val; i.onchange = () => send('setting', { key, value: i.checked }); return i; }
 function choice(key, val, opts) {
   const c = el('select');
-  opts.forEach(([v, n]) => { const o = el('option', '', n); o.value = v; o.selected = v === val; c.append(o); });
-  c.onchange = () => send('setting', { key, value: c.value });
+  const numeric = opts.every(([v]) => typeof v === 'number');
+  if (!opts.some(([v]) => String(v) === String(val)) && val !== undefined && val !== null && val !== '') opts = [...opts, [val, String(val)]];
+  opts.forEach(([v, n]) => { const o = el('option', '', esc(n)); o.value = String(v); o.selected = String(v) === String(val); c.append(o); });
+  c.onchange = () => send('setting', { key, value: numeric ? Number(c.value) : c.value });
   return c;
 }
-function text(key, val, ph, type = 'text') { const i = el('input'); i.type = type; i.value = val || ''; i.placeholder = ph || ''; i.onchange = () => send('setting', { key, value: type === 'number' ? Number(i.value) : i.value }); return i; }
+function text(key, val, ph, type = 'text', cls = '') {
+  const i = el('input', cls); i.type = type; i.value = val ?? ''; i.placeholder = ph || '';
+  i.onchange = () => send('setting', { key, value: type === 'number' ? Number(i.value) : i.value });
+  return i;
+}
+// A number with its unit after it: [ 15 ] minutes.
+function amount(input, unit) { const w = el('span', 'amount'); w.append(input, el('span', 'unitword', esc(unit))); return w; }
+const folderName = (id) => ((S.identities || {})[id] || {}).name || id;
 
-// Settings used to be one scroll a mile long: "Tabs and sound" was right at the
-// bottom, under the extensions and the passwords. It is a list of rooms now -
-// click a room on the left and you see only that. Cue remembers which room you
-// were in, so going back for one more thing lands you where you were.
 let settingsRoom = 'tabs';
-function openSettings(startAt) {
+function settingsRooms() {
   const s = S.settings;
+  const key = (n) => (MAC_KEYS ? `Command-${n}` : `Ctrl-${n}`);
+  return [
+    { id: 'tabs', name: 'Tabs and sound', line: 'How new tabs open, and which ones may make a sound.',
+      more: 'WhatsApp, Gmail, Instagram and Facebook live in the strip at the top of the sidebar, one of each per folder. YouTube keeps a tab each for watching, Studio and your posts. Any other site opens as many tabs as you like.',
+      build: (p) => {
+        heading(p, 'Sound');
+        p.append(settingRow('Apps that open silent', text('muteSites', (s.muteSites || []).join(', '), 'web.whatsapp.com', 'text', 'wide'),
+          'WhatsApp is here to start with. You can still unmute any tab by hand; this only decides how it starts. Separate sites with a comma.'));
+        p.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'both', [['both', 'Go to it; both keep playing'], ['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
+        toggles(p,
+          toggle('onePlayer', s.onePlayer, 'Only one video plays at a time', 'Off is how other browsers behave. Turn it on and starting a video pauses the others. This is the main window only; Vanish has its own setting.'),
+          toggle('originalSound', s.originalSound, 'Original sound for music', 'Turns off echo cancelling, noise cutting and automatic volume on your microphone in web calls. Reload the call page after changing it.'));
+        heading(p, 'Tabs');
+        p.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
+        p.append(settingRow('Let unused tabs sleep after', amount(text('sleepMinutes', s.sleepMinutes, '15', 'number'), 'minutes'),
+          'A sleeping tab gives its memory back and wakes when you click it. Anything playing, recording or half-typed stays awake.'));
+        toggles(p,
+          toggle('autoGroup', s.autoGroup, 'Group tabs automatically', 'Sorts the sidebar into Google, Shopping, Watch & listen and so on. Right-click a tab to move it to another group.'),
+          toggle('syncScroll', s.syncScroll, 'Scroll split tabs together'),
+          toggle('syncPlay', s.syncPlay, 'Play and pause split tabs together'));
+        const dup = el('span', 'btnline');
+        const tb = el('button', 'btn', 'Merge duplicate tabs'); tb.type = 'button';
+        const tell = said(dup);
+        tb.onclick = async () => { tb.disabled = true; const r = await ask('tidy-dupes'); tell(r && r.said); tb.disabled = false; };
+        dup.prepend(tb);
+        p.append(settingRow('Copies of the same page', dup, 'Closes extra copies of one page in the same folder. It also runs by itself each time Cue opens. A pinned tab is never the one closed.'));
+      } },
 
-  const rooms = [
-    ['tabs', 'Tabs and sound', (p) => {
-      p.append(el('h3', '', 'Apps that are one place'));
-      p.append(el('div', 'note', 'WhatsApp, Gmail, Instagram and Facebook are a place, not a page — there is nothing to have two of. Cue keeps one of each per folder in the strip at the top of the sidebar: yours in Personal, the school’s in School, and clicking the icon goes to whichever one you are. They are never a row you have to pin or tidy. YouTube is three jobs under one address — watching, Studio and your community posts — so those keep a tab each, and ordinary sites like Amazon open as many tabs as you like.'));
-      const tidy = el('div', 'row');
-      const tb = el('button', 'btn', 'Merge duplicate tabs');
-      tb.onclick = () => { send('tidy-dupes'); closeModal(); };
-      tidy.append(el('span', 'note', 'Clears up copies left from before. It also runs by itself every time Cue opens.'), tb);
-      p.append(tidy);
+    { id: 'keep', name: 'Keeping tabs', line: 'Kept tabs stay until you close them; Just for now tabs do not.',
+      more: `Pinned apps and ordinary tabs are kept: they come back every time Cue opens, until you close them. Tabs in the "Just for now" section of the sidebar use the folder's usual sign-ins, but are cleared when Cue closes (or after the time below) and never come back. Open one with ${MAC_KEYS ? '⌥⌘T' : 'Ctrl+Alt+T'}, the + on that section, or right-click a tab and choose Just for now. Pinning a tab, or choosing Keep this tab, keeps it.`,
+      build: (p) => {
+        heading(p, 'When Cue opens');
+        p.append(settingRow('Go to', choice('openOn', s.openOn || 'home', [['home', 'The app I start in'], ['last', 'The tab I was last on']])));
+        p.append(settingRow('The app I start in', text('homeApp', s.homeApp, 'https://web.whatsapp.com/', 'text', 'wide'),
+          'The same app in whichever folder you open. If it is not open there yet, Cue lands on the last tab you used in that folder.'));
+        heading(p, 'Kept tabs');
+        p.append(settingRow('Put away tabs I haven’t used for', choice('archiveDays', Number(s.archiveDays) || 0, [[0, 'Never'], [2, '2 days'], [7, '7 days'], [30, '30 days']]),
+          'Put-away tabs wait in Library > Archived, one click from coming back. Pinned, named, playing and on-air tabs are never put away, and neither is the tab in front of you.'));
+        heading(p, 'Just for now');
+        p.append(settingRow('Clear Just for now tabs', choice('tempClear', s.tempClear ?? 'quit', [['quit', 'When Cue closes'], ['1', 'After 1 hour'], ['4', 'After 4 hours'], ['12', 'After 12 hours'], ['24', 'After 24 hours']]),
+          'When Cue closes: they are never saved, so not even a crash brings them back. After some hours: they come back after a restart until their time is up. Either way they are thrown away, not archived.'));
+        toggles(p, toggle('linksJustForNow', s.linksJustForNow, 'Links from other apps start in Just for now', 'A link you click in Mail, a chat app or a document opens in the Just for now section instead of among your kept tabs.'));
+      } },
 
-      p.append(el('h3', '', 'When Cue opens'));
-      p.append(settingRow('Go to', choice('openOn', s.openOn || 'home', [['home', 'The app I start in'], ['last', 'The tab I was last on']])));
-      p.append(settingRow('The app I start in', text('homeApp', s.homeApp, 'https://web.whatsapp.com/'),
-        'The same app in whichever folder you open: your own WhatsApp in Personal, the school’s in School. If that app is not open yet, Cue lands on the last tab you used in that folder.'));
+    // Vanish has its own rules; nothing here changes the main window, and nothing there reaches in.
+    { id: 'vanish', name: 'Vanish', line: 'A private window that forgets everything when you close it.',
+      build: (p) => {
+        p.append(settingRow('When a link opens a new Vanish tab', choice('vanishNewTab', s.vanishNewTab || 'go', [['go', 'Go to it'], ['stay', 'Stay where I am']])));
+        p.append(settingRow('New Vanish tabs open', choice('vanishNewTabPlace', s.vanishNewTabPlace || 'next', [['next', 'Next to this tab'], ['end', 'At the end']])));
+        toggles(p,
+          toggle('vanishOnePlayer', s.vanishOnePlayer, 'Only one video plays at a time in Vanish', 'Off: everything in Vanish plays at once, as in other browsers.'),
+          toggle('vanishPauseOnBlur', s.vanishPauseOnBlur, 'Pause Vanish when I switch to another window'),
+          toggle('vanishHideFromCapture', s.vanishHideFromCapture !== false, 'Hide Vanish from screen sharing and recordings', 'Some capture tools on recent macOS ignore this.'),
+          toggle('vanishFullScreen', s.vanishFullScreen, 'Open Vanish in full screen'));
+        heading(p, 'Vanish shortcuts');
+        const list = el('div', 'vkeys unit');
+        for (const k of S.vanishKeys || []) list.append(el('b', '', esc(k.keys)), el('span', '', esc(k.label)));
+        p.append(list);
+        p.append(el('div', 'hint', 'The same list is in the Window menu, under Vanish.'));
+      } },
 
-      p.append(el('h3', '', 'Sound'));
-      p.append(settingRow('Apps that open silent', text('muteSites', (s.muteSites || []).join(', '), 'web.whatsapp.com'),
-        'WhatsApp is here by default: its ding all day is the loudest thing on the machine. YouTube and the film services are not, because sound is the point of them. You can still unmute any tab by hand — this only decides how it starts. Separate sites with a comma.'));
-      p.append(settingRow('One tab plays at a time', check('onePlayer', s.onePlayer), 'When a tab starts playing, the others pause. A silent video — the preview that starts when you rest the pointer on a film — never pauses anything, and the on-air tab is never paused.'));
-      p.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'switch', [['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
-      p.append(settingRow('Original sound for music', check('originalSound', s.originalSound), 'Switches off echo cancel, noise cut and auto-volume on your microphone in web calls. Reload the call page after changing.'));
+    { id: 'notes', name: 'Notifications', line: 'Choose which sites may pop a notification up.',
+      more: 'Messages still arrive, the count still shows in the sidebar, and every one is kept in Bills & alerts. Nothing pops up at all while you are on air; whatever came in is waiting when you finish.',
+      build: (p) => {
+        p.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com', 'text', 'wide'),
+          'WhatsApp is here to start with. Separate sites with a comma.'));
+      } },
 
-      p.append(el('h3', '', 'Tabs'));
-      p.append(settingRow('Group tabs automatically (Google, Shopping, Watch & listen…)', check('autoGroup', s.autoGroup)));
-      p.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
-      p.append(settingRow('Scroll split tabs together', check('syncScroll', s.syncScroll)));
-      p.append(settingRow('Play and pause split tabs together', check('syncPlay', s.syncPlay)));
-      p.append(settingRow('Sleep unused tabs after (minutes)', text('sleepMinutes', s.sleepMinutes, '30', 'number')));
-      p.append(settingRow('Close tabs I have not used in (days, 0 = keep everything)', text('archiveDays', s.archiveDays, '2', 'number'),
-        'Two kinds of tab. KEPT: the apps in the strip at the top, any tab you have named yourself, anything playing, on air, in a split or half-typed, and the one you are looking at — these never go. PASSING: everything else, which closes after this many days and waits in Library → Archived, one click from coming back. A blank New tab you never used just closes.'));
-    }],
-
-    ['notes', 'Notifications', (p) => {
-      p.append(el('h3', '', 'What may interrupt you'));
-      p.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com'),
-        'WhatsApp is in here by default: both accounts, class groups and leads, all day. The messages still arrive, the count still shows in the sidebar and every one is kept in Bills & alerts — nothing jumps in front of what you are doing. Separate sites with a comma.'));
-      p.append(el('div', 'note', 'Nothing at all pops up while you are on air. Whatever came in is waiting in Bills & alerts when the class ends.'));
-    }],
-
-    ['keys', 'The number keys', (p) => {
-      p.append(el('div', 'note', 'Hold Command and press a number to go straight to one of these. Each one goes to that site in the folder you have open, so Command-1 in School is the school’s WhatsApp and Command-1 in Personal is your own, from the same key. If the site is already open it jumps to that tab rather than opening a second one. Each folder keeps its OWN nine, so School’s Command-4 can be the leads board while Personal’s is your bank. Pick the folder below, then give a key a name and a web address, or leave the address empty to make it open a brand new tab.'));
-      const picker = el('div', 'fpick');
-      const rows = el('div', '');
-      let editing = S.folder || 'personal';
-      const drawKeys = () => {
-        rows.innerHTML = '';
-        const box = s.quickKeys;
-        const mine = (Array.isArray(box) ? box : (box && box[editing])) || [];
-        for (let i = 0; i < 9; i++) {
-          const q = mine[i] || {};
-          const pair = el('div', 'row');
-          pair.append(text(`quick.${editing}.${i + 1}.name`, q.name, 'What to call it'));
-          pair.append(text(`quick.${editing}.${i + 1}.url`, q.url, 'Web address, or leave empty for a new tab'));
-          rows.append(settingRow(`Command-${i + 1}`, pair));
-        }
-      };
-      for (const [id, name] of [['personal', 'Personal'], ['school', 'School'], ['agent', 'AI agent']]) {
-        const b = el('button', id === editing ? 'on' : '', name);
-        b.onclick = () => { editing = id; for (const c of picker.children) c.classList.toggle('on', c === b); drawKeys(); };
-        picker.append(b);
-      }
-      p.append(settingRow('Shortcuts for', picker));
-      p.append(rows);
-      drawKeys();
-    }],
-
-    ['folders', 'Folders and accounts', (p) => {
-      p.append(el('div', 'note', 'Personal, School and AI agent are three separate browsers sharing one window. Each keeps its own Google, Instagram, YouTube and WhatsApp sign-ins, so two Gmails stay signed in side by side and never see each other. Click a folder at the top of the sidebar to open it: you see the tabs that live in it, and new tabs are born in it. A tab keeps the folder it was born in until you right-click it and move it. Name the account each folder holds — it shows on the folder, and AI agents read it and use the right login without asking you.'));
-      p.append(settingRow('Personal account', text('label.personal', S.labels.personal, 'jasonzac@gmail.com')));
-      p.append(settingRow('School account', text('label.school', S.labels.school, 'music@nathanielschool.com')));
-      p.append(el('div', 'note', 'Instagram has its own account switcher inside the app, which keeps several accounts in one place. With a folder for each Google account you never need it: Instagram in Personal is your own account, Instagram in School is the school’s, and both stay signed in at once. Each folder shows the Instagram account that is live in it, so you can see which one you are about to post from before you touch anything.'));
-      p.append(el('div', 'note', 'Instagram and Facebook will not always accept a sign-in typed into a browser they do not recognise yet. Chrome on this Mac is already signed in, so you can bring those two straight across. They go into the one folder you choose, nothing leaves this Mac, and Chrome is left exactly as it is. Google is different and is not carried: Google ties a sign-in to the one browser it was made in, so a copy gets both of them cancelled. Sign in to Google here instead, once per folder — the button empties that folder’s old Google cookies first, which is what Google was actually refusing, and then opens Google’s own form for you to type the password into.'));
-      const goog = el('div', 'row');
-      for (const k of ['personal', 'school']) {
-        const g = el('button', 'btn', `Sign in to Google as ${S.identities[k].name}`);
-        g.onclick = () => { send('signin.google', { identity: k }); closeModal(); };
-        goog.append(g);
-      }
-      p.append(goog);
-      const carry = el('div', 'row');
-      for (const k of ['personal', 'school']) {
-        const b = el('button', 'btn', `Bring Instagram and Facebook into ${S.identities[k].name}`);
-        b.onclick = () => {
-          const was = b.textContent;
-          b.disabled = true; b.textContent = 'Bringing them over…';
-          send('signin.carry-all', { identity: k });
-          setTimeout(() => { b.disabled = false; b.textContent = was; }, 6000);
+    { id: 'keys', name: 'The number keys', line: `${key(1)} to ${key(9)} open these sites in the folder you have open.`,
+      more: `Each folder keeps its own nine, so ${key(1)} can be your WhatsApp in your folder and someone else's in theirs. If the site is already open, the key jumps to that tab instead of opening another. Leave the address empty and the key opens a new tab.`,
+      build: (p) => {
+        const people = personFolders();
+        const pick = el('select');
+        people.forEach((id) => { const o = el('option', '', esc(folderName(id))); o.value = id; o.selected = id === S.folder; pick.append(o); });
+        const rows = el('div', 'kgrid');
+        const draw = () => {
+          rows.innerHTML = '';
+          const head = el('div', 'krow khead'); head.append(el('span', '', 'Key'), el('span', '', 'Name'), el('span', '', 'Web address')); rows.append(head);
+          const box = S.settings.quickKeys;
+          const mine = (Array.isArray(box) ? box : (box && box[S.folder])) || [];
+          for (let i = 0; i < 9; i++) {
+            const q = mine[i] || {};
+            const r = el('div', 'krow unit');
+            r.dataset.words = `${q.name || ''} ${q.url || ''}`;
+            const nm = text(`quick.${S.folder}.${i + 1}.name`, q.name, 'What to call it');
+            const url = text(`quick.${S.folder}.${i + 1}.url`, q.url, 'Web address, or empty for a new tab');
+            nm.setAttribute('aria-label', `${key(i + 1)} name`); url.setAttribute('aria-label', `${key(i + 1)} web address`);
+            r.append(el('b', 'kkey', esc(key(i + 1))), nm, url);
+            rows.append(r);
+          }
         };
-        carry.append(b);
-      }
-      p.append(carry);
-      const def = el('select'); ['personal', 'school', 'agent'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
-      def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
-      p.append(settingRow('Folder a new, empty Space opens in', def));
-      const mv = el('div', 'row'); const mvb = el('button', 'btn', 'Move in from another browser'); mvb.onclick = () => { closeModal(); openImport(); };
-      const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.onclick = () => send('make-default'); mv.append(mvb, dfb); p.append(mv);
-    }],
+        // Only the open folder's nine are ever sent here, so picking another folder opens it.
+        pick.onchange = async () => {
+          const want = pick.value; send('folder', { name: want });
+          for (let i = 0; i < 30 && S.folder !== want; i++) await new Promise((r) => setTimeout(r, 50));
+          pick.value = S.folder; draw();
+        };
+        p.append(settingRow('Keys for', pick, people.length > 1 ? 'Each person’s nine are their own. Choosing another folder here opens that folder.' : ''));
+        p.append(rows);
+        draw();
+      } },
 
-    ['spaces', 'Spaces', (p) => {
-      p.append(el('div', 'note', 'A Space is the job you are doing; a folder is whose account you are in. They are separate. Going to an empty Space opens the folder it usually uses; going to a Space that has tabs opens the folder of the tab you land on. Double-click a Space in the sidebar to call it whatever you like.'));
-      S.spaces.forEach((n) => {
-        const pick = el('select'); ['personal', 'school'].forEach((k) => { const o = el('option', '', S.identities[k].name); o.value = k; o.selected = s.spaceLogins[n] === k; pick.append(o); });
-        pick.onchange = () => send('setting', { key: `spaceLogin.${n}`, value: pick.value });
-        const line = el('div', 'row');
-        line.append(pick);
-        if (S.spaces.length > 1) {
-          const rm = el('button', 'btn', 'Remove');
-          rm.title = `Remove ${n}. Its tabs move to ${S.spaces[0] === n ? S.spaces[1] : S.spaces[0]} — nothing is closed.`;
-          rm.onclick = () => { send('space-remove', { name: n }); closeModal(); };
-          line.append(rm);
-        }
-        p.append(settingRow(`${n} usually opens in`, line));
-      });
-      if (S.spaces.length < 9) {
-        const add = el('div', 'row');
-        const nm = el('input'); nm.type = 'text'; nm.placeholder = 'Finance, Church, Admin…'; nm.maxLength = 18;
-        const go = el('button', 'btn', 'Add this Space');
-        const run = () => { const v = nm.value.trim(); if (v) { send('space-add', { name: v }); closeModal(); } };
-        go.onclick = run;
-        nm.onkeydown = (e) => { if (e.key === 'Enter') run(); };
-        add.append(nm, go);
-        p.append(settingRow('A new Space', add, 'Up to nine. Each one keeps its own tabs, its own layout and the login it opens with.'));
-      }
-    }],
+    { id: 'folders', name: 'Folders and accounts', line: 'Each person’s folder is a separate browser with its own sign-ins.',
+      more: 'Each folder has its own Google, Instagram, YouTube and WhatsApp sign-ins, tabs, history, bookmarks and saved passwords, and nothing in one shows in another. Click a folder at the top of the sidebar to open it; new tabs are born in the folder that is open. Add people with "Add a person" under the folders.',
+      build: (p) => {
+        const box = el('div', 'folderroom'); p.append(box);
+        const draw = async () => {
+          const got = await ask('folders');
+          const { rows, lockMinutes } = got || { rows: [], lockMinutes: 15 };
+          box.innerHTML = '';
+          const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+          const act = async (cmd, a, tell) => { const r = await ask(cmd, a); if (r && r.error && tell) tell(r.error, true); return r; };
+          for (const f of rows) {
+            const card = el('div', 'fcard unit');
+            card.style.setProperty('--c', f.color);
+            const head = el('div', 'fchead');
+            const col = el('input'); col.type = 'color'; col.value = f.color; col.setAttribute('aria-label', `Colour for ${f.name}`);
+            const nm = el('input', 'fname'); nm.type = 'text'; nm.value = f.name; nm.maxLength = 40; nm.setAttribute('aria-label', 'Folder name');
+            const sayBox = el('div', 'fcline');
+            const told = said(sayBox);
+            if (f.locked) { nm.disabled = true; col.disabled = true; }
+            nm.onchange = async () => { const v = nm.value.trim(); if (v && v !== f.name) { const r = await act('folder.rename', { id: f.id, name: v }, told); if (r && r.ok) draw(); } };
+            col.onchange = async () => { await act('folder.color', { id: f.id, color: col.value }, told); draw(); };
+            head.append(col, nm, el('span', 'pill' + (f.open ? ' ok' : ''), esc(f.open ? 'Open now' : f.locked ? 'Locked' : 'Closed')));
+            const rm = confirmButton('Remove', 'Remove it and everything in it?', async () => {
+              const r = await act('folder.remove', { id: f.id }, told);
+              if (r && r.ok) { draw(); return; }
+              rm.disabled = false;
+            });
+            if (rows.length <= 1) { rm.disabled = true; tip(rm, 'The last folder stays'); }
+            else tip(rm, `Remove ${f.name}`, 'Closes its tabs and removes its sign-ins, history, bookmarks, Boards and passwords from Cue. Its site data goes to the Trash.');
+            head.append(rm);
+            card.append(head, sayBox);
+            if (f.locked) {
+              card.append(el('div', 'hint', 'Locked. Click it in the sidebar and type its passcode to change anything here.'));
+              box.append(card);
+              continue;
+            }
+            const email = el('input'); email.type = 'email'; email.value = f.email || ''; email.placeholder = 'you@example.com';
+            email.onchange = () => act('folder.email', { id: f.id, email: email.value.trim() }, told);
+            const grid = el('div', 'fcgrid');
+            grid.append(settingRow('Google address', email, 'Shown on the folder while it is open. Google opens as this address in this folder, and AI agents use it to pick the right account. Optional.'));
+            grid.append(toggle('', f.agents, 'AI agents may use this folder', 'Off: Claude Code, Codex and every other agent cannot see this folder, its tabs, its WhatsApp or its Gmail at all.',
+              (on) => act('folder.agents', { id: f.id, on }, told)));
+            card.append(grid);
 
-    ['look', 'What you see', (p) => {
-      p.append(el('div', 'note', 'This is how you hide the parts you never use. Switching one off takes its buttons out of the toolbar and the sidebar; nothing is deleted, and turning it back on brings everything straight back.'));
-      Object.entries(S.kits).forEach(([k, v]) => p.append(settingRow(`${v.name}: ${v.what}`, check(`kit.${k}`, s.kits[k]))));
-      p.append(settingRow('Downloads tray in the sidebar', check('showDownloads', s.showDownloads !== false), 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder as usual.'));
-      p.append(settingRow('Sidebar hidden until you reach for it', check('sideHidden', s.sideHidden), 'The whole sidebar slides away (⌘\\). Move the mouse to the left edge and it comes back.'));
-      p.append(el('div', 'note', 'A tab’s own buttons — the speaker, the AI mark, move up and down, close — only appear when the pointer is on that row, so the sidebar stays quiet. A tab making a noise keeps its speaker showing, and a tab an agent is working in keeps its AI mark lit, whether or not you are pointing at it.'));
-    }],
+            // ---- the passcode
+            const lockRow = el('span', 'btnline');
+            const cur = el('input'); cur.type = 'password'; cur.placeholder = 'Current passcode'; cur.autocomplete = 'off'; cur.className = 'short';
+            const nw = el('input'); nw.type = 'password'; nw.placeholder = f.hasLock ? 'New passcode' : '4 or more'; nw.autocomplete = 'new-password'; nw.className = 'short';
+            const setB = el('button', 'btn', f.hasLock ? 'Change' : 'Set passcode'); setB.type = 'button';
+            setB.onclick = async () => { const r = await act('folder-passcode', { id: f.id, current: cur.value, code: nw.value }, told); if (r && r.ok) { await draw(); } };
+            if (f.hasLock) lockRow.append(cur);
+            lockRow.append(nw, setB);
+            if (f.hasLock) {
+              const off = el('button', 'btn', 'Remove passcode'); off.type = 'button';
+              off.onclick = async () => { const r = await act('folder-passcode', { id: f.id, current: cur.value, code: '' }, told); if (r && r.ok) await draw(); };
+              const now = el('button', 'btn', 'Lock now'); now.type = 'button';
+              now.onclick = async () => { await act('folder.lock-now', { id: f.id }, told); draw(); };
+              lockRow.append(off, now);
+            }
+            card.append(settingRow(f.hasLock ? 'Passcode (set)' : 'Passcode', lockRow, 'Stops someone clicking into a folder that is not theirs. It is not a safe: people who share one computer login could still dig through the computer’s own files.'));
 
-    ['shield', 'Shield', (p) => {
-      p.append(settingRow('Block ads and trackers', check('blockAds', s.blockAds !== false), 'The same filter lists Brave and uBlock use. Ads, tracking scripts and cookie banners never load, so pages are lighter as well as quieter.'));
-      p.append(settingRow('Warn me about dangerous sites', check('warnDangerous', s.warnDangerous !== false), 'A page reported for handing out viruses, or for copying a real sign-in page to collect your password, is stopped with an explanation instead of opening.'));
-      p.append(settingRow('Try the secure address first', check('httpsFirst', s.httpsFirst !== false), 'Cue asks for https:// even when a link says http://, and tells you when a site has no secure address.'));
-      p.append(settingRow('Keep my real address hidden on a VPN', check('hideRealIP', s.hideRealIP !== false), 'Video calling normally hands a page every network address this Mac has, which is how a site reads your home address while NordVPN is on. Cue offers the public one only. Takes effect on the next page load.'));
-      const shieldLine = el('div', 'note', 'Checking…'); p.append(shieldLine);
-      const shieldRow = el('div', 'row'); const refresh = el('button', 'btn small', 'Check for new threats now');
-      const ago = (at) => {
-        if (!at) return 'never';
-        const d = Math.round((Date.now() - at) / 86400000);
-        return d <= 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} ago`;
-      };
-      const showShield = () => window.cue.invoke('shield.status').then((st) => {
-        if (!st.on) { shieldLine.textContent = 'The shield is off. Nothing is being blocked.'; return; }
-        const allowed = st.allowed.length ? ` Ads are allowed by hand on ${st.allowed.join(', ')}.` : '';
-        shieldLine.textContent = `${st.listsMB} MB of ad and tracker rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
-      });
-      refresh.onclick = async () => {
-        refresh.disabled = true; refresh.textContent = 'Fetching the new lists…';
-        const r = await window.cue.invoke('shield.refresh');
-        refresh.textContent = r && r.ok === false ? 'Could not reach the lists' : 'Up to date';
-        setTimeout(() => { refresh.disabled = false; refresh.textContent = 'Check for new threats now'; }, 4000);
+            // ---- sharing sign-ins: only shown for a pair that is on, or when asked for
+            for (const other of f.shared || []) {
+              const o = byId[other];
+              if (!o || f.id > other) continue; // each pair once
+              card.append(toggle('', true, `Shares sign-ins with ${o.name}`, 'A site signed in here is signed in there too, and the other way round. Gmail, YouTube, Instagram, Facebook and WhatsApp always stay separate.',
+                async (on) => { await act('folder.share', { a: f.id, b: other, on }, told); draw(); }));
+            }
+            for (const other of f.shared || []) {
+              const o = byId[other];
+              if (!o || f.id < other) continue;
+              card.append(el('div', 'hint', `Shares sign-ins with ${esc(o.name)} (switch it off on ${esc(o.name)}'s card).`));
+            }
+            const choices = rows.filter((r) => r.id !== f.id && !r.locked && !(f.shared || []).includes(r.id));
+            if (choices.length) {
+              const pick = el('select');
+              pick.append(Object.assign(el('option', '', 'Nobody'), { value: '' }));
+              choices.forEach((r) => { const o = el('option', '', esc(r.name)); o.value = r.id; pick.append(o); });
+              pick.onchange = async () => { if (pick.value) { await act('folder.share', { a: f.id, b: pick.value, on: true }, told); draw(); } };
+              card.append(settingRow('Share sign-ins with', pick, 'Off unless you choose it. Only pair two folders that belong to the same person.'));
+            }
+
+            // ---- Google and Meta sign-ins for this folder
+            const signs = el('span', 'btnline');
+            const g = el('button', 'btn', 'Google'); g.type = 'button';
+            g.onclick = () => { send('signin.google', { identity: f.id }); told(`Google’s sign-in page is open in a new tab in ${f.name}. Close Settings to use it.`); };
+            const m = el('button', 'btn', 'Instagram and Facebook from Chrome'); m.type = 'button';
+            m.onclick = () => {
+              m.disabled = true; told('Bringing them over from Chrome…');
+              send('signin.carry-all', { identity: f.id });
+              setTimeout(() => { m.disabled = false; told('Done. Open Instagram or Facebook in this folder to check.'); }, 6000);
+            };
+            signs.append(g); if (S.canCarryFromChrome) signs.append(m); // only on a Mac that has Chrome
+            card.append(settingRow('Sign in', signs, 'Google: signs this folder in on Google’s own page, after emptying its old Google cookies. Instagram and Facebook do not always accept a sign-in typed into a browser they do not know yet, so if Chrome on this computer is signed in, this copies those two across into this folder only. Google is never copied: it ties a sign-in to the one browser it was made in.'));
+            box.append(card);
+          }
+          box.append(settingRow('Lock folders again after', amount(text('lockMinutes', lockMinutes, '15', 'number'), 'idle minutes'),
+            'A folder with a passcode asks for it every time Cue opens, after this many idle minutes (0: only then), and when you right-click it and choose Lock now. Separate computer logins, one per person, are stronger.'));
+        };
+        draw();
+        const def = el('select'); [...personFolders(), ...(S.folders.includes('agent') ? ['agent'] : [])].forEach((k) => { const o = el('option', '', esc(folderName(k))); o.value = k; if (k === s.defaultIdentity) o.selected = true; def.append(o); });
+        def.onchange = () => send('setting', { key: 'defaultIdentity', value: def.value });
+        p.append(settingRow('A new, empty Space opens in', def));
+        const mv = el('span', 'btnline');
+        const mvb = el('button', 'btn', 'Move in from another browser'); mvb.type = 'button'; mvb.onclick = () => { closeModal(); openImport(); };
+        const dfb = el('button', 'btn', 'Make Cue my browser'); dfb.type = 'button';
+        const dtell = said(mv);
+        dfb.onclick = () => { send('make-default'); dtell('Asked. Your computer may show a box to confirm.'); };
+        mv.prepend(mvb, dfb);
+        p.append(settingRow('Other browsers', mv));
+      } },
+
+    { id: 'spaces', name: 'Spaces', line: 'A Space is the kind of work; a folder is whose account.',
+      more: 'Each Space keeps its own tabs, its own layout and the folder it usually opens in. Going to an empty Space opens that folder; a Space with tabs opens the folder of the tab you land on. Up to nine. You can also double-click a Space in the sidebar to rename it.',
+      build: (p) => {
+        const box = el('div', 'spacelist'); p.append(box);
+        const line = el('div', 'spsaid'); const tell = said(line);
+        const run = async (cmd, a) => {
+          const r = await ask(cmd, a);
+          if (r && r.error) tell(r.error, true); else tell((r && r.said) || '');
+          // The sidebar is told first; draw from what it was told.
+          await new Promise((res) => setTimeout(res, 90));
+          draw();
+          return r;
+        };
+        const draw = () => {
+          box.innerHTML = '';
+          const list = S.spaceList || S.spaces.map((name) => ({ name, tint: 'rose' }));
+          list.forEach((sp, i) => {
+            const r = el('div', 'sprow unit'); r.dataset.space = sp.name;
+            const up = el('button', 'mini2', '↑'); up.type = 'button'; up.disabled = i === 0; tip(up, `Move ${sp.name} up`);
+            up.onclick = () => run('space.move', { name: sp.name, dir: -1 });
+            const dn = el('button', 'mini2', '↓'); dn.type = 'button'; dn.disabled = i === list.length - 1; tip(dn, `Move ${sp.name} down`);
+            dn.onclick = () => run('space.move', { name: sp.name, dir: 1 });
+            const sw = el('span', 'swatches'); sw.setAttribute('role', 'radiogroup'); sw.setAttribute('aria-label', `Colour for ${sp.name}`);
+            for (const tint of S.spaceTints || []) {
+              const b = el('button', 'sw' + (tint === sp.tint ? ' on' : '')); b.type = 'button'; b.dataset.tint = tint;
+              b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(tint === sp.tint));
+              tip(b, `${tint[0].toUpperCase()}${tint.slice(1)}`);
+              b.onclick = () => run('space.tint', { name: sp.name, tint });
+              sw.append(b);
+            }
+            const nm = el('input', 'spname'); nm.type = 'text'; nm.value = sp.name; nm.maxLength = 18; nm.setAttribute('aria-label', `Name of ${sp.name}`);
+            nm.onkeydown = (e) => { if (e.key === 'Enter') nm.blur(); if (e.key === 'Escape') { nm.value = sp.name; nm.blur(); } };
+            nm.onchange = () => { const v = nm.value.trim(); if (v && v !== sp.name) run('space.rename', { from: sp.name, name: v }); else nm.value = sp.name; };
+            const pick = el('select'); pick.setAttribute('aria-label', `Folder ${sp.name} opens in`);
+            personFolders().forEach((k) => { const o = el('option', '', esc(folderName(k))); o.value = k; o.selected = s.spaceLogins[sp.name] === k; pick.append(o); });
+            pick.onchange = () => send('setting', { key: `spaceLogin.${sp.name}`, value: pick.value });
+            const opens = el('span', 'spopens'); opens.append(el('span', 'unitword', 'opens in'), pick);
+            r.append(up, dn, sw, nm, opens);
+            if (list.length > 1) {
+              const home = (list[0].name === sp.name ? list[1] : list[0]).name;
+              r.append(confirmButton('Remove', `Remove? Tabs go to ${home}`, () => run('space.remove', { name: sp.name })));
+            }
+            box.append(r);
+          });
+          if (list.length < 9) {
+            const add = el('div', 'sprow spadd unit');
+            const nm = el('input', 'spname'); nm.type = 'text'; nm.placeholder = 'Name a new Space'; nm.maxLength = 18; nm.setAttribute('aria-label', 'Name a new Space');
+            const go = el('button', 'btn', 'Add this Space'); go.type = 'button';
+            const doIt = () => { const v = nm.value.trim(); if (v) run('space.add', { name: v }); };
+            go.onclick = doIt;
+            nm.onkeydown = (e) => { if (e.key === 'Enter') doIt(); };
+            add.append(nm, go);
+            box.append(add);
+          }
+          box.append(line);
+        };
+        draw();
+      } },
+
+    { id: 'look', name: 'What you see', line: 'Hide the parts you never use; nothing is deleted.',
+      more: 'Switching a part off takes its buttons out of the toolbar and the sidebar, and switching it back on brings everything straight back. A tab’s own buttons (the speaker, the AI mark, move up and down, close) only appear while the pointer is on its row, except a tab making a sound and a tab an agent is working in.',
+      build: (p) => {
+        toggles(p, ...Object.entries(S.kits).map(([k, v]) => toggle(`kit.${k}`, s.kits[k], v.name, v.what)));
+        toggles(p,
+          toggle('showDownloads', s.showDownloads !== false, 'Downloads tray in the sidebar', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
+          toggle('sideHidden', s.sideHidden, 'Sidebar hidden until you reach for it', 'The whole sidebar slides away (⌘\\). Move the pointer to the left edge and it comes back.'));
+      } },
+
+    { id: 'shield', name: 'Shield', line: 'Ads, trackers and dangerous sites are stopped before they load.',
+      build: (p) => {
+        toggles(p,
+          toggle('blockAds', s.blockAds !== false, 'Block ads and trackers', 'The same filter lists Brave and uBlock use. Ads, tracking scripts and cookie banners never load, so pages are lighter as well as quieter.'),
+          toggle('warnDangerous', s.warnDangerous !== false, 'Warn me about dangerous sites', 'A page reported for spreading viruses, or for copying a real sign-in page to collect your password, is stopped with an explanation instead.'),
+          toggle('httpsFirst', s.httpsFirst !== false, 'Try the secure address first', 'Cue asks for https:// even when a link says http://, and tells you when a site has no secure address.'),
+          toggle('hideRealIP', s.hideRealIP !== false, 'Keep my real address hidden on a VPN', 'Video calling normally hands a page every network address this computer has, which is how a site can read your home address while a VPN is on. Cue offers the public one only. Takes effect on the next page load.'));
+        const shieldLine = el('span', 'hint', 'Checking…');
+        const refresh = el('button', 'btn', 'Check for new threats now'); refresh.type = 'button';
+        const ago = (at) => {
+          if (!at) return 'never';
+          const d = Math.round((Date.now() - at) / 86400000);
+          return d <= 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} ago`;
+        };
+        const showShield = () => ask('shield.status').then((st) => {
+          if (!st) return;
+          if (!st.on) { shieldLine.textContent = 'The shield is off. Nothing is being blocked.'; return; }
+          const allowed = st.allowed.length ? ` Ads allowed by hand on ${st.allowed.join(', ')}.` : '';
+          shieldLine.textContent = `${st.listsMB} MB of rules, refreshed ${ago(st.listsAt)}. ${st.dangerous.toLocaleString()} dangerous sites known, refreshed ${ago(st.dangerAt)}.${allowed}`;
+        });
+        refresh.onclick = async () => {
+          refresh.disabled = true; refresh.textContent = 'Fetching the new lists…';
+          const r = await ask('shield.refresh');
+          refresh.textContent = r && r.ok === false ? 'Could not reach the lists' : 'Up to date';
+          setTimeout(() => { refresh.disabled = false; refresh.textContent = 'Check for new threats now'; }, 4000);
+          showShield();
+        };
+        const r = settingRow('The lists', refresh, 'Cue fetches them by itself every few days; this is for when you want it now.');
+        r.querySelector('.slab').append(shieldLine);
+        p.append(r);
         showShield();
-      };
-      shieldRow.append(el('span', 'note', 'Cue fetches them by itself every few days; this is for when you want it now.'), refresh); p.append(shieldRow);
-      showShield();
-    }],
+      } },
 
-    ['pw', 'Passwords', (p) => {
-      p.append(el('div', 'note', 'Cue offers to save a password when you sign in to a site, and fills it in next time. With “auto” ticked it signs you in by itself. Nothing leaves this Mac and nothing is ever filled into a page you did not open yourself.'));
-      const team = el('div', 'row'); const teamBtn = el('button', 'btn', 'Load');
-      teamBtn.onclick = () => { closeModal(); window.cue.invoke('team-vault'); };
-      team.append(el('span', 'note', 'Load the portal and admin logins from team.nathanielschool.com, once. Cards and banks stay out.'), teamBtn);
-      const pwBox = el('div', 'pwlist'); p.append(pwBox);
-      window.cue.invoke('team-offered').then((yes) => { if (yes) pwBox.before(team); });
-      window.cue.invoke('passwords').then((list) => {
-        if (!list.length) pwBox.append(el('div', 'note', 'No saved passwords yet. Cue offers to save one when you sign in to a site.'));
-        const same = new Map();
-        list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
-        const ours = (g) => /(^|\.)nathanielschool\.com$/.test(hostOf(g[0].origin));
-        const rows = [...same.values()].sort((q, r2) => hostOf(q[0].origin).localeCompare(hostOf(r2[0].origin)));
-        [['Nathaniel School', rows.filter(ours)], ['Other sites', rows.filter((g) => !ours(g))]].forEach(([title, group]) => {
-          if (group.length) pwBox.append(el('div', 'note', `${title} (${group.length})`));
-          group.forEach((g) => {
-            const x = g[0]; const r = el('div', 'row'); const a2 = check('', g.every((i) => i.auto)); a2.title = 'Sign in by itself on this site';
+    { id: 'pw', name: 'Passwords', line: 'Cue offers to save a password when you sign in, then fills it in.',
+      more: 'With “auto” ticked, Cue signs you in to that site by itself. Nothing leaves this computer, and nothing is ever filled into a page you did not open yourself. Only the open folder’s passwords are listed.',
+      build: (p) => {
+        const team = el('span', 'btnline'); const teamBtn = el('button', 'btn', 'Load'); teamBtn.type = 'button';
+        const tTell = said(team);
+        teamBtn.onclick = async () => { teamBtn.disabled = true; tTell('Loading…'); const r = await ask('team-vault');
+          if (r && r.error) tTell(r.error, true);
+          else if (r && r.signedIn === false) tTell('Sign in to your team site in the tab that opened, then press Load again.', true);
+          else tTell('Loaded.'); teamBtn.disabled = false; };
+        team.prepend(teamBtn);
+        const pwBox = el('div', 'pwlist'); p.append(pwBox);
+        ask('team-offered').then((yes) => { if (yes) pwBox.before(settingRow('Your team’s shared logins', team, 'Loads the shared logins from your team’s site, once. Cards and bank logins stay out.')); });
+        ask('passwords').then((list) => {
+          if (!list) return;
+          if (!list.length) { pwBox.append(el('div', 'hint', 'No saved passwords yet.')); return; }
+          const same = new Map();
+          list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
+          const rows = [...same.values()].sort((q, r2) => hostOf(q[0].origin).localeCompare(hostOf(r2[0].origin)));
+          pwBox.append(el('h3', '', `Saved sign-ins (${rows.length})`));
+          rows.forEach((g) => {
+            const x = g[0]; const r = el('div', 'srow unit');
+            const a2 = el('input', 'switch'); a2.type = 'checkbox'; a2.checked = g.every((i) => i.auto); a2.setAttribute('role', 'switch');
+            a2.setAttribute('aria-label', `Sign in to ${hostOf(x.origin)} by itself`);
             a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
-            const rm = el('button', 'btn', 'Remove'); rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
-            const auto = el('label', 'note', ' auto'); auto.prepend(a2);
-            const who = g.length > 1 ? 'Personal and School' : S.identities[x.identity].name;
-            r.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'} · ${who}`)), auto, rm); pwBox.append(r);
+            const rm = el('button', 'btn', 'Remove'); rm.type = 'button'; rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
+            const left = el('div', 'slab'); left.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'}`)));
+            const ctl = el('div', 'sctl'); ctl.append(el('span', 'unitword', 'auto'), a2, rm);
+            r.append(left, ctl); pwBox.append(r);
           });
         });
-      });
-    }],
+      } },
 
-    ['ext', 'Chrome extensions', (p) => {
-      const exBox = el('div', 'pwlist'); p.append(exBox);
-      p.append(el('div', 'note', 'An extension can read the pages you are signed in to, so each one says what it can do before you add it. Copied from your other browsers, so they keep working here. Removing one puts it in the Trash.'));
-      const extRow = (x, right) => {
-        const r = el('div', 'rowtall');
-        const left = el('div', 'rowtext');
-        left.append(el('div', '', esc(x.version ? `${x.name} · ${x.version}` : x.name)));
-        if (x.can) left.append(el('div', 'note', esc(x.can)));
-        r.append(left, right);
-        return r;
-      };
-      window.cue.invoke('ext-find').then(({ available, installed }) => {
-        if (installed.length) exBox.append(el('div', 'note', `In Cue now (${installed.length})`));
-        installed.forEach((x) => {
-          const b = el('button', 'btn danger', 'Remove');
-          let sure = false;
-          b.onclick = () => {
-            if (!sure) { sure = true; b.textContent = 'Remove it?'; b.classList.add('sure'); setTimeout(() => { if (sure) { sure = false; b.textContent = 'Remove'; b.classList.remove('sure'); } }, 4000); return; }
-            window.cue.invoke('ext-remove', { id: x.id });
-            r.replaceChildren(el('span', 'note', esc(`${x.name} removed. It is in the Trash.`)));
-          };
-          const r = extRow({ ...x, name: x.on === false ? `${x.name} · off` : x.name }, b);
-          exBox.append(r);
+    { id: 'ext', name: 'Chrome extensions', line: 'Add the extensions you already use in your other browsers.',
+      more: 'An extension can read the pages you are signed in to, so each one says what it can do before you add it. They are copied from your other browsers, so they keep their settings. Removing one puts it in the Trash.',
+      build: (p) => {
+        const exBox = el('div', 'pwlist'); p.append(exBox);
+        const extRow = (x, right) => {
+          const r = el('div', 'rowtall unit');
+          const left = el('div', 'rowtext');
+          left.append(el('div', '', esc(x.version ? `${x.name} · ${x.version}` : x.name)));
+          if (x.can) left.append(el('div', 'note', esc(x.can)));
+          r.append(left, right);
+          return r;
+        };
+        ask('ext-find').then((got) => {
+          if (!got) return;
+          const { available, installed } = got;
+          if (installed.length) exBox.append(el('h3', '', `In Cue now (${installed.length})`));
+          installed.forEach((x) => {
+            let r = null;
+            const b = confirmButton('Remove', 'Remove it?', async () => { await ask('ext-remove', { id: x.id }); r.replaceChildren(el('span', 'note', esc(`${x.name} removed. It is in the Trash.`))); });
+            r = extRow({ ...x, name: x.on === false ? `${x.name} · off` : x.name }, b);
+            exBox.append(r);
+          });
+          if (available.length) exBox.append(el('h3', '', `Found in your other browsers (${available.length})`));
+          available.forEach((x) => {
+            const b = el('button', 'btn', 'Add'); b.type = 'button'; const wrap = el('div', 'rowbtns');
+            const st = el('span', 'note', esc(x.from));
+            b.onclick = async () => { const res = await ask('ext-add', x); st.textContent = res && res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; };
+            wrap.append(st, b);
+            exBox.append(extRow(x, wrap));
+          });
+          if (!installed.length && !available.length) exBox.append(el('div', 'hint', 'None found.'));
         });
-        if (available.length) exBox.append(el('div', 'note', `Found in your other browsers (${available.length})`));
-        available.slice(0, 30).forEach((x) => {
-          const b = el('button', 'btn', 'Add'); const wrap = el('div', 'rowbtns');
-          const st = el('span', 'note', esc(x.from));
-          b.onclick = async () => { const res = await window.cue.invoke('ext-add', x); st.textContent = res.ok ? 'Added' : 'This one does not work in Cue yet'; b.disabled = true; };
-          wrap.append(st, b);
-          exBox.append(extRow(x, wrap));
+      } },
+
+    { id: 'live', name: 'Live class', line: 'What the class sees, and how Cue talks to OBS.',
+      more: 'Zoom: Share Screen, then pick “Cue Stage — On Air”. OBS: add a Window Capture of the same window.',
+      build: (p) => {
+        toggles(p, toggle('safeShare', s.safeShare, 'Blur private details on air', 'While a tab is on air, email addresses, phone numbers, amounts of money and keys on the page are blurred.'));
+        const size = el('select'); [['1920x1080', '1920 × 1080'], ['1280x720', '1280 × 720']].forEach(([v, n]) => { const o = el('option', '', n); o.value = v; if (v === `${s.stageWidth}x${s.stageHeight}`) o.selected = true; size.append(o); });
+        size.onchange = () => { const [w, h] = size.value.split('x').map(Number); send('setting', { key: 'stageWidth', value: w }); send('setting', { key: 'stageHeight', value: h }); };
+        p.append(settingRow('Size of the on-air window', size));
+        const ob = el('span', 'btnline');
+        const status = el('span', 'pill' + (S.obs === 'connected' ? ' ok' : ''), S.obs === 'connected' ? 'Connected' : S.obs === 'connecting' ? 'Connecting…' : 'Not connected');
+        const cb = el('button', 'btn', 'Connect'); cb.type = 'button'; cb.onclick = () => { send('obs-connect'); status.textContent = 'Connecting…'; };
+        ob.append(status, cb);
+        p.append(settingRow('OBS', ob));
+        toggles(p, toggle('obs.autoConnect', s.obs.autoConnect !== false, 'Connect to OBS when Cue opens'));
+        const a = S.tabs.find((t) => t.id === S.activeId);
+        if (a) {
+          const inp = el('input', 'wide'); inp.type = 'text'; inp.value = a.obsScene || ''; inp.placeholder = 'Scene name';
+          inp.onchange = () => send('set-scene', { id: a.id, scene: inp.value });
+          p.append(settingRow(`OBS scene for this tab`, inp, `Switches OBS to this scene when “${String(a.title || '').slice(0, 40)}” goes on air.`));
+          ask('obs-scenes').then((list) => { if (list && list.length) { const dl = el('datalist'); dl.id = 'scenes'; list.forEach((n) => { const o = el('option'); o.value = n; dl.append(o); }); p.append(dl); inp.setAttribute('list', 'scenes'); } });
+        }
+        advanced(p, (box) => {
+          box.append(settingRow('Computer OBS runs on', text('obs.host', s.obs.host, '127.0.0.1'), 'Leave as it is when OBS runs on this computer.'));
+          box.append(settingRow('OBS connection number (port)', text('obs.port', s.obs.port, '4455', 'number')));
+          box.append(settingRow('OBS password', text('obs.password', '', s.obs.password ? 'Saved' : 'From OBS > Tools > WebSocket', 'password')));
         });
-        if (!installed.length && !available.length) exBox.append(el('div', 'note', 'None found.'));
-      });
-    }],
+      } },
 
-    ['live', 'Live class', (p) => {
-      p.append(settingRow('Safe-share (blur emails, phone numbers, money, keys on air)', check('safeShare', s.safeShare)));
-      const size = el('select'); [['1920x1080', '1920 × 1080'], ['1280x720', '1280 × 720']].forEach(([v, n]) => { const o = el('option', '', n); o.value = v; if (v === `${s.stageWidth}x${s.stageHeight}`) o.selected = true; size.append(o); });
-      size.onchange = () => { const [w, h] = size.value.split('x').map(Number); send('setting', { key: 'stageWidth', value: w }); send('setting', { key: 'stageHeight', value: h }); };
-      p.append(settingRow('Stage window size', size, 'Zoom: Share Screen → pick “Cue Stage — On Air”. OBS: Window Capture → the same window.'));
-      p.append(settingRow('OBS address', text('obs.host', s.obs.host, '127.0.0.1')));
-      p.append(settingRow('OBS port', text('obs.port', s.obs.port, '4455', 'number')));
-      p.append(settingRow('OBS password', text('obs.password', '', s.obs.password ? 'Saved' : 'From OBS → Tools → WebSocket', 'password')));
-      const ob = el('div', 'row'); const status = el('span', 'pill' + (S.obs === 'connected' ? ' ok' : ''), S.obs === 'connected' ? 'Connected' : S.obs === 'connecting' ? 'Connecting…' : 'Not connected');
-      const cb = el('button', 'btn', 'Connect to OBS'); cb.onclick = () => send('obs-connect');
-      const ac = check('obs.autoConnect', s.obs.autoConnect); const acl = el('label', 'note', ' connect on launch'); acl.prepend(ac);
-      ob.append(status, acl, cb); p.append(ob);
-      const a = S.tabs.find((t) => t.id === S.activeId);
-      if (a) {
-        const sc = el('div', 'row'); const inp = el('input'); inp.type = 'text'; inp.value = a.obsScene || ''; inp.placeholder = 'Scene name, e.g. 🎹 Class Apps';
-        inp.onchange = () => send('set-scene', { id: a.id, scene: inp.value });
-        sc.append(el('label', '', `OBS scene for “${esc(a.title.slice(0, 40))}”`), inp); p.append(sc);
-        window.cue.invoke('obs-scenes').then((list) => { if (list && list.length) { const dl = el('datalist'); dl.id = 'scenes'; list.forEach((n) => { const o = el('option'); o.value = n; dl.append(o); }); p.append(dl); inp.setAttribute('list', 'scenes'); } });
-      }
-    }],
+    { id: 'ai', name: 'AI agents', line: 'Let Claude Code, Codex and other AI tools work in Cue.',
+      more: 'They work in their own tabs with a purple ring and in the folders you allow. They can never touch off-air tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it. To hand over a tab, point at its row in the sidebar and click the AI mark; click it again to take it back. A lit mark means an agent is working in there right now.',
+      build: (p) => {
+        toggles(p,
+          toggle('', !!S.agent.on, 'Let AI agents drive Cue', 'Stays as you leave it, so an agent can answer messages or check a page while you are busy. While it is off nothing can drive Cue but you, and an AI tool that tries is told why.', (on) => send('ai-door', { on })),
+          ...(S.agent.sites || []).map((site) => toggle(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false, `Let agents use ${site.name}`, site.what)));
+        const cp = el('span', 'btnline'); const cpb = el('button', 'btn', 'Copy AI setup'); cpb.type = 'button';
+        const tell = said(cp);
+        cpb.onclick = () => { send('agent-copy'); tell('Copied. Paste it into your AI tool.'); };
+        cp.prepend(cpb);
+        p.append(settingRow('Connect an AI tool', cp, '', S.agent.last ? `Last: ${S.agent.last.agent} used ${S.agent.last.tool}` : 'No agent has connected yet.'));
+        advanced(p, (box) => {
+          box.append(settingRow('Address agents connect to', el('code', 'addr', esc(`127.0.0.1:${S.agent.port}`)), 'Only programs on this computer can reach it.'));
+        });
+      } },
 
-    ['ai', 'AI agents', (p) => {
-      p.append(el('div', 'note', `Claude Code, Codex and other AI tools connect through Cue's AI port (127.0.0.1:${S.agent.port}). They work in their own tabs with a purple ring, can use your Personal or School logins, and can never touch private tabs, Vanish tabs or the tab on air. If one reaches into a tab you did not hand it, Cue says so on screen.`));
-      const door = el('input'); door.type = 'checkbox'; door.checked = !!S.agent.on;
-      door.onchange = () => send('ai-door', { on: door.checked });
-      p.append(settingRow('Let AI agents drive Cue', door,
-        'Stays as you leave it, so an agent can answer WhatsApp or check a page while you teach. While it is off nothing can drive Cue but you, and an AI tool that tries is told why. Either way they never touch private tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it.'));
-      for (const site of (S.agent.sites || [])) {
-        p.append(settingRow(`Let agents use ${site.name}`,
-          check(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false), site.what));
-      }
-      p.append(el('div', 'note', 'Every other tab is yours until you hand it over: point at its row in the sidebar and click the AI mark, and click it again to take it back. The mark lights up on its own while an agent is actually working in that tab, so a lit AI means something is happening in there right now.'));
-      const cp = el('button', 'btn', 'Copy AI setup'); cp.onclick = () => send('agent-copy');
-      const r = el('div', 'row'); r.append(el('span', 'note', S.agent.last ? `Last: ${esc(S.agent.last.agent)} used ${esc(S.agent.last.tool)}` : 'No agent has connected yet.'), cp); p.append(r);
-    }],
-
-    ['disk', 'Storage and updates', (p) => {
-      p.append(settingRow('Update Cue by itself', check('autoUpdate', s.autoUpdate !== false), 'A new version is fetched quietly in the background and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open, so a class or a recording can never be interrupted.'));
-      p.append(settingRow('Cache limit per login (MB)', text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'Applies next time Cue opens. Sign-ins are not affected.'));
-      const used = el('div', 'row'); const usedText = el('span', 'note', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache');
-      clearBtn.onclick = () => send('clear-cache');
-      used.append(usedText, clearBtn); p.append(used);
-      window.cue.invoke('storage').then((r) => { usedText.textContent = `Cache ${r.cacheMB} MB. Cue in total ${r.totalMB} MB. Trimmed automatically above ${r.limitMB} MB.`; });
-      p.append(settingRow('Warn before downloading when free space falls under (GB)', text('lowDiskGB', s.lowDiskGB, '5', 'number')));
-      p.append(settingRow('Move opened installers to the Trash after a day', check('tidyInstallers', s.tidyInstallers)));
-      p.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'jasonzacmusic')));
-    }],
+    { id: 'disk', name: 'Storage and updates', line: 'Cue updates itself when you close it, and tidies its own space.',
+      build: (p) => {
+        toggles(p,
+          toggle('autoUpdate', s.autoUpdate !== false, 'Update Cue by itself', 'A new version is fetched quietly and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open.'),
+          toggle('tidyInstallers', s.tidyInstallers, 'Move opened installers to the Trash after a day'));
+        if (S.update && S.update.blocked === 'readonly') p.append(el('div', 'hint', 'Cue cannot update itself here because its folder is read-only. Get the new version from its download page.'));
+        const used = el('span', 'btnline'); const usedText = el('span', 'hint', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache'); clearBtn.type = 'button';
+        clearBtn.onclick = () => { send('clear-cache'); usedText.textContent = 'Cleared. Sign-ins are kept.'; };
+        used.append(clearBtn);
+        const ur = settingRow('Space Cue uses', used, 'Sites keep copies of pictures and scripts so they load faster. Clearing them is safe: sign-ins are kept.');
+        ur.querySelector('.slab').append(usedText);
+        p.append(ur);
+        ask('storage').then((r) => { if (r) usedText.textContent = `Saved site files ${r.cacheMB} MB. Cue in total ${r.totalMB} MB. Trimmed by itself above ${r.limitMB} MB.`; });
+        p.append(settingRow('Warn before downloading when free space falls under', amount(text('lowDiskGB', s.lowDiskGB, '5', 'number'), 'GB')));
+        p.append(settingRow('GitHub name for Find anything', text('githubUser', s.githubUser, 'your-github-name'), 'Your GitHub projects then show up in Find anything.'));
+        advanced(p, (box) => {
+          box.append(settingRow('How much disk space each person’s sites may use', amount(text('cacheCapMB', s.cacheCapMB, '256', 'number'), 'MB'), 'Takes effect the next time Cue opens. Sign-ins are not affected.'));
+        });
+      } },
   ];
+}
+
+// Every word a unit of a room can be found by: its text, its "?" and any words it carries.
+// A unit is found by the words on it (each searched word must start a word there), or by its
+// "?" text when that holds the whole phrase - so "one video" does not find every help text that
+// happens to say "one" somewhere and "video" somewhere else.
+const unitWords = (u) => {
+  const help = [...u.querySelectorAll('.help')].map((n) => n.textContent).join(' ');
+  const all = `${u.textContent} ${u.dataset.words || ''} ${[...u.querySelectorAll('input[placeholder]')].map((i) => i.placeholder).join(' ')}`;
+  return { main: (help ? all.split(help).join(' ') : all).toLowerCase(), help: help.toLowerCase() };
+};
+const wordStart = (text, w) => new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(text);
+const matches = (words, q) => {
+  if (typeof words === 'string') words = { main: words, help: '' };
+  return q.every((w) => wordStart(words.main, w)) || (q.length > 0 && words.help.includes(q.join(' ')));
+};
+
+function openSettings(startAt) {
+  const rooms = settingsRooms();
+  rooms.push({ id: 'setup', name: 'Starting setup', line: 'Plain, or one organisation’s own apps and Spaces on top.', build: startingSetupRoom });
+  // A kit that is off takes its room with it.
+  { const k = (S.settings && S.settings.kits) || {}; for (const [room, kit] of [['live', 'teacher']]) { const i = rooms.findIndex((r) => r.id === room); if (i >= 0 && k[kit] === false) rooms.splice(i, 1); } }
+  // What each room can be found by, read once per opening without asking the main side anything.
+  let index = null;
+  const buildIndex = () => {
+    indexing = true;
+    try {
+      index = rooms.map((room) => {
+        const box = el('div');
+        try { room.build(box); } catch {}
+        return { id: room.id, head: `${room.name} ${room.line} ${room.more || ''}`.toLowerCase(), units: [...box.querySelectorAll('.unit')].map(unitWords) };
+      });
+    } finally { indexing = false; }
+  };
 
   openModal((sh) => {
     sh.classList.add('settings');
-    sh.append(el('h2', '', 'Cue settings'));
+    sh.append(el('h2', '', 'Settings'));
     const body = el('div', 'sbody');
-    const nav = el('div', 'snav');
-    const pane = el('div', 'spane');
-    body.append(nav, pane);
+    const side = el('div', 'sside');
+    const search = el('input', 'ssearch'); search.type = 'search'; search.placeholder = 'Search settings'; search.setAttribute('aria-label', 'Search settings');
+    const nav = el('div', 'snav'); nav.setAttribute('role', 'tablist');
+    side.append(search, nav);
+    const pane = el('div', 'spane'); pane.setAttribute('role', 'tabpanel');
+    body.append(side, pane);
     sh.append(body);
-    const show = (id) => {
-      const room = rooms.find((x) => x[0] === id) || rooms[0];
-      settingsRoom = room[0];
-      pane.innerHTML = '';
-      [...nav.children].forEach((b) => b.classList.toggle('on', b.dataset.id === room[0]));
-      try { room[2](pane); }
+    const drawRoom = (room, into) => {
+      try { room.build(into); }
       catch (e) {
-        pane.innerHTML = '';
-        pane.append(el('div', 'note', `This part of Settings could not be drawn: ${e && e.message ? e.message : e}. Everything else still works, and nothing is lost — tell Jason and it gets fixed.`));
+        into.innerHTML = '';
+        into.append(el('div', 'note', `This part of Settings could not be drawn: ${esc(e && e.message ? e.message : e)}. Everything else still works and nothing is lost; please report it.`));
       }
+    };
+    const show = (id) => {
+      const room = rooms.find((x) => x.id === id) || rooms[0];
+      settingsRoom = room.id;
+      pane.innerHTML = ''; pane.classList.remove('results');
+      [...nav.children].forEach((b) => { b.classList.toggle('on', b.dataset.id === room.id); b.classList.remove('miss'); b.setAttribute('aria-selected', String(b.dataset.id === room.id)); });
+      intro(pane, room.line, room.more);
+      drawRoom(room, pane);
       pane.scrollTop = 0;
     };
-    rooms.forEach(([id, name]) => {
-      const b = el('button', '', name); b.dataset.id = id;
-      b.onclick = () => show(id);
+    // Searching shows every room that has the words, each with only the settings that match,
+    // working as they do in their own room. Clicking a room's name goes to the whole room.
+    const find = () => {
+      const q = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!q.length) { show(settingsRoom); return; }
+      if (!index) buildIndex();
+      pane.innerHTML = ''; pane.classList.add('results');
+      let any = false;
+      for (const room of rooms) {
+        const ix = index.find((x) => x.id === room.id);
+        const whole = matches(ix.head, q);
+        const some = ix.units.some((w) => matches(w, q));
+        const b = nav.querySelector(`[data-id="${room.id}"]`);
+        b.classList.toggle('miss', !whole && !some); b.classList.remove('on');
+        if (!whole && !some) continue;
+        any = true;
+        const sec = el('section', 'sresult'); sec.dataset.room = room.id;
+        const go = el('button', 'sroom', `${esc(room.name)} <span>›</span>`); go.type = 'button';
+        go.onclick = () => { search.value = ''; show(room.id); };
+        sec.append(go);
+        const inner = el('div', 'sinner'); drawRoom(room, inner);
+        if (!whole) {
+          for (const u of inner.querySelectorAll('.unit')) u.hidden = !matches(unitWords(u), q);
+          for (const h of inner.querySelectorAll('h3, .hint:not(.unit .hint)')) h.hidden = true;
+          for (const g of inner.querySelectorAll('.tgrid')) g.hidden = ![...g.children].some((c) => !c.hidden);
+        }
+        for (const d of inner.querySelectorAll('details.adv')) if ([...d.querySelectorAll('.unit')].some((u) => !u.hidden)) d.open = true; else if (!whole) d.hidden = true;
+        sec.append(inner);
+        pane.append(sec);
+      }
+      if (!any) pane.append(el('div', 'hint', `Nothing in Settings matches “${esc(search.value.trim())}”.`));
+      pane.scrollTop = 0;
+    };
+    search.oninput = find;
+    search.onkeydown = (e) => { if (e.key === 'Escape' && search.value) { e.stopPropagation(); search.value = ''; find(); } };
+    rooms.forEach((room) => {
+      const b = el('button', '', esc(room.name)); b.dataset.id = room.id; b.type = 'button'; b.setAttribute('role', 'tab');
+      b.onclick = () => { if (search.value) search.value = ''; show(room.id); };
       nav.append(b);
     });
     show(startAt || settingsRoom);
-    const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.onclick = closeModal; foot.append(done); sh.append(foot);
+    const foot = el('div', 'foot'); const done = el('button', 'btn', 'Done'); done.type = 'button'; done.onclick = closeModal; foot.append(done); sh.append(foot);
   });
 }
+// Settings > Starting setup. Self-contained: it shows which setup is on and switches it, and never
+// touches sign-ins, tabs or folders.
+function startingSetupRoom(p) {
+  const on = S.preset;
+  p.append(el('div', 'note', 'Cue starts plain: one Space, empty number keys, nothing pinned. A starting setup adds one organisation’s own things on top. Your sign-ins, tabs and folders are never touched by switching one on or off.'));
+  p.append(settingRow('Now', el('span', 'note', esc(on ? on.name : 'Plain'))));
+  const list = el('div', ''); p.append(list);
+  // Asked for here rather than carried in every state push, so a plain install's sidebar is never
+  // told any organisation's name.
+  window.cue.invoke('presets').then((all) => {
+    for (const x of (all || [])) {
+      const row = el('div', 'row');
+      const mine = on && on.id === x.id;
+      const b = el('button', 'btn', mine ? 'Go back to plain' : `Apply ${esc(x.name)} setup`);
+      b.dataset.preset = x.id;
+      b.onclick = async () => {
+        b.disabled = true;
+        const r = await window.cue.invoke(mine ? 'preset.remove' : 'preset.apply', { id: x.id });
+        if (r && r.error) toast(r.error); else toast(mine ? 'Cue is plain again.' : `${x.name} setup is on.`);
+        setTimeout(() => { closeModal(); openSettings('setup'); }, 200);
+      };
+      row.append(el('span', 'note', esc(mine
+        ? (on.undo ? 'Takes away its apps, tiles, trusted sites and group, and puts back what switching it on changed. Anything you changed since stays.' : 'Takes away its apps, tiles, trusted sites and group. Your Spaces, number keys and pins stay as they are.')
+        : `${x.about} Adds its Spaces next to yours, fills number keys you have not set, turns every kit on.`)), b);
+      list.append(row);
+    }
+  });
+}
+
+// The first-run sheet: what to call you, which sites to pin, which starting setup. Skippable; it
+// only ever appears once, on a brand-new install.
+function welcomeSheet(d) {
+  closeModal();
+  openModal((sh) => {
+    sh.classList.add('welcome');
+    sh.append(el('h2', '', 'Welcome to Cue'));
+    let colour = d.color;
+    const nameRow = el('div', 'row');
+    const face = el('span', 'fface');
+    const paint = () => { face.innerHTML = ''; face.append(el('i', 'fltr', esc(((nm.value || d.name || '?').trim()[0] || '?').toUpperCase()))); face.style.setProperty('--c', colour); };
+    const nm = el('input'); nm.type = 'text'; nm.maxLength = 40; nm.placeholder = 'Your name'; nm.setAttribute('aria-label', 'What should we call you?');
+    nm.oninput = paint;
+    nameRow.append(face, nm);
+    sh.append(el('h3', '', 'What should we call you?'), nameRow);
+    const sw = el('div', 'wswatches');
+    for (const c of d.colors) {
+      const b = el('button', 'wswatch' + (c === colour ? ' on' : '')); b.style.background = c; b.setAttribute('aria-label', `Colour ${c}`);
+      b.onclick = () => { colour = c; for (const x of sw.children) x.classList.toggle('on', x === b); paint(); };
+      sw.append(b);
+    }
+    sh.append(sw);
+    sh.append(el('h3', '', 'Pin your everyday sites'));
+    const picks = el('div', 'welcomesites');
+    const boxes = new Map();
+    for (const site of d.sites) {
+      const l = el('label', 'note'); const c = el('input'); c.type = 'checkbox'; c.value = site.url;
+      l.append(c, document.createTextNode(` ${site.name}`)); picks.append(l); boxes.set(site.url, c);
+    }
+    sh.append(picks, el('div', 'note', 'They sit at the top of the sidebar. Unpin any of them later with a right-click.'));
+    sh.append(el('h3', '', 'Starting setup'));
+    const setups = el('div', 'choices');
+    let preset = '';
+    let school = null;
+    const pick = (id) => {
+      preset = id;
+      for (const b of setups.querySelectorAll('button')) b.classList.toggle('on', b.dataset.id === id);
+      const x = d.setups.find((y) => y.id === id);
+      if (x) for (const u of x.pinned || []) if (boxes.has(u)) boxes.get(u).checked = true;
+      if (school) school.parentElement.hidden = !(x && x.school);
+    };
+    const plain = el('button', 'choice on', 'Plain<small>One Space, nothing pinned you did not pick. You can add more later.</small>'); plain.dataset.id = '';
+    plain.onclick = () => pick('');
+    setups.append(plain);
+    for (const x of d.setups || []) {
+      const b = el('button', 'choice', `${esc(x.name)}<small>${esc(x.about)}</small>`); b.dataset.id = x.id;
+      b.onclick = () => pick(x.id);
+      setups.append(b);
+      if (x.school && !school) {
+        const l = el('label', 'note'); school = el('input'); school.type = 'checkbox'; school.checked = true;
+        l.append(school, document.createTextNode(' Also add a School folder for the school’s own accounts')); l.hidden = true;
+      }
+    }
+    sh.append(setups);
+    if (school) sh.append(school.parentElement);
+    sh.append(el('div', 'note', 'Add more people later with the + under your name. Each person’s sign-ins stay separate.'));
+    const foot = el('div', 'foot');
+    const skip = el('button', 'btn', 'Skip');
+    skip.onclick = async () => { await window.cue.invoke('welcome.skip'); closeModal(); };
+    const go = el('button', 'btn', 'Start');
+    go.onclick = async () => {
+      go.disabled = true;
+      const r = await window.cue.invoke('welcome.finish', { name: nm.value.trim(), color: colour, sites: [...boxes].filter(([, c]) => c.checked).map(([u]) => u), preset, school: !!(school && school.checked) });
+      if (r && r.error) { toast(r.error); go.disabled = false; return; }
+      closeModal();
+    };
+    foot.append(skip, go);
+    sh.append(foot);
+    paint();
+    setTimeout(() => nm.focus(), 30);
+  });
+}
+
+// The passcode sheet. Masked, a plain line when the code is wrong, and after five wrong tries it
+// says how long to wait and will not take another until then.
+function unlockSheet(d) {
+  closeModal();
+  openModal((sh) => {
+    sh.classList.add('unlock');
+    const top = el('div', 'row');
+    top.append(folderFace({ name: d.name, picture: d.picture }));
+    top.append(el('h2', '', `${esc(d.name)} is locked`));
+    top.style.setProperty('--c', d.color);
+    sh.append(top);
+    sh.append(el('div', 'note', 'Type this folder’s passcode to open it.'));
+    const inp = el('input'); inp.type = 'password'; inp.autocomplete = 'off'; inp.placeholder = 'Passcode'; inp.setAttribute('aria-label', `Passcode for ${d.name}`);
+    const say = el('div', 'note unlockerr'); say.setAttribute('role', 'alert');
+    const go = el('button', 'btn', 'Unlock');
+    let timer = null;
+    const waitFor = (s) => {
+      clearInterval(timer);
+      let left = s;
+      inp.disabled = true; go.disabled = true;
+      const tick = () => {
+        if (left <= 0) { clearInterval(timer); inp.disabled = false; go.disabled = false; say.textContent = ''; inp.focus(); return; }
+        say.textContent = `Too many wrong tries. Try again in ${left} second${left === 1 ? '' : 's'}.`;
+        left -= 1;
+      };
+      tick(); timer = setInterval(tick, 1000);
+    };
+    const tryIt = async () => {
+      if (!inp.value) return;
+      const r = await window.cue.invoke('folder-unlock', { id: d.id, code: inp.value });
+      inp.value = '';
+      if (r && r.ok) { clearInterval(timer); closeModal(); return; }
+      if (r && r.wait) waitFor(r.wait); else { say.textContent = (r && r.error) || 'That passcode is not right.'; inp.focus(); }
+    };
+    go.onclick = tryIt;
+    inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); tryIt(); } };
+    const row = el('div', 'row'); row.append(inp, go);
+    sh.append(row, say);
+    const foot = el('div', 'foot'); const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { clearInterval(timer); closeModal(); }; foot.append(cancel); sh.append(foot);
+    if (d.wait) waitFor(d.wait); else setTimeout(() => inp.focus(), 30);
+  });
+}
+
 let sharePending = false;
 function sharePicker(d) {
   sharePending = true;
@@ -1668,6 +2429,15 @@ window.cue.onEvent((name, data) => {
   // what he has already typed.
   else if (name === 'refocus-omnibox') { if (document.activeElement !== omni) omni.focus(); }
   else if (name === 'focus-find') openFind();
+  // Right-click > Volume…: the pinned app's control, or the slider on the tab's own row.
+  else if (name === 'volume-pop' && data) {
+    if (document.querySelector(`.pin[data-id="${data.id}"]`)) openVolPop(data.id, 'held');
+    else {
+      openVolId = data.id; render();
+      const r = document.querySelector(`.tab[data-id="${data.id}"] .volpop input`);
+      if (r) r.focus();
+    }
+  }
   else if (name === 'find-result') $('#findcount').textContent = data.total ? `${data.active}/${data.total}` : 'No matches';
   else if (name === 'program-thumb') $('#lb-thumb').src = data;
   else if (name === 'share-picker') sharePicker(data);
@@ -1677,7 +2447,9 @@ window.cue.onEvent((name, data) => {
   else if (name === 'save-password') credBar(data);
   else if (name === 'rec-start') startRecording();
   else if (name === 'rec-stop') stopRecording();
-  else if (name === 'open-settings') openSettings();
+  else if (name === 'open-settings') openSettings(typeof data === 'string' ? data : undefined);
+  else if (name === 'unlock') unlockSheet(data);
+  else if (name === 'welcome') welcomeSheet(data);
   else if (name === 'music-state' && data) {
     if (data.none) { toast('No video or audio on this page yet.'); return; }
     M.loop = !!data.loop; M.speed = Math.round(data.speed * 100); $('#m-speed').textContent = `${M.speed}%`;

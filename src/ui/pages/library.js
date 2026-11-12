@@ -15,29 +15,29 @@
   const now = Date.now(); const H = 3600000; const D = 86400000;
   const sample = SAMPLE ? {
     bookmarks: [
-      { title: 'Learning Portal', url: 'https://learning-portal.nathanielschool.com/', folder: 'School' },
-      { title: 'NSM Apps', url: 'https://apps.nathanielschool.com/', folder: 'School' },
+      { title: 'Example Docs', url: 'https://example.com/docs/', folder: 'Work' },
+      { title: 'Example Team', url: 'https://example.org/team/', folder: 'Work' },
       { title: 'YouTube Studio', url: 'https://studio.youtube.com/', folder: 'Channel' },
-      { title: 'Circle of Fifths, explained', url: 'https://www.musictheory.net/lessons/25', folder: 'Teaching ideas' },
-      { title: 'Salamander Grand Piano', url: 'https://sfzinstruments.github.io/pianos/salamander/', folder: 'Teaching ideas' },
-      { title: 'Silverline Electronics', url: 'https://silverlineelectronics.in/', folder: '' },
+      { title: 'A recipe to try', url: 'https://example.net/recipes/soup', folder: 'Ideas' },
+      { title: 'Holiday plans', url: 'https://example.net/travel', folder: 'Ideas' },
+      { title: 'Example Shop', url: 'https://shop.example.com/', folder: '' },
     ],
     history: [
       { url: 'https://studio.youtube.com/channel/UC123/videos', title: 'Channel content - YouTube Studio', lastVisit: now - 12 * 60000, visits: 41 },
       { url: 'https://www.google.com/search?q=sus4+chords', title: 'sus4 chords - Google Search', lastVisit: now - 2 * H, visits: 3 },
-      { url: 'https://learning-portal.nathanielschool.com/admin', title: 'Admin - Learning Portal', lastVisit: now - 5 * H, visits: 122 },
+      { url: 'https://example.com/docs/start', title: 'Getting started - Example Docs', lastVisit: now - 5 * H, visits: 122 },
       { url: 'https://www.pinterest.com/search/pins/?q=poster', title: 'poster - Pinterest', lastVisit: now - 1 * D - 3 * H, visits: 2 },
-      { url: 'https://github.com/jasonzacmusic/cue', title: 'jasonzacmusic/cue: a browser for musicians', lastVisit: now - 1 * D - 6 * H, visits: 9 },
+      { url: 'https://github.com/example/project', title: 'example/project: a sample repository', lastVisit: now - 1 * D - 6 * H, visits: 9 },
       { url: 'https://example.com/a-really-long-address/that-keeps-going/and-going/and-going/until-it-has-to-be-cut-off-by-the-row?with=query&and=more', title: 'A page with a very long title that should be cut off tidily at the end of the row instead of wrapping', lastVisit: now - 9 * D, visits: 1 },
     ],
     sites: [
-      { host: 'learning-portal.nathanielschool.com', title: 'Learning Portal', visits: 310, lastVisit: now - 20 * 60000, pages: 24, group: 'Nathaniel School' },
+      { host: 'example.com', title: 'Example Docs', visits: 310, lastVisit: now - 20 * 60000, pages: 24, group: 'Tabs' },
       { host: 'studio.youtube.com', title: 'YouTube Studio', visits: 88, lastVisit: now - 2 * H, pages: 6, group: 'Google' },
       { host: 'espncricinfo.com', title: 'ESPNcricinfo', visits: 12, lastVisit: now - 1 * D, pages: 4, group: 'Tabs' },
       { host: 'claude.ai', title: 'Claude', visits: 140, lastVisit: now - 4 * H, pages: 9, group: 'AI & Subscriptions' },
     ],
     archived: [
-      { id: 'x1', url: 'https://www.instagram.com/nathanielschool/', title: 'Nathaniel School of Music (@nathanielschool)', archivedAt: now - 3 * H },
+      { id: 'x1', url: 'https://www.instagram.com/instagram/', title: 'Instagram (@instagram)', archivedAt: now - 3 * H },
       { id: 'x2', url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox - Gmail', archivedAt: now - 2 * D },
     ],
   } : null;

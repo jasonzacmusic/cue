@@ -35,11 +35,10 @@ const DANGER_LISTS = [
 ];
 
 // Sites that must behave exactly as they do in Chrome, whatever a filter list
-// thinks. YouTube's player and Studio break under cosmetic filtering, and the
-// school's own sites carry no advertising to block in the first place.
+// thinks. YouTube's player and Studio break under cosmetic filtering. A starting
+// setup (presets.js) adds its own organisation's sites through setPresetHosts.
 const NEVER_TOUCH = [
   '@@||youtube.com^$document', '@@||youtube-nocookie.com^$document', '@@||ytimg.com^', '@@||googlevideo.com^',
-  '@@||nathanielschool.com^$document', '@@||nathanielschool.com^',
   // CNN's player asks for this settings file about 3,000 times a second if it is refused, which
   // costs far more than the file. The ads it would lead to are still blocked.
   '@@||cdn-media.brightline.tv/config/$xmlhttprequest,domain=cnn.com',
@@ -55,6 +54,23 @@ const NEVER_TOUCH = [
   '@@||threads.net^$domain=threads.net|instagram.com',
   '@@||whatsapp.com^$domain=whatsapp.com',
   '@@||cdninstagram.com^', '@@||fbcdn.net^',
+  // Google's sign-in, on Google's own pages only - the same honesty as Meta above. Measured on
+  // 12-Nov-2026 with the lists Cue ships: on accounts.google.com and mail.google.com the privacy
+  // lists stopped play.google.com/log and www.google.com/log (Google's own sign-in and Gmail
+  // reporting), and the "$ping,3p" rule stopped csp.withgoogle.com, where Google's sign-in page
+  // reports its own security policy. Those three are the ones that were actually blocked. The rest
+  // are a safety net for the hosts the sign-in form, its security check (reCAPTCHA) and the
+  // account picker cannot work without, so a list update cannot quietly break signing in. With
+  // $domain=, the same addresses on somebody else's page stay blocked.
+  '@@||play.google.com/log^$domain=google.com', '@@||www.google.com/log^$domain=google.com',
+  '@@||csp.withgoogle.com^$domain=google.com',
+  '@@||accounts.google.com^$domain=google.com|youtube.com|gmail.com',
+  '@@||accounts.youtube.com^$domain=google.com|youtube.com',
+  '@@||gstatic.com^$domain=google.com|youtube.com', '@@||googleusercontent.com^$domain=google.com|youtube.com',
+  '@@||www.google.com/recaptcha/$domain=google.com', '@@||ogs.google.com^$domain=google.com',
+  // WhatsApp's own files and media live on whatsapp.net. Nothing there was blocked when measured;
+  // this keeps it that way, on WhatsApp only.
+  '@@||whatsapp.net^$domain=whatsapp.com',
   // The streaming services, each on its own pages only. A film site talks to
   // its own addresses constantly while you watch - which player, which picture
   // quality, where you got to. The privacy lists treat some of those as
@@ -82,8 +98,10 @@ const NEVER_TOUCH = [
   '@@||spotify.com^$domain=spotify.com', '@@||scdn.co^$domain=spotify.com', '@@||spotifycdn.com^$domain=spotify.com',
 ];
 // Cosmetic filtering hides page furniture by guessing from class names, and a
-// video player's own controls get caught in that guess.
-const COSMETIC_OFF = /^https:\/\/([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|nathanielschool\.com|netflix\.com|primevideo\.com|hotstar\.com|jiohotstar\.com|sonyliv\.com|zee5\.com|jiocinema\.com|apple\.com|spotify\.com)\//;
+// video player's own controls get caught in that guess. Google's sign-in page is off too: the lists
+// hide a handful of generic Google class names there (measured 12-Nov-2026), and a sign-in form is
+// the last place a guess should land.
+const COSMETIC_OFF = /^https:\/\/(accounts\.google\.[a-z.]+\/|([\w-]+\.)*(youtube\.com|youtube-nocookie\.com|netflix\.com|primevideo\.com|hotstar\.com|jiohotstar\.com|sonyliv\.com|zee5\.com|jiocinema\.com|apple\.com|spotify\.com)\/)/;
 
 const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
@@ -109,6 +127,7 @@ function createShield({ dir, fetchImpl, log }) {
   // host -> 'malware' | 'phishing'
   let danger = new Map();
   let allowed = new Set();      // sites where you have chosen to let the ads through
+  let presetHosts = [];         // the starting setup's own sites, left alone entirely
   const counts = new Map();     // webContentsId -> how many requests were stopped
   let onChange = () => {};
 
@@ -117,6 +136,7 @@ function createShield({ dir, fetchImpl, log }) {
     try { fs.writeFileSync(stampPath, JSON.stringify({ ...stamp(), ...patch }, null, 2)); } catch {}
   };
   const note = (e) => { if (log) log(e); };
+  const presetHost = (url) => { const h = hostOf(url); return !!h && presetHosts.some((x) => h === x || h.endsWith(`.${x}`)); };
 
   // ------------------------------------------------------------ ads and trackers
   async function buildEngine() {
@@ -144,7 +164,8 @@ function createShield({ dir, fetchImpl, log }) {
   function applyExceptions() {
     if (!blocker) return;
     const mine = [...allowed].map((h) => `@@*$domain=${h}`);
-    const next = [...NEVER_TOUCH, ...mine];
+    const ours = presetHosts.flatMap((h) => [`@@||${h}^$document`, `@@||${h}^`]);
+    const next = [...NEVER_TOUCH, ...ours, ...mine];
     const removed = added.filter((f) => !next.includes(f));
     try { blocker.updateFromDiff({ added: next, removed }); added = next; } catch (e) { note({ tool: 'shield', error: e.message }); }
   }
@@ -238,8 +259,9 @@ function createShield({ dir, fetchImpl, log }) {
   }
 
   // ------------------------------------------------------------ start
-  async function start({ sessions: list = [], allowSites = [], onCount } = {}) {
+  async function start({ sessions: list = [], allowSites = [], onCount, presetSites = [] } = {}) {
     allowed = new Set(allowSites.map((h) => String(h).replace(/^www\./, '').toLowerCase()));
+    presetHosts = presetSites.map((h) => String(h).toLowerCase());
     if (onCount) onChange = onCount;
     loadDangerCache();
     try {
@@ -250,7 +272,7 @@ function createShield({ dir, fetchImpl, log }) {
       // chosen to let the ads through.
       const inject = blocker.onInjectCosmeticFilters;
       blocker.onInjectCosmeticFilters = async (e, url, msg) => (
-        COSMETIC_OFF.test(url) || allowed.has(hostOf(url)) ? undefined : inject(e, url, msg)
+        COSMETIC_OFF.test(url) || allowed.has(hostOf(url)) || presetHost(url) ? undefined : inject(e, url, msg)
       );
       blocker.on('request-blocked', (request) => {
         const id = request.tabId;
@@ -283,6 +305,8 @@ function createShield({ dir, fetchImpl, log }) {
       return blocker.match(Request.fromRawDetails({ url, sourceUrl, type })).match;
     },
     setAllowed(list) { allowed = new Set(list.map((h) => String(h).replace(/^www\./, '').toLowerCase())); applyExceptions(); },
+    // The starting setup's own sites. Empty with no preset.
+    setPresetHosts(list) { presetHosts = (list || []).map((h) => String(h).toLowerCase()); applyExceptions(); },
     status: () => ({
       on: !!blocker,
       // A prebuilt engine does not keep the names of the lists it was built

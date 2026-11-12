@@ -24,7 +24,9 @@ const REAL = [
   ['https://github.com/jasonzacmusic', 'jasonzacmusic (Jason Zac) · GitHub', 'GitHub'],
 ];
 
-module.exports = async ({ app, openTab, setSetting, store, siteName, siteLogo }) => {
+module.exports = async (h) => {
+  const { app, openTab, setSetting, store, siteName, siteLogo } = h;
+  require('./world').asOwner(h); // the school's app names and logos come from its starting setup
   try {
     // siteName and siteLogo are the very functions the sidebar's state is built from, so these
     // checks run against the shipped code rather than a copy of its rules.
@@ -53,9 +55,9 @@ module.exports = async ({ app, openTab, setSetting, store, siteName, siteLogo })
     // And they are programmable, which was the point of the word he used.
     setSetting('quick.5.url', 'https://chord-trees.nathanielschool.com');
     setSetting('quick.5.name', 'Chord Trees');
-    const after = store.data.settings.quickKeys[4];
+    const after = h.quickKeys()[4]; // the folder that is open (the nine are per folder)
     check('a number key can be re-pointed', after.name === 'Chord Trees' && /chord-trees/.test(after.url), after);
-    check('re-pointing one leaves the others alone', store.data.settings.quickKeys[0].name === 'WhatsApp', store.data.settings.quickKeys[0]);
+    check('re-pointing one leaves the others alone', h.quickKeys()[0].name === 'WhatsApp', h.quickKeys()[0]);
 
     check('control: a failing check is visible (expected FAIL below)', false, 'this one is meant to fail');
   } catch (e) {

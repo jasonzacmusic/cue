@@ -5,7 +5,18 @@
   html, body { margin: 0; height: 100%; background: #0B0B0D; color: #ECE9E4; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
   body { display: grid; place-items: center; text-align: center; padding: 24px; box-sizing: border-box; }
   i { display: block; width: 44px; height: 44px; margin: 0 auto 20px; border-radius: 50%; border: 2px dashed #8E8A84; }
-  p { margin: 0; color: #8E8A84; max-width: 34ch; }
+  p { margin: 0 auto 6px; color: #8E8A84; max-width: 46ch; }
+  kbd { font: inherit; color: #ECE9E4; }
 </style></head>
-<body><div><i></i><p>Nothing you do here is saved. Close this window and it is gone.</p></div></body>
+<body><div><i></i>
+  <p>Vanish is a private window, apart from the rest of Cue.</p>
+  <p>Nothing you do here is saved. Close it and everything is forgotten.</p>
+  <!-- These four come from the shortcut table in src/main/vanish-keys.js; test/vanish-settings.js checks they match it. -->
+  <p id="keys" data-mac="⌘T new tab · ⌘F find · ⇧⌘K play or pause · ⇧⌘W close and forget" data-pc="Ctrl+T new tab · Ctrl+F find · Ctrl+Shift+K play or pause · Ctrl+Shift+W close and forget"><kbd>⌘T</kbd> new tab · <kbd>⌘F</kbd> find · <kbd>⇧⌘K</kbd> play or pause · <kbd>⇧⌘W</kbd> close and forget</p>
+</div>
+<script>
+  // Windows and Linux use Ctrl where a Mac uses Command.
+  if (!navigator.platform.startsWith('Mac')) { const k = document.getElementById('keys'); k.textContent = k.dataset.pc; }
+</script>
+</body>
 </html>

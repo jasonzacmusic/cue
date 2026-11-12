@@ -2,7 +2,7 @@
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 if (process.env.CUE_TEST) require('../../test/hidden-windows');
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents, screen,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents, screen, powerMonitor,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -10,10 +10,11 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { Store } = require('./store');
-const { groupFor, GROUP_LIST } = require('./groups');
+const { groupFor, groupList } = require('./groups');
 const { OBS } = require('./obs');
 const { startAgentPort } = require('./agent-port');
-const { createUpdater } = require('./updater');
+const { createUpdater, SAY: UPDATE_SAY } = require('./updater');
+const { settle, settledMessage } = require('./settle');
 const { Library } = require('./db');
 const { Vault } = require('./vault');
 const bills = require('./bills');
@@ -22,13 +23,16 @@ const capture = require('./capture');
 const importer = require('./importer');
 const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
+const vanishKeys = require('./vanish-keys');
 const { PICTURE_IN_PICTURE, MINI_FILL, MINI_UNFILL, protectedSite } = require('./video');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
-const { makeWhatsApp, WA_HOST } = require('./whatsapp');
+const chromeId = require('./identity');
+const { makeWhatsApp, resolveWho, possessive, WA_HOST } = require('./whatsapp');
 const { makeGmail } = require('./gmail');
-const NSM_APPS = require('./nsm-apps.json');
+const attachKit = require('./attach');
+const presets = require('./presets');
 
 app.setName('Cue');
 if (process.env.CUE_USER_DATA) app.setPath('userData', process.env.CUE_USER_DATA);
@@ -54,21 +58,40 @@ const PAGES = path.join(ROOT, 'ui', 'pages');
 const SIDE_MIN = 64; const SIDE_MAX = 420; const SIDE_EDGE = 8;
 const TOOLBAR = 52;
 const GAP = 8;
-const AGENT_PORT = 8813;
+// A test run may take another port, so it never fights the installed Cue for 8813.
+const AGENT_PORT = (process.env.CUE_TEST && Number(process.env.CUE_AGENT_PORT)) || 8813;
 const AI_MIN = 320; const AI_MAX = 720; const AI_GRIP = 8;
 const AI_HEAD = 38;
 const STRIP = 44;
-// The four Spaces ship with these names and you can call them anything you
-// like. Renaming one has to carry every tab, login and layout filed under the
-// old name with it, which is why it happens in one place.
-const SPACES_DEFAULT = ['Teach', 'Create', 'Finance', 'Build'];
+// A plain install has one Space, and you can add more and call them anything you like. A starting
+// setup (presets.js) brings its own list. Renaming one has to carry every tab, login and layout
+// filed under the old name with it, which is why it happens in one place.
+const SPACES_DEFAULT = ['Home'];
 const SPACES_MAX = 9;
-const spaces = () => {
-  const s = store && store.data.spaces;
-  return Array.isArray(s) && s.length ? s.slice(0, SPACES_MAX) : SPACES_DEFAULT;
-};
+const spacesDefault = () => presets.field('spaces', SPACES_DEFAULT);
+// A Space is saved as { name, tint }. The tint is one of these swatches (ui.css draws each one,
+// light and dark); the sidebar's colour comes from it, never from the name, so a Space called
+// anything at all can wear any of them.
+const SPACE_TINTS = ['rose', 'indigo', 'gold', 'green', 'blue', 'plum', 'teal', 'slate'];
+// The colour each of these names already wore when the colour was looked up by name, so moving
+// to stored tints changes nothing anyone can see. Any other name takes the next swatch in turn.
+const NAME_TINT = { Teach: 'rose', Create: 'indigo', Business: 'gold', Build: 'green', Finance: 'rose' };
+const tintFor = (name, i) => NAME_TINT[name] || SPACE_TINTS[i % SPACE_TINTS.length];
+// Older profiles saved a plain list of names; read either shape, always hand back { name, tint }.
+function spaceList() {
+  const raw = store && Array.isArray(store.data.spaces) && store.data.spaces.length ? store.data.spaces : spacesDefault();
+  const out = [];
+  raw.forEach((x, i) => {
+    const name = String((x && typeof x === 'object' ? x.name : x) || '').trim().slice(0, 18);
+    if (!name || out.some((o) => o.name === name)) return;
+    const tint = x && typeof x === 'object' && SPACE_TINTS.includes(x.tint) ? x.tint : tintFor(name, i);
+    out.push({ name, tint });
+  });
+  return (out.length ? out : spacesDefault().map((name, i) => ({ name, tint: tintFor(name, i) }))).slice(0, SPACES_MAX);
+}
+const spaces = () => spaceList().map((x) => x.name);
 const KITS = {
-  teacher: { name: 'Teacher', what: 'On air, OBS and Safe-share' },
+  teacher: { name: 'Teacher', what: 'On air, OBS and blurring private details on air' },
   music: { name: 'Music', what: 'Loop, transpose and speed for any video' },
   creator: { name: 'Creator', what: 'Thumbnail check, YouTube Studio and comments' },
   designer: { name: 'Designer', what: 'Colour picker, palettes, font finder, ruler, Boards' },
@@ -82,7 +105,8 @@ const AI_HOME = { claudecode: 'https://claude.ai/code', codex: 'https://chatgpt.
 const AI_NAMES = { claudecode: 'Claude Code', codex: 'Codex' };
 // Links that belong to another app on the computer. These open straight away; anything else asks first.
 const EXTERNAL = /^(mailto|tel|sms|facetime|zoommtg|zoomus|msteams|slack|spotify|whatsapp|webcal|obsproject):/i;
-const TEAM_SITE = 'https://team.nathanielschool.com';
+// The organisation's own password vault, only with its starting setup on (see teamImportOffered).
+const teamSite = () => presets.field('teamSite', '');
 const LABS_PAGE = 'https://labs.nathanielschool.com/products/cue';
 const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsapp\.com|facebook\.com|linkedin\.com)$/;
 
@@ -108,14 +132,67 @@ const COUNT_HOSTS = /(^|\.)(mail\.google\.com|instagram\.com|youtube\.com|whatsa
 //
 // Vanish is not a folder. It is a window that keeps nothing, so it has no tabs
 // to hold and no account to stay signed in to. It keeps its own small button.
-const IDENTITIES = {
-  personal: { name: 'Personal', color: '#2A64CC', partition: 'persist:personal', picture: 'folder-personal.png', about: 'Your own account' },
-  school: { name: 'School', color: '#C2410C', partition: 'persist:school', picture: 'folder-school.png', about: 'The school account' },
+//
+// ANY NUMBER OF PEOPLE. The folders are a list in the saved data (store.data.folders), one per
+// person: { id, name, color, picture, email, lock, agents }. Each is PRIVATE - its own partition
+// (persist:<id>), so its own cookies, WhatsApp link, Google, tabs, history and passwords - and
+// nothing crosses between two folders unless the person pairs them (settings().sharedPairs).
+// An id never changes, whatever the folder is renamed to. The AI agent lane and Vanish are built
+// in, exactly as before, and are not in that list.
+const BUILTIN = {
   agent: { name: 'AI agent', color: '#5F40CF', partition: 'persist:agent', picture: 'folder-ai.png', about: 'The account AI agents use' },
   vanish: { name: 'Vanish', color: '#8A939C', partition: 'vanish' }, // no "persist:" = memory only
 };
-const FOLDERS = Object.keys(IDENTITIES).filter((k) => k !== 'vanish');
-const isFolder = (k) => FOLDERS.includes(k);
+// The owner's two folders, exactly as they looked before the list existed. An install that has
+// run before gets these back when it first meets the list, so nothing about his window changes.
+const LEGACY_FOLDERS = {
+  personal: { name: 'Personal', color: '#2A64CC', picture: 'folder-personal.png', about: 'Your own account' },
+  school: { name: 'School', color: '#C2410C', picture: 'folder-school.png', about: 'The school account' },
+};
+const NEUTRAL = '#5B6670';
+const FOLDER_COLORS = ['#2A64CC', '#C2410C', '#2E7D4F', '#8A6A1F', '#1F6F8B', '#B4235A', '#6B5BD2', '#5B6670'];
+const userFolders = () => (store && Array.isArray(store.data.folders) ? store.data.folders : []);
+const folderById = (id) => userFolders().find((f) => f.id === id) || null;
+// What IDENTITIES[k] used to be: a name, a colour, a partition, a picture. Null for a folder that
+// does not exist (any more), which is how a removed folder can never be quietly stood in for.
+function identityOf(k) {
+  const f = folderById(k);
+  if (f) return { name: f.name, color: f.color || NEUTRAL, partition: `persist:${f.id}`, picture: f.picture || '', about: f.about || '' };
+  return Object.prototype.hasOwnProperty.call(BUILTIN, k) ? BUILTIN[k] : null;
+}
+// A person's folder, as opposed to the AI agent lane or Vanish.
+const isPerson = (k) => !!folderById(k);
+// Everything with tabs and a sidebar entry: every person's folder, then the AI agent lane.
+const allFolders = () => [...userFolders().map((f) => f.id), 'agent'];
+const isFolder = (k) => k === 'agent' || isPerson(k);
+const folderName = (k) => (identityOf(k) || {}).name || String(k || '');
+// The Google address a folder holds. Older Cue kept it in settings().identityLabels.
+const emailOf = (k) => {
+  const f = folderById(k);
+  const e = (f && f.email) || ((store && settings().identityLabels) || {})[k] || '';
+  return String(e).trim();
+};
+
+// ---- the lock
+// A passcode per folder, never stored: a scrypt hash with its own random salt. A locked folder
+// starts locked at every launch and locks again after settings().lockMinutes idle. While locked
+// its tabs have no page in memory, nothing about it reaches the sidebar, and nothing - no new
+// tab, no saved password, no quick key, no agent, no search - can reach into it.
+const unlocked = new Set();
+const lockTouched = {};
+const lockTries = {};
+const hasLock = (id) => { const f = folderById(id); return !!(f && f.lock && f.lock.hash && f.lock.salt); };
+const isLocked = (id) => hasLock(id) && !unlocked.has(id);
+const passHash = (code, salt) => crypto.scryptSync(String(code), Buffer.from(salt, 'hex'), 32).toString('hex');
+function passOk(id, code) {
+  const f = folderById(id);
+  if (!f || !hasLock(id)) return true;
+  const a = Buffer.from(passHash(code, f.lock.salt), 'hex'); const b = Buffer.from(f.lock.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// Agents may work in a folder only when the person said so for that folder, and never while it
+// is locked. The AI agent lane is theirs by definition.
+const agentsMay = (id) => id === 'agent' || (isPerson(id) && folderById(id).agents === true && !isLocked(id));
 
 // Sites that can be signed in as more than one person, and how to read the one
 // that is live straight off the page. This is not a guess from a cookie: it is
@@ -195,43 +272,96 @@ const PREFIX = { yt: 'youtube', i: 'images', img: 'images', p: 'pinterest', pin:
 
 const SPLITS = { single: 1, cols2: 2, rows2: 2, cols3: 3, grid4: 4 };
 
-function chromeUA() {
-  const major = process.versions.chrome.split('.')[0];
-  const os = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
-    : process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : 'X11; Linux x86_64';
-  return `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
-}
-app.userAgentFallback = chromeUA();
+// ---------------------------------------------------------------- one Chrome identity, everywhere
+// Google and Meta compare what the browser says in several places - the User-Agent line, the
+// Sec-CH-UA headers, navigator.userAgent and navigator.userAgentData in the page, in its iframes
+// and in its workers - and two answers that disagree are a "not Chrome" all by themselves. Every
+// one of those is now fed from identity.js, and for EVERY session, whatever folder it belongs to:
+// the hook is where Electron creates a session, not a list of the folders Cue knows about today.
+// (The fallback is set before the app is ready, when the system's languages cannot be read yet, so
+// it takes the user agent alone; the full identity is built on first use, after ready.)
+app.userAgentFallback = chromeId.chromeIdentity({ languages: ['en-US'] }).userAgent;
 
-// Google (and a few others) will not let you sign in unless the browser says it is Chrome in BOTH
-// places they look: the old user agent line above, and the newer "client hints" headers. Electron
-// fills those in with Chromium only, which is what makes Google answer "Couldn't sign you in".
-function chromeHints() {
-  const v = process.versions.chrome;
-  const major = v.split('.')[0];
-  const platform = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux';
-  return {
-    'sec-ch-ua': `"Not?A_Brand";v="24", "Chromium";v="${major}", "Google Chrome";v="${major}"`,
-    'sec-ch-ua-full-version-list': `"Not?A_Brand";v="24.0.0.0", "Chromium";v="${v}", "Google Chrome";v="${v}"`,
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': `"${platform}"`,
-  };
+// A small preload, written once per launch from identity.js so it can never drift from it. It runs
+// in every top frame (where it only acts if the protocol override below did not land) and in every
+// service worker (which the protocol cannot reach).
+let identityPreload = '';
+function identityPreloadFile() {
+  if (identityPreload) return identityPreload;
+  const file = path.join(app.getPath('userData'), 'identity-preload.js');
+  const src = `// Written by Cue from src/main/identity.js at launch. Do not edit.\n`
+    + `const { contextBridge } = require('electron');\n`
+    + `try { contextBridge.executeInMainWorld({ func: ${chromeId.patchNavigator.toString()}, args: [${JSON.stringify(chromeId.pageData())}] }); } catch {}\n`;
+  try { fs.writeFileSync(file, src); identityPreload = file; } catch (e) { console.error('identity preload', e.message); }
+  return identityPreload;
 }
 
-// Only on https, which is where a real Chrome sends them. The full version list only goes out if the
-// site asked for it, again like Chrome.
-function sayChrome(headers, url) {
-  if (!/^https:/i.test(url)) return headers;
-  const hints = chromeHints();
-  const seen = new Map();
-  for (const k of Object.keys(headers)) seen.set(k.toLowerCase(), k);
-  for (const [name, value] of Object.entries(hints)) {
-    const had = seen.get(name);
-    if (name === 'sec-ch-ua-full-version-list' && !had) continue;
-    headers[had || name] = value;
+const identityDone = new WeakSet();
+function applyIdentity(ses) {
+  if (!ses || identityDone.has(ses)) return;
+  identityDone.add(ses);
+  const id = chromeId.identity();
+  // The Accept-Language list is the same list navigator.languages reports, so the two agree.
+  ses.setUserAgent(id.userAgent, id.acceptLanguage);
+  ses.webRequest.onBeforeSendHeaders((d, cb) => cb({ requestHeaders: chromeId.sayChrome(d.requestHeaders, d.url) }));
+  const file = identityPreloadFile();
+  if (file && ses.registerPreloadScript) {
+    for (const type of ['frame', 'service-worker']) {
+      try { ses.registerPreloadScript({ type, id: `cue-identity-${type}`, filePath: file }); } catch (e) { console.error('identity preload', type, e.message); }
+    }
   }
-  return headers;
 }
+app.on('session-created', (ses) => { if (app.isReady()) applyIdentity(ses); else app.whenReady().then(() => applyIdentity(ses)); });
+
+// Chromium's own override, through its DevTools protocol, on every web page Cue makes - tabs,
+// pop-ups, Peek, the AI panel, Vanish. It sets the user agent AND its client-hint metadata at the
+// engine level, so the page, every same- and cross-origin iframe and every dedicated worker read
+// one answer, and nothing on navigator is redefined for a page to catch. New iframes and workers
+// are held for the instant it takes to dress them (waitForDebuggerOnStart), then let go - always,
+// even if dressing failed, so a page can never be left hanging. Service and shared workers are not
+// children of the page in the protocol (attaching to them from here fails); the service-worker
+// preload above covers the first, and shared workers keep Chromium's own brand list.
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: 'service_worker', exclude: true }, { type: 'shared_worker', exclude: true }, {}] };
+function wearIdentity(wc) {
+  if (!wc || wc.isDestroyed() || wc.__identity) return;
+  const dbg = wc.debugger;
+  const send = (method, params, sid) => dbg.sendCommand(method, params, sid);
+  const ov = chromeId.cdpOverride();
+  const dress = async (sid, type) => {
+    if (type === 'worker') await send('Network.setUserAgentOverride', ov, sid).catch(() => {});
+    else await send('Emulation.setUserAgentOverride', ov, sid).catch(() => send('Network.setUserAgentOverride', ov, sid).catch(() => {}));
+  };
+  const attach = () => {
+    try { if (!dbg.isAttached()) dbg.attach('1.3'); } catch (e) { logProblem('identity', e); return false; }
+    dress(undefined, 'page');
+    send('Target.setAutoAttach', AUTO_ATTACH).catch(() => {});
+    return true;
+  };
+  wc.__identity = true;
+  dbg.on('message', async (_e, method, params) => {
+    if (method !== 'Target.attachedToTarget') return;
+    const sid = params.sessionId;
+    const type = params.targetInfo && params.targetInfo.type;
+    try {
+      await dress(sid, type);
+      if (type === 'iframe' || type === 'page') await send('Target.setAutoAttach', AUTO_ATTACH, sid).catch(() => {});
+    } finally {
+      send('Runtime.runIfWaitingForDebugger', {}, sid).catch(() => {});
+    }
+  });
+  // Something else detaching us (a crash, a tool that took over) must not leave a page undressed.
+  let again = 0;
+  dbg.on('detach', (_e, reason) => {
+    if (wc.isDestroyed() || /target closed/i.test(String(reason)) || again++ > 3) return;
+    setTimeout(() => { if (!wc.isDestroyed()) attach(); }, 200);
+  });
+  attach();
+}
+app.on('web-contents-created', (_e, wc) => {
+  // The page's cross-origin iframes, remembered as they attach, so cue_attach can reach a file box in one.
+  try { if (wc.getType() !== 'remote' && wc.getType() !== 'backgroundPage') attachKit.trackFrames(wc); } catch {}
+  try { if (wc.getType() !== 'remote' && wc.getType() !== 'backgroundPage') wearIdentity(wc); } catch (e) { console.error('identity', e.message); }
+});
 
 // ---------------------------------------------------------------- state
 let store;
@@ -265,8 +395,14 @@ const agentLog = [];
 let doorOpen = false;
 let lastKnock = 0;
 const agentSeen = new Set();
+const midiAsks = []; // test runs only: the sites Cue would have asked about MIDI
 const sessionsReady = new Set();
 const dangerOk = new Set();   // hosts you chose to open anyway, until Cue is closed
+// Vanish keeps its own two per-site memories ("open it anyway" and "no secure address") and they
+// go when the Vanish window closes, so nothing about where you went in there outlives it.
+const vanishDangerOk = new Set();
+const VANISH_NO_HTTPS = new Set();
+const vanishLocationTold = new Set();
 let pendingShare = null;
 let lib = null;
 let vault = null;
@@ -296,15 +432,23 @@ const sideSpace = () => (settings().sideHidden ? SIDE_EDGE : sideWidth());
 const aiWidth = () => Math.max(AI_MIN, Math.min(AI_MAX, settings().aiWidth || 440));
 
 // ---------------------------------------------------------------- sessions
+// A folder that does not exist has no session. It used to fall back to Personal's, which is
+// exactly how one person's page could open signed in as somebody else.
 function sessionFor(identity) {
-  const ses = session.fromPartition((IDENTITIES[identity] || IDENTITIES.personal).partition);
+  const who = identityOf(identity);
+  if (!who) throw new Error(`There is no folder called ${identity}.`);
+  const ses = session.fromPartition(who.partition);
   if (sessionsReady.has(ses)) return ses;
   sessionsReady.add(ses);
-  ses.setUserAgent(chromeUA());
+  // A Vanish page's questions open over the Vanish window and its notices are said there; they
+  // used to land on the main window, naming the Vanish site in front of anyone watching that.
+  const isVanish = identity === 'vanish';
+  const askOver = () => (isVanish && vanish && vanish.window()) || mainWin;
+  const tell = (text) => { if (isVanish) { if (vanish) vanish.say(text); } else sendEvent('toast', text); };
+  applyIdentity(ses); // already done where the session was created; this only makes sure
   enableBlocker(ses);
-  ses.webRequest.onBeforeSendHeaders((d, cb) => cb({ requestHeaders: sayChrome(d.requestHeaders, d.url) }));
   if (identity === 'vanish') ses.setSpellCheckerEnabled(false);
-  servePages(ses);
+  servePages(ses, isVanish);
   if (identity !== 'vanish') extensions.loadAll(ses, extDir).then((r) => r.forEach((x) => x.ok ? extsLoaded.add(x.id) : console.error('extension', x.name, x.error)));
   ses.webRequest.onErrorOccurred((d) => {
     if (d.error === 'net::ERR_BLOCKED_BY_CLIENT' || d.error === 'net::ERR_ABORTED' || !d.webContents) return;
@@ -334,7 +478,7 @@ function sessionFor(identity) {
       const from = byWC(wc);
       if (identity !== 'vanish' && (!from || from.agent)) return cb(false);
       if (EXTERNAL.test(link)) { if (from) logTab(from, 'external', link); return cb(!process.env.CUE_TEST); }
-      const r = await dialog.showMessageBox(mainWin, { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Open this link in another app?', detail: link.slice(0, 200) });
+      const r = await dialog.showMessageBox(askOver(), { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 1, cancelId: 1, message: 'Open this link in another app?', detail: link.slice(0, 200) });
       return cb(r.response === 0);
     }
     // Location is never handed out by a prompt. Google asks on almost every
@@ -346,7 +490,8 @@ function sessionFor(identity) {
       const allowed = store.data.permissions[`${identity}|${origin}|geolocation`] === true;
       if (!allowed) {
         const x = byWC(wc); if (x) logTab(x, 'blocked', 'location');
-        if (!locationTold.has(origin)) { locationTold.add(origin); sendEvent('toast', `${origin} asked where you are. Blocked.`); }
+        const told = isVanish ? vanishLocationTold : locationTold;
+        if (!told.has(origin)) { told.add(origin); tell(`${origin} asked where you are. Blocked.`); }
       }
       return cb(allowed);
     }
@@ -360,8 +505,8 @@ function sessionFor(identity) {
       const key = `${identity}|${origin}|midi`;
       const remembered = store.data.permissions[key];
       if (remembered !== undefined) return cb(remembered);
-      if (process.env.CUE_TEST) return cb(false);   // a test never waits on a dialog
-      const r = await dialog.showMessageBox(mainWin, {
+      if (process.env.CUE_TEST) { midiAsks.push(origin); return cb(false); } // a test never waits on a dialog; it is told Cue would have asked
+      const r = await dialog.showMessageBox(askOver(), {
         type: 'question', buttons: ['Allow', 'Block'], defaultId: 1, cancelId: 1,
         message: `${origin} wants to send and receive MIDI with your instruments.`,
         detail: 'It can also change settings on them. Allow this only for a site you trust with your gear.',
@@ -379,7 +524,7 @@ function sessionFor(identity) {
       const keepAwake = (ok) => { const x = byWC(wc); if (x && ok && permission === 'media') x.holdAwake = true; return ok; };
       if (remembered !== undefined) return cb(keepAwake(remembered));
       const what = (details.mediaTypes || []).map((m) => (m === 'video' ? 'camera' : 'microphone')).join(' and ') || 'microphone';
-      const r = await dialog.showMessageBox(mainWin, {
+      const r = await dialog.showMessageBox(askOver(), {
         type: 'question', buttons: ['Allow', 'Block'], defaultId: 0, cancelId: 1,
         message: `${origin} wants to use your ${what}.`, ...(identity === 'vanish' ? {} : { checkboxLabel: 'Remember for this site', checkboxChecked: true }),
       });
@@ -391,6 +536,13 @@ function sessionFor(identity) {
   });
 
   ses.setDisplayMediaRequestHandler((request, callback) => {
+    // Vanish never shares the screen. The share picker lives in the main window and lists the
+    // main window's tabs, which is two windows' worth of things a Vanish page should not see.
+    if (isVanish) {
+      if (vanish) vanish.say('Vanish does not share your screen. Use Cue\u2019s main window for that call.');
+      callback(null); // null is Electron's refusal; the page hears "not allowed"
+      return;
+    }
     if (pendingShare) pendingShare({});
     pendingShare = callback;
     try { const x = byWC(webContents.fromFrame(request.frame)); if (x) x.holdAwake = true; } catch {}
@@ -399,16 +551,18 @@ function sessionFor(identity) {
       .then((sources) => {
         setOverlay(true);
         sendEvent('share-picker', {
-          tabs: tabs.filter((t) => t.view && !t.private).map((t) => ({ id: t.id, title: t.title, url: t.url })),
+          tabs: tabs.filter((t) => t.view && !t.private && t.identity === identity).map((t) => ({ id: t.id, title: t.title, url: t.url })),
           sources: sources.map((s) => ({ id: s.id, name: s.name })),
         });
       });
   });
 
-  ses.on('will-download', (_e, item) => {
+  ses.on('will-download', (_e, item, fromWc) => {
     const bad = shield && settings().warnDangerous !== false && shield.verdict(item.getURL());
-    if (bad) { item.cancel(); sendEvent('toast', `Cue stopped a download from ${shield.hostOf(item.getURL())}. That site is reported for ${bad}.`); return; }
-    const dir = app.getPath('downloads');
+    const forAgent = identity !== 'vanish' ? takeAgentDownload(item, fromWc) : null;
+    if (bad) { item.cancel(); if (forAgent) forAgent.fail(`Cue stopped that download: ${shield.hostOf(item.getURL())} is reported for ${bad}.`); tell(`Cue stopped a download from ${shield.hostOf(item.getURL())}. That site is reported for ${bad}.`); return; }
+    // An agent's download goes to Downloads/Cue Agents, with no save dialog (cue_download).
+    const dir = forAgent ? agentDownloadDir() : app.getPath('downloads');
     let name = item.getFilename(); let file = path.join(dir, name); let n = 1;
     while (fs.existsSync(file) || downloads.some((x) => x.file === file && x.state === 'progressing')) { const ext = path.extname(name); file = path.join(dir, `${path.basename(name, ext)} (${n++})${ext}`); }
     // Vanish leaves no file behind unless you choose where it goes.
@@ -418,12 +572,14 @@ function sessionFor(identity) {
       item.once('done', (_ev, state) => { if (state === 'completed') markDownloaded(item.getSavePath()); });
       return;
     }
-    if (RUNS_ITSELF.test(name) && !process.env.CUE_TEST) {
+    if (forAgent) forAgent.started(item, file);
+    if (RUNS_ITSELF.test(name) && !process.env.CUE_TEST && !forAgent) {
       item.pause();
       dialog.showMessageBox(mainWin, { type: 'warning', buttons: ['Cancel', 'Keep'], defaultId: 0, cancelId: 0, message: `${name} runs as a program when you open it.`, detail: 'Keep it only if you know who it came from.' })
         .then((r) => { if (r.response === 1) item.resume(); else item.cancel(); });
     }
-    const d = { id: Date.now() + Math.random(), name: path.basename(file), file, kind: fileKind(file), received: 0, total: item.getTotalBytes(), state: 'progressing' };
+    // Filed under the folder it came from: the downloads list shows one folder's files only.
+    const d = { id: Date.now() + Math.random(), name: path.basename(file), file, kind: fileKind(file), received: 0, total: item.getTotalBytes(), state: 'progressing', folder: identity };
     downloads.unshift(d); downloads.length = Math.min(downloads.length, 30);
     item.on('updated', (_ev, state) => { d.received = item.getReceivedBytes(); d.state = state; pushState(); });
     item.once('done', (_ev, state) => {
@@ -500,7 +656,10 @@ function tidyInstallers() {
 }
 
 // Serves Cue's own pages, such as cue://boards. Only files in the pages folder can be reached.
-function servePages(ses) {
+// Vanish gets only the dangerous-site warning, which Cue itself puts up there; Library, Bills and
+// Boards hold his history and his money, and none of it is served into a Vanish tab.
+const VANISH_PAGES = new Set(['danger.html', 'danger.js', 'pages.css']);
+function servePages(ses, vanishOnly) {
   if (ses.protocol.isProtocolHandled('cue')) return;
   ses.protocol.handle('cue', (req) => {
     // Cue's own pages are never a frame inside somebody else's page.
@@ -508,6 +667,7 @@ function servePages(ses) {
     if (['iframe', 'frame', 'object', 'embed'].includes(dest)) return new Response('Not allowed', { status: 403 });
     const u = new URL(req.url);
     const rel = u.pathname.replace(/^\/+/, '') || `${u.hostname}.html`;
+    if (vanishOnly && !VANISH_PAGES.has(rel)) return new Response('Not in Vanish', { status: 403 });
     const file = path.normalize(path.join(PAGES, rel));
     if (!file.startsWith(PAGES + path.sep) || !fs.existsSync(file)) return new Response('Not found', { status: 404 });
     return net.fetch(pathToFileURL(file).href);
@@ -558,7 +718,19 @@ function midiOk(identity, origin) {
 // The folder you have open. A new tab is born in it, and the sidebar shows the
 // tabs that live in it. Kept in the store, like the Space, so it survives a
 // restart and every way of opening a tab agrees on where the tab goes.
-const usualFolderFor = (space) => settings().spaceLogins[space] || settings().defaultIdentity;
+// The first person's folder that is not locked, or failing that the first folder at all.
+const firstFolder = () => {
+  const list = userFolders();
+  return ((list.find((f) => !isLocked(f.id)) || list[0]) || { id: 'agent' }).id;
+};
+// A Space remembers the folder it usually opens in. A folder that has since been removed is never
+// used: it falls back to the default folder, then to the first one there is.
+const usualFolderFor = (space) => {
+  const want = (settings().spaceLogins || {})[space];
+  if (isPerson(want)) return want;
+  const d = settings().defaultIdentity;
+  return isFolder(d) ? d : firstFolder();
+};
 function openFolder() { return isFolder(store.data.folder) ? store.data.folder : usualFolderFor(store.data.space); }
 // A tab asked for in another Space belongs to that Space's usual folder; one
 // asked for here belongs in the folder that is open in front of you.
@@ -579,7 +751,8 @@ function followFolder(t) {
 // the school's in School. It goes to the tab this folder already has for that
 // site, and only opens one when the folder has none.
 function openApp(url) {
-  const who = store.data.folder;
+  const who = openFolder();
+  if (isLocked(who)) { askUnlock(who); return; }
   const host = hostOf(url);
   const mine = (t) => t.identity === who && t.id !== programId && hostOf(t.url) === host;
   const inSpace = spaceOrder().filter(mine).sort((a, b) => b.lastActive - a.lastActive)[0];
@@ -589,7 +762,13 @@ function openApp(url) {
 }
 
 function setFolder(name) {
-  if (!isFolder(name) || store.data.folder === name) return;
+  if (!isFolder(name)) return;
+  // A locked folder asks for its passcode first, in a small sheet in the sidebar. Nothing about
+  // it is shown until the right one is typed.
+  if (isLocked(name)) { askUnlock(name); return; }
+  // Already open, with one of its own tabs in front: nothing to do. (Just unlocked, with nothing
+  // in front yet, it still has to land somewhere.)
+  if (store.data.folder === name && (byId(activeId) || {}).identity === name) return;
   // What he is looking at as he switches. Going from his WhatsApp to the
   // school's should land on the school's WhatsApp, not on whatever the school
   // happened to touch last: the folder changes, the job does not.
@@ -604,23 +783,317 @@ function setFolder(name) {
   const here = spaceOrder().filter((t) => t.identity === name && t.id !== programId);
   const recent = here.sort((a, b) => b.lastActive - a.lastActive);
   const first = (site && recent.find((t) => hostOf(t.url) === site)) || recent[0];
-  if (first) activate(first.id); else { layout(); pushState(); persist(); }
+  lockTouched[name] = Date.now();
+  // A folder with nothing open here gets a new tab of its own. Leaving the last folder's page on
+  // screen would put one person's page under another person's folder.
+  if (first) activate(first.id); else openTab({ identity: name });
+}
+
+// ---------------------------------------------------------------- people: add, lock, remove
+// The small sheet in the sidebar that asks for a folder's passcode.
+function askUnlock(id) {
+  const f = folderById(id);
+  if (!f) return;
+  const t = lockTries[id];
+  const wait = t && t.until > Date.now() ? Math.ceil((t.until - Date.now()) / 1000) : 0;
+  sendEvent('unlock', { id, name: f.name, color: f.color || NEUTRAL, picture: f.picture || '', wait });
+}
+
+// Five wrong tries and the sheet waits a minute before it takes another.
+const LOCK_TRIES = 5;
+const LOCK_WAIT_MS = 60000;
+function tryUnlock(id, code) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  if (!isLocked(id)) return { ok: true };
+  const t = lockTries[id] = lockTries[id] || { n: 0, until: 0 };
+  if (t.until > Date.now()) return { error: `Too many wrong tries. Wait ${Math.ceil((t.until - Date.now()) / 1000)} seconds, then try again.`, wait: Math.ceil((t.until - Date.now()) / 1000) };
+  if (!passOk(id, code)) {
+    t.n += 1;
+    if (t.n >= LOCK_TRIES) { t.n = 0; t.until = Date.now() + LOCK_WAIT_MS; return { error: 'That passcode is not right. That was the fifth try, so wait a minute before the next one.', wait: LOCK_WAIT_MS / 1000 }; }
+    return { error: `That passcode is not right. ${LOCK_TRIES - t.n} tr${LOCK_TRIES - t.n === 1 ? 'y' : 'ies'} left before a one-minute wait.` };
+  }
+  delete lockTries[id];
+  unlocked.add(id);
+  lockTouched[id] = Date.now();
+  buildMenu();
+  pushState();
+  return { ok: true };
+}
+
+// Locks a folder now: every tab of it loses its page from memory (the tab itself stays, and comes
+// back when the folder is unlocked), it leaves the screen, the stage and the cue, and the sidebar
+// moves to a folder that is open - or shows the passcode sheet if there is none.
+function lockFolder(id) {
+  if (!hasLock(id)) return false;
+  unlocked.delete(id);
+  for (const t of tabs) {
+    if (t.identity !== id) continue;
+    if (stageIds.includes(t.id) || t.id === programId) {
+      if (t.view) { try { t.view.webContents.send('cue:safe', false); } catch {} }
+      if (t.host === 'stage' && t.view) { try { stageWin.contentView.removeChildView(t.view); } catch {} }
+      stageIds = stageIds.filter((x) => x !== t.id);
+      if (programId === t.id) { programId = stageIds[0] || null; if (!programId) showStandby(); }
+    }
+    if (t.popout) { const w = t.popout; t.popout = null; t.mini = false; try { w.destroy(); } catch {} }
+    t.host = 'main';
+    if (recTabId === t.id) { sendEvent('rec-stop'); recTabId = null; }
+    destroyView(t);
+    t.sleeping = true;
+  }
+  cueIds = cueIds.filter((x) => (byId(x) || {}).identity !== id);
+  if (cueNextId && !cueIds.includes(cueNextId)) cueNextId = cueIds[0] || null;
+  const sp = store.data.split;
+  sp.ids = sp.ids.filter((x) => (byId(x) || {}).identity !== id);
+  fitSplit(sp);
+  if (peek && peek.identity === id) closePeek();
+  if (aiView && aiIdentity === id) toggleAI();
+  if (pendingCred && pendingCred.identity === id) pendingCred = null;
+  if (openFolder() === id) {
+    const other = userFolders().find((f) => f.id !== id && !isLocked(f.id));
+    if (other) {
+      store.data.folder = other.id;
+      const next = spaceOrder().filter((t) => t.identity === other.id).sort((a, b) => b.lastActive - a.lastActive)[0];
+      if (next) activate(next.id); else openTab({ identity: other.id });
+    } else askUnlock(id);
+  }
+  if ((byId(activeId) || {}).identity === id) {
+    const next = sidebarOrder().find((t) => t.identity === openFolder());
+    activeId = next ? next.id : null;
+  }
+  buildMenu();
+  layout(); pushState(); persist();
+  return true;
+}
+
+// Idle re-lock. The folder in front of you counts as used while the computer is in use; a folder
+// you have left counts from the moment you left it. Never mid-class: a lock that fired while he
+// teaches would pull the tab off the stage in front of the students.
+function lockSweep({ now = Date.now(), idle } = {}) {
+  const mins = Number(settings().lockMinutes ?? 15);
+  if (!mins || live) return [];
+  let idleS = idle;
+  if (idleS === undefined) { try { idleS = powerMonitor.getSystemIdleTime(); } catch { idleS = 0; } }
+  const locked = [];
+  for (const f of userFolders()) {
+    if (!hasLock(f.id) || !unlocked.has(f.id)) continue;
+    if (f.id === openFolder() && idleS < 60) lockTouched[f.id] = now;
+    if (now - (lockTouched[f.id] || 0) >= mins * 60000) { lockFolder(f.id); locked.push(f.id); }
+  }
+  return locked;
+}
+
+// Sets, changes or removes a folder's passcode. Changing or removing one needs the current one.
+function setPasscode({ id, current, code }) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  if (hasLock(id) && !passOk(id, current)) return { error: 'The current passcode is not right, so nothing was changed.' };
+  const next = String(code || '');
+  if (!next) {
+    f.lock = null; unlocked.delete(id); delete lockTries[id];
+    store.save(); pushState(); buildMenu();
+    return { ok: true, locked: false };
+  }
+  if (next.length < 4) return { error: 'Use at least four characters.' };
+  const salt = crypto.randomBytes(16).toString('hex');
+  f.lock = { salt, hash: passHash(next, salt) };
+  unlocked.add(id); lockTouched[id] = Date.now();
+  store.save(); pushState(); buildMenu();
+  return { ok: true, locked: true };
+}
+
+// A new person's folder. The id is made up here and never changes; the name is theirs to change.
+function newFolderId() {
+  for (;;) {
+    const id = `f${crypto.randomBytes(8).toString('hex').split('').map((h) => (parseInt(h, 16) % 36).toString(36)).join('').slice(0, 8)}`;
+    if (!identityOf(id) && id !== 'vanish') return id;
+  }
+}
+const cleanName = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+function nameTaken(name, except) {
+  const n = cleanName(name).toLowerCase();
+  return userFolders().some((f) => f.id !== except && cleanName(f.name).toLowerCase() === n);
+}
+// `id` is only for the test rig and the upgrade above, which need the owner's own ids.
+function addFolder({ name, color, id } = {}) {
+  let nm = cleanName(name);
+  if (!nm) { let i = userFolders().length + 1; do { nm = `Person ${i++}`; } while (nameTaken(nm)); }
+  if (nameTaken(nm)) return { error: `There is already a folder called ${nm}. Give this one another name.` };
+  if (['vanish', 'agent', 'ai agent'].includes(nm.toLowerCase())) return { error: `${nm} is a name Cue keeps for itself. Pick another.` };
+  const fid = id && /^[a-z][a-z0-9]{1,30}$/.test(id) && !identityOf(id) && id !== 'vanish' ? id : newFolderId();
+  const c = /^#[0-9a-f]{6}$/i.test(String(color || '')) ? color : FOLDER_COLORS[userFolders().length % FOLDER_COLORS.length];
+  // New folders are private in every sense: no shared sign-ins, no agents, no passcode yet.
+  const f = { id: fid, name: nm, color: c, picture: '', email: '', lock: null, agents: false };
+  store.data.folders.push(f);
+  store.save(); buildMenu(); pushState();
+  return { ok: true, folder: f };
+}
+function renameFolder({ id, name }) {
+  const f = folderById(id); const nm = cleanName(name);
+  if (!f || !nm) return { error: 'Give the folder a name.' };
+  if (nameTaken(nm, id)) return { error: `There is already a folder called ${nm}.` };
+  if (['vanish', 'agent', 'ai agent'].includes(nm.toLowerCase())) return { error: `${nm} is a name Cue keeps for itself. Pick another.` };
+  f.name = nm;
+  store.save(); buildMenu(); pushState();
+  return { ok: true };
+}
+function recolorFolder({ id, color }) {
+  const f = folderById(id);
+  if (!f || !/^#[0-9a-f]{6}$/i.test(String(color || ''))) return { error: 'That is not a colour Cue can use.' };
+  f.color = color; store.save(); pushState();
+  return { ok: true };
+}
+function setFolderEmail({ id, email }) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  f.email = String(email || '').trim().slice(0, 120);
+  if (settings().identityLabels) settings().identityLabels[id] = f.email;
+  store.save(); pushState();
+  return { ok: true };
+}
+function setFolderAgents({ id, on }) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  f.agents = !!on; store.save(); pushState();
+  return { ok: true };
+}
+
+// ---- sharing sign-ins between two folders, only where the person paired them
+const sharing = new Map();
+const pairKey = (a, b) => [a, b].sort().join('|');
+const pairs = () => (Array.isArray(settings().sharedPairs) ? settings().sharedPairs : [])
+  .filter((p) => Array.isArray(p) && p.length === 2 && p[0] !== p[1] && isPerson(p[0]) && isPerson(p[1]));
+const pairShared = (a, b) => pairs().some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+const partnersOf = (id) => pairs().flatMap(([x, y]) => (x === id ? [y] : y === id ? [x] : []));
+function wireSharing() {
+  const want = new Map();
+  for (const [a, b] of pairs()) want.set(pairKey(a, b), [a, b]);
+  for (const [k, [a, b]] of want) if (!sharing.has(k)) sharing.set(k, shareLogins(sessionFor(a), sessionFor(b)));
+  for (const [k, h] of sharing) if (!want.has(k)) { h.stop(); sharing.delete(k); }
+}
+// Fill in what the folders paired with this one are missing. Nothing at all for a folder that is
+// paired with nobody - which is every folder, until the person says otherwise.
+async function syncShared(id) {
+  for (const [k, h] of sharing) if (!id || k.split('|').includes(id)) await h.syncNow().catch(() => {});
+}
+function setShared({ a, b, on }) {
+  if (!isPerson(a) || !isPerson(b) || a === b) return { error: 'Pick two different folders.' };
+  const list = pairs().filter(([x, y]) => pairKey(x, y) !== pairKey(a, b));
+  if (on) list.push([a, b]);
+  settings().sharedPairs = list;
+  store.save(); wireSharing();
+  if (on) syncShared(a).catch(() => {});
+  pushState();
+  return { ok: true };
+}
+
+// What the Settings room shows: every folder, with the details only an unlocked folder gives up.
+function folderRows() {
+  return userFolders().map((f) => {
+    const locked = isLocked(f.id);
+    const row = { id: f.id, name: f.name, color: f.color || NEUTRAL, picture: f.picture || '', locked, hasLock: hasLock(f.id), open: f.id === openFolder() };
+    if (locked) return row;
+    return { ...row, email: emailOf(f.id), agents: f.agents === true, shared: partnersOf(f.id) };
+  });
+}
+
+// Removing a person's folder takes everything of theirs with it: tabs, sign-ins and site data,
+// history, bookmarks, Boards, passwords, quick keys, saved alerts and bills. The partition itself
+// goes to the Trash, never straight to deletion, so a folder removed by mistake can still be dug
+// out. The last folder cannot be removed, and a locked one must be unlocked first.
+async function removeFolder({ id, confirmed } = {}) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  if (userFolders().length <= 1) return { error: `${f.name} is the only folder, so it stays. Add another folder first if you want this one gone.` };
+  if (isLocked(id)) return { error: `${f.name} is locked. Unlock it first, then remove it.` };
+  if (!confirmed) {
+    if (process.env.CUE_TEST) return { error: 'Not confirmed.' };
+    const r = await dialog.showMessageBox(mainWin, {
+      type: 'warning', buttons: [`Remove ${f.name}`, 'Cancel'], defaultId: 1, cancelId: 1,
+      message: `Remove ${f.name}'s folder?`,
+      detail: `Its tabs close, and its sign-ins, history, bookmarks, Boards and saved passwords are removed from Cue. The folder's site data goes to the Trash. This cannot be undone from inside Cue.`,
+    });
+    if (r.response !== 0) return { error: 'Cancelled.' };
+  }
+  // Somewhere else to stand first, so nothing that follows reopens this folder.
+  const other = userFolders().find((x) => x.id !== id && !isLocked(x.id)) || userFolders().find((x) => x.id !== id);
+  if (openFolder() === id) store.data.folder = other.id;
+  for (const t of [...tabs]) {
+    if (t.identity !== id) continue;
+    if (t.id === programId) { programId = null; showStandby(); }
+    stageIds = stageIds.filter((x) => x !== t.id);
+    if (t.popout) { const w = t.popout; t.popout = null; try { w.destroy(); } catch {} }
+    if (recTabId === t.id) { sendEvent('rec-stop'); recTabId = null; }
+    destroyView(t);
+    tabs.splice(tabs.indexOf(t), 1);
+  }
+  const gone = (x) => !byId(x);
+  cueIds = cueIds.filter((x) => !gone(x)); if (cueNextId && gone(cueNextId)) cueNextId = cueIds[0] || null;
+  store.data.split.ids = store.data.split.ids.filter((x) => !gone(x)); fitSplit(store.data.split);
+  for (const sp of Object.values(store.data.spaceSplit || {})) { sp.ids = (sp.ids || []).filter((x) => !gone(x)); fitSplit(sp); }
+  if (peek && peek.identity === id) closePeek();
+  if (aiView && aiIdentity === id) toggleAI();
+  if (pendingCred && pendingCred.identity === id) pendingCred = null;
+  // No more sharing with it.
+  settings().sharedPairs = pairs().filter(([a, b]) => a !== id && b !== id);
+  wireSharing();
+  // Its session: cleared, then the folder on disk to the Trash.
+  let trashed = false;
+  try {
+    const ses = sessionFor(id);
+    await ses.clearStorageData().catch(() => {});
+    await ses.clearCache().catch(() => {});
+    await ses.clearAuthCache().catch(() => {});
+    await ses.cookies.flushStore().catch(() => {});
+  } catch {}
+  const dir = path.join(app.getPath('userData'), 'Partitions', id);
+  if (fs.existsSync(dir)) { try { await shell.trashItem(dir); trashed = true; } catch (e) { logProblem('folder-remove', e); } }
+  // Everything Cue kept for it.
+  vault.removeIdentity(id);
+  lib.removeFolder(id);
+  const d = store.data; const s = settings();
+  if (d.whose) delete d.whose[id];
+  for (const k of Object.keys(d.permissions || {})) if (k.startsWith(`${id}|`)) delete d.permissions[k];
+  if (s.quickKeys && !Array.isArray(s.quickKeys)) delete s.quickKeys[id];
+  for (const [sp, who] of Object.entries(s.spaceLogins || {})) if (who === id) delete s.spaceLogins[sp];
+  if (s.defaultIdentity === id) s.defaultIdentity = other.id;
+  if (s.identityLabels) delete s.identityLabels[id];
+  if (d.everydayPinned) delete d.everydayPinned[id];
+  d.archived = (d.archived || []).filter((a) => a.identity !== id);
+  d.alerts = (d.alerts || []).filter((a) => a.folder !== id);
+  d.bills = (d.bills || []).filter((b) => b.folder !== id);
+  closedStack.splice(0, closedStack.length, ...closedStack.filter((c) => c.identity !== id));
+  downloads.splice(0, downloads.length, ...downloads.filter((x) => x.folder !== id));
+  delete lockTouched[id]; delete lockTries[id]; unlocked.delete(id);
+  d.folders = userFolders().filter((x) => x.id !== id);
+  if (!byId(activeId)) {
+    const next = sidebarOrder().find((t) => t.identity === openFolder());
+    if (next) activate(next.id);
+    else if (isLocked(openFolder())) askUnlock(openFolder());
+    else openTab({ identity: openFolder() });
+  }
+  buildMenu(); layout(); pushState(); persist(); store.flush();
+  return { ok: true, trashed };
 }
 
 // ---------------------------------------------------------------- tabs
 function makeTab(opts) {
   const t = {
     id: nextId++, uid: opts.uid || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, url: opts.url || START_URL, title: opts.title || 'New tab', favicon: opts.favicon || null,
-    identity: IDENTITIES[opts.identity] ? opts.identity : folderForNewTab(opts.space),
+    identity: identityOf(opts.identity) ? opts.identity : folderForNewTab(opts.space),
     // An app that lives in the strip is pinned the moment it is born, and a site
     // on the silent list opens silent. Both only decide how a tab STARTS.
-    pinned: !!opts.pinned || alwaysPinned(opts.url), groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1,
+    pinned: !!opts.pinned || (!opts.temp && alwaysPinned(opts.url)), groupOverride: opts.groupOverride || null, volume: opts.volume ?? 1,
     muted: opts.muted === undefined ? mutedSite(opts.url) : !!opts.muted, name: opts.name || null,
     private: !!opts.private, obsScene: opts.obsScene || '', agent: !!opts.agent, aiAllowed: !!opts.aiAllowed,
     order: opts.order ?? Date.now(), playing: false, audible: false, loading: false, space: spaces().includes(opts.space) ? opts.space : store.data.space,
     view: null, host: 'main', popout: null, mini: false, lastActive: opts.lastActive || Date.now(), canBack: false, canFwd: false, zoom: opts.zoom || 0,
     badge: 0, marks: [], log: [],
   };
+  // "Just for now": the second tier of tabs. Same folder, same sign-ins - this is not Vanish -
+  // but cleared when Cue closes (or after settings().tempClear hours) and never archived.
+  // A pinned tab is always kept, so a tab cannot be both.
+  if (opts.temp && !t.pinned && isFolder(t.identity)) { t.temp = true; t.tempAt = opts.tempAt || Date.now(); }
   return t;
 }
 
@@ -637,6 +1110,8 @@ function ensureView(t) {
   // back by themselves instead of failing.
   if (t.view && t.view.webContents.isDestroyed()) { t.view = null; t.sleeping = true; }
   if (t.view) return t.view;
+  // A locked folder's tabs get no page at all until the passcode is typed.
+  if (isLocked(t.identity)) throw new Error(`${folderName(t.identity)} is locked.`);
   const view = new WebContentsView({
     webPreferences: {
       session: sessionFor(t.identity), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true,
@@ -664,13 +1139,13 @@ function ensureView(t) {
 // Addresses on this machine and bare numbers are left alone - there is no
 // certificate to be had for localhost:3000.
 const NO_HTTPS = new Set();
-function secureVersion(url) {
+function secureVersion(url, noHttps = NO_HTTPS) {
   if (!/^http:\/\//i.test(url)) return null;
   let u; try { u = new URL(url); } catch { return null; }
   const h = u.hostname;
   if (/^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/i.test(h) || /\.(local|test|localhost)$/i.test(h)) return null;
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || !h.includes('.')) return null;
-  if (NO_HTTPS.has(h)) return null;
+  if (noHttps.has(h)) return null;
   u.protocol = 'https:';
   return u.href;
 }
@@ -705,10 +1180,6 @@ const SITE_NAMES = [
   [/(^|\.)claude\.ai$/i, 'Claude'],
   [/(^|\.)chatgpt\.com$/i, 'ChatGPT'],
   [/(^|\.)(espncricinfo|cricinfo)\.com$/i, 'ESPNcricinfo'],
-  [/^learning-portal\.nathanielschool\.com$/i, 'Learning Portal'],
-  [/^students\.nathanielschool\.com$/i, 'Students'],
-  [/^leads\.nathanielschool\.com$/i, 'Leads'],
-  [/^labs\.nathanielschool\.com$/i, 'Nathaniel Labs'],
   [/(^|\.)x\.ai$/i, 'xAI'],
   [/(^|\.)vercel\.com$/i, 'Vercel'],
   [/(^|\.)neon\.tech$/i, 'Neon'],
@@ -718,12 +1189,9 @@ const SITE_NAMES = [
   [/(^|\.)name\.com$/i, 'name.com'],
 ];
 
-// Sites whose own logo is missing or poor. pitara.nathanielschool.com answers 404 for
-// /favicon.ico, so without this the tab falls back to a bare letter.
-// Most specific first: the generic NSM mark must not answer for the Learning Portal.
+// Sites whose own logo is missing or poor, so the tab does not fall back to a bare letter.
+// A starting setup adds its own organisation's sites in front (presets.js), most specific first.
 const SITE_LOGOS = [
-  [/^learning-portal\.nathanielschool\.com$/i, 'learning-portal.png'],
-  [/^chord-trees\.nathanielschool\.com$/i, 'chord-trees.svg'],
   [/^mail\.google\.com$/i, 'gmail.png'],
   [/^studio\.youtube\.com$/i, 'youtube-studio.png'],
   [/(^|\.)youtube\.com$/i, 'youtube.png'],
@@ -732,15 +1200,19 @@ const SITE_LOGOS = [
   [/(^|\.)github\.com$/i, 'github.svg'],
   [/(^|\.)claude\.ai$/i, 'claude.png'],
   [/(^|\.)chatgpt\.com$/i, 'chatgpt.png'],
-  [/(^|\.)nathanielschool\.com$/i, 'nsm-apps.png'],
 ];
 
 const pick = (table, host) => { for (const [re, v] of table) if (re.test(host)) return v; return null; };
+// The tables in force: the starting setup's own rows first, then Cue's.
+const siteNames = () => { const p = presets.active(); return p ? [...p.nameRules, ...SITE_NAMES] : SITE_NAMES; };
+const siteLogos = () => { const p = presets.active(); return p ? [...p.logoRules, ...SITE_LOGOS] : SITE_LOGOS; };
+// The organisation's own name for a host of its own, with its starting setup on.
+const brandName = (host) => { const b = presets.field('brand', null); return b && presets.hostIn(host, b.hosts) ? b.name : null; };
 
-// An NSM app is called by its own name, from the one list Cue already keeps, so a tab says
-// "Pitara" rather than that app's whole sales sentence.
+// A preset's app is called by its own name, from the preset's app list, so a tab says the app's
+// name rather than its whole sales sentence. No preset, no list.
 const nsmAppName = (host) => {
-  const hit = NSM_APPS.find((a) => { try { return new URL(a.url).hostname.toLowerCase() === host; } catch { return false; } });
+  const hit = presets.apps().find((a) => { try { return new URL(a.url).hostname.toLowerCase() === host; } catch { return false; } });
   if (!hit) return null;
   return String(hit.name).split(/\s+[\u2014\u2013(]/)[0].trim(); // "Lipi \u2014 Notation Studio" -> "Lipi"
 };
@@ -751,7 +1223,10 @@ const nsmAppName = (host) => {
 const TITLE_TAIL = /\s+[|\u00b7\u2022\u2013\u2014]\s+|\s+-\s+/;
 function tidyTitle(title) {
   let t = String(title || '').replace(/^\s*\(\d+\+?\)\s*/, '').trim();
-  t = t.replace(/\s*[|\u00b7\u2013\u2014-]\s*Nathaniel School of Music\s*$/i, '').trim();
+  for (const tail of presets.field('titleTails', [])) {
+    const esc = String(tail).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    t = t.replace(new RegExp(`\\s*[|\\u00b7\\u2013\\u2014-]\\s*${esc}\\s*$`, 'i'), '').trim();
+  }
   const head = t.split(TITLE_TAIL)[0].trim();
   if (head.length >= 3) t = head;
   const colon = t.match(/^([^:]{2,28}):\s+\S/);
@@ -780,7 +1255,7 @@ function siteDomain(host) {
 function siteLabel(host, title) {
   const h = String(host || '').toLowerCase().replace(/^www\./, '');
   if (!h) return tidyTitle(title) || '';
-  const known = pick(SITE_NAMES, h) || nsmAppName(h);
+  const known = pick(siteNames(), h) || nsmAppName(h);
   if (known) return known;
   const domain = siteDomain(h);
   const brand = domain.split('.')[0].replace(/[^a-z0-9]/g, '');
@@ -791,7 +1266,7 @@ function siteLabel(host, title) {
   // "Vercel Pricing: Hobby, Pro…", "Pay Cloudflare, Inc. Invoice…": the brand is one word in it.
   const word = brand.length >= 3 && String(title || '').match(new RegExp(`\\b(${brand})\\b`, 'i'));
   if (word && !SIGN_IN_TITLE.test(word[1])) return word[1];
-  if (/(^|\.)nathanielschool\.com$/i.test(h)) return 'Nathaniel School of Music';
+  if (brandName(h)) return brandName(h);
   // A short title that is not a sign-in is usually the site's own name ("Jason's Money OS").
   const first = pieces[0] || '';
   if (first && first.length <= 24 && !SIGN_IN_TITLE.test(first)) return first;
@@ -810,8 +1285,7 @@ function tabName(t) {
   // (Learning Portal)", and he says Learning Portal. The app list is next, so an NSM app is named
   // by its own name rather than by the school.
   if (SIGN_IN_TITLE.test(String(t.title || ''))) return siteLabel(host, t.title);
-  return pick(SITE_NAMES, host) || nsmAppName(host) || tidyTitle(t.title)
-    || (/(^|\.)nathanielschool\.com$/i.test(host) ? 'Nathaniel School of Music' : host);
+  return pick(siteNames(), host) || nsmAppName(host) || tidyTitle(t.title) || brandName(host) || host;
 }
 
 // A logo Cue ships, used only when the site's own favicon does not arrive - several NSM apps
@@ -819,25 +1293,19 @@ function tabName(t) {
 const siteLogo = (t) => {
   const host = String(hostOf(t.url) || '').toLowerCase();
   if (!host || t.identity === 'vanish') return null;
-  return pick(SITE_LOGOS, host);
+  return pick(siteLogos(), host);
 };
 
 // ---------------------------------------------------------------- the number keys
-// Cmd+1 to Cmd+9. His list, 2-Nov-2026: WhatsApp, Email, Instagram, then the Nathaniel apps, and
-// 9 is a brand new tab. Each one goes to that site's tab in the folder he has open, and opens it
-// only if it is not already there - so Cmd+1 in School is the school's WhatsApp and Cmd+1 in
-// Personal is his own, from the same key. Every slot is his to change in Settings.
-const QUICK_KEYS = [
-  { key: '1', name: 'WhatsApp', url: 'https://web.whatsapp.com/' },
-  { key: '2', name: 'Email', url: 'https://mail.google.com/' },
-  { key: '3', name: 'Instagram', url: 'https://www.instagram.com/' },
-  { key: '4', name: 'Codex', url: 'https://chatgpt.com/codex' },
-  { key: '5', name: 'Pitara', url: 'https://pitara.nathanielschool.com' },
-  { key: '6', name: 'Prima Vista', url: 'https://sightsinging.nathanielschool.com' },
-  { key: '7', name: 'Lipi', url: 'https://lipi.nathanielschool.com' },
-  { key: '8', name: 'Learning Portal', url: 'https://learning-portal.nathanielschool.com' },
-  { key: '9', name: 'New tab', url: '' }, // empty means a new tab, not a site
-];
+// Cmd+1 to Cmd+9. Each one goes to that site's tab in the folder that is open, and opens it only
+// if it is not already there - so Cmd+1 is each folder's own WhatsApp, from the same key. A plain
+// install starts with 1-8 empty (they do nothing until you give them a site) and 9 a brand new
+// tab; a starting setup brings its own nine (presets.js). Every slot can be changed in Settings.
+const PLAIN_KEYS = [...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({ key: String(n), name: '', url: '' })), { key: '9', name: 'New tab', url: '' }];
+const quickDefaults = () => { const q = presets.field('quickKeys', null); return Array.isArray(q) && q.length === 9 ? q : PLAIN_KEYS; };
+// A slot with neither a name nor an address is empty: no menu entry, and the key does nothing.
+// A name with no address opens a new tab, as slot 9 does.
+const quickEmpty = (q) => !q.url && !q.name;
 
 // The nine are PER FOLDER. Command-1 is his own WhatsApp in Personal and the
 // school's in School, and that was already true of where a key landed - but the
@@ -848,8 +1316,9 @@ const QUICK_KEYS = [
 const quickKeysFor = (folder) => {
   const saved = settings().quickKeys;
   const mine = Array.isArray(saved) ? saved : (saved && isFolder(folder) ? saved[folder] : null);
-  if (!Array.isArray(mine) || mine.length !== 9) return QUICK_KEYS;
-  return QUICK_KEYS.map((d, i) => {
+  const defaults = quickDefaults();
+  if (!Array.isArray(mine) || mine.length !== 9) return defaults;
+  return defaults.map((d, i) => {
     const x = mine[i] || {};
     return { key: d.key, name: String(x.name || d.name), url: typeof x.url === 'string' ? x.url : d.url };
   });
@@ -895,28 +1364,69 @@ const cookieUrl = (c) => `${c.secure ? 'https' : 'http'}://${String(c.domain || 
 // Whatever is already here for those sites is cleared first, and that is the whole trick: half of
 // last week's session and half of Chrome's is exactly what makes Google answer "we've detected a
 // problem with your cookie settings". A carried sign-in only works if it lands in an empty jar.
-async function carryFromChrome(identity, hostRe, origins = []) {
-  const b = importer.findBrowsers().find((x) => x.id === 'chrome');
-  if (!b || !b.profiles.length) return { error: 'Chrome is not on this Mac, so there is no sign-in to bring over.' };
-  const key = await importer.getKey(b);
-  if (!key) return { error: 'Cue could not unlock Chrome\u2019s sign-ins. Say yes when your Mac asks for the key, then try again.' };
-  const ses = sessionFor(identity);
-  const host = (c) => String(c.domain || (() => { try { return new URL(c.url).hostname; } catch { return ''; } })()).replace(/^\./, '');
+// Offered only where it can work: macOS (Chrome's cookie key is in the keychain; on Windows Chrome
+// locks its cookies to itself, and Linux has no keychain prompt to say yes to) and only when
+// Chrome is actually installed. The UI reads this flag and hides the button otherwise.
+let carryCache = null;
+function canCarryFromChrome() {
+  if (carryCache !== null) return carryCache;
+  try { carryCache = MAC && importer.findBrowsers().some((x) => x.id === 'chrome' && x.profiles.length); } catch { carryCache = false; }
+  return carryCache;
+}
 
-  // Read Chrome's side first, and take the profile that actually holds a sign-in for this site.
-  // His Chrome keeps the real one in a later profile, so going by the first profile, or by the
-  // email on the identity, found an empty jar and brought nothing over.
-  const label = String(settings().identityLabels[identity] || '').toLowerCase();
-  let best = null;
+// The cookies that mean "signed in" on each site, as opposed to a visit.
+const SESSION_COOKIES = { 'instagram.com': ['sessionid'], 'facebook.com': ['c_user', 'xs'], 'threads.net': ['sessionid'] };
+const signedInBy = (cookies) => cookies.some((c) => {
+  const site = Object.keys(SESSION_COOKIES).find((s) => String(c.domain || '').replace(/^\./, '').endsWith(s));
+  return site ? SESSION_COOKIES[site].includes(c.name) : /^(sessionid|c_user|SID|__Secure-1PSID|session|auth)/i.test(c.name);
+});
+const cookieHost = (c) => String(c.domain || (() => { try { return new URL(c.url).hostname; } catch { return ''; } })()).replace(/^\./, '');
+
+// Every Chrome profile on this computer that holds a sign-in for these sites, with the profile's
+// own name and the account it is signed in to Chrome as, if Chrome says. Nobody's session is picked
+// for them: a shared computer can have several people in Chrome.
+async function chromeProfilesFor(hostRe, opts = {}) {
+  const finder = opts.importer || importer;
+  const b = finder.findBrowsers(opts.browserOpts).find((x) => x.id === 'chrome');
+  if (!b || !b.profiles.length) return { error: 'Chrome is not on this computer, so there is no sign-in to bring over.' };
+  const key = await finder.getKey(b, opts.keyOpts);
+  if (!key) return { error: 'Cue could not unlock Chrome\u2019s sign-ins. Say yes when this computer asks for the key, then try again.' };
+  const out = [];
   for (const p of b.profiles) {
-    const found = importer.readCookies(b, p, key).filter((c) => hostRe.test(host(c)));
-    if (!found.length) continue;
-    const score = found.length + (label && String(p.email || '').toLowerCase() === label ? 1e6 : 0);
-    if (!best || score > best.score) best = { score, from: p.email || p.name || 'Chrome', cookies: found };
+    const cookies = finder.readCookies(b, p, key).filter((c) => hostRe.test(cookieHost(c)));
+    if (!cookies.length || !signedInBy(cookies)) continue;
+    const label = p.email ? `${p.name} (${p.email})` : p.name;
+    out.push({ dir: p.dir, name: p.name, email: p.email || '', label, cookies });
   }
-  // If there is nothing to put back, nothing here is touched: clearing a working sign-in and then
-  // finding Chrome locked would leave him signed out of everything.
-  if (!best) return { count: 0, cleared: 0, from: 'Chrome' };
+  return { profiles: out };
+}
+
+// Asks which profile, in words, every time - even when there is only one, because "the one Chrome
+// profile on this computer" may still be somebody else's.
+async function chooseChromeProfile(profiles, site, where) {
+  if (!profiles.length) return null;
+  if (process.env.CUE_TEST) return null; // tests never answer a dialog on his screen
+  const buttons = [...profiles.map((p) => p.label).slice(0, 6), 'Cancel'];
+  const { response } = await dialog.showMessageBox(mainWin, {
+    type: 'question', buttons, defaultId: buttons.length - 1, cancelId: buttons.length - 1,
+    message: `Which Chrome profile's ${site} sign-in should come into ${where}?`,
+    detail: 'These are the Chrome profiles on this computer that are signed in to it. Pick your own. Chrome is left exactly as it is.',
+  });
+  return response < profiles.length ? profiles[response] : null;
+}
+
+async function carryFromChrome(identity, hostRe, origins = [], site = 'this site') {
+  const ses = sessionFor(identity);
+  const host = cookieHost;
+  const found = await chromeProfilesFor(hostRe);
+  if (found.error) return { error: found.error };
+  if (!found.profiles.length) return { count: 0, cleared: 0, from: 'Chrome' };
+  const where = folderName(identity);
+  const best = await chooseChromeProfile(found.profiles, site, where);
+  // If there is nothing to put back, or nobody chose, nothing here is touched: clearing a working
+  // sign-in and then bringing nothing would leave the folder signed out.
+  if (!best) return { count: 0, cleared: 0, from: 'Chrome', cancelled: true };
+  best.from = best.label;
   const incoming = best.cookies;
 
   let cleared = 0;
@@ -933,12 +1443,11 @@ async function carryFromChrome(identity, hostRe, origins = []) {
     try { await ses.cookies.set(c); count++; } catch { /* same */ }
   }
   await ses.cookies.flushStore();
-  await sharedLogins.syncNow();
+  await syncShared(identity); // only into a folder paired with this one, if any
   return { count, cleared, from: best.from };
 }
 
-const googleFromChrome = (identity) => carryFromChrome(identity, GOOGLE_LOGIN_HOST, GOOGLE_ORIGINS);
-const metaFromChrome = (identity) => carryFromChrome(identity, META_LOGIN_HOST, META_ORIGINS);
+const metaFromChrome = (identity) => carryFromChrome(identity, META_LOGIN_HOST, META_ORIGINS, 'Instagram and Facebook');
 
 // Only Meta's sign-ins are carried. Google's are NOT, and must not be: Google ties a session to
 // the one browser it was made in, so a copied jar is revoked within the hour and takes the
@@ -980,10 +1489,33 @@ async function clearGoogleState(identity) {
 // Google's own sign-in page, in the folder that asked, with the folder's address already filled in
 // so he never lands on the wrong account's inbox - and with that folder's stale Google state
 // cleared first, or Google refuses before he can type anything.
-async function googleSignIn(identity) {
+async function googleSignIn(identity, { otherAccount = false } = {}) {
   const cleared = await clearGoogleState(identity).catch(() => 0);
-  const who = String(settings().identityLabels[identity] || '').trim();
+  const tab = await openTab({ url: googleSignInUrl(identity, '', { otherAccount }), identity });
+  return { tab, cleared };
+}
+
+async function signInAgain(t, sender, otherAccount) {
+  const identity = t ? t.identity : (sender && popupIdentity.get(sender));
+  if (!identity) return { error: 'Close this page and start the sign-in again from the site.' };
+  // A press of the button is the person asking, so it is not held to the ten-minute rule.
+  signinGate.forget(identity);
+  if (t) { const { cleared } = await googleSignIn(identity, { otherAccount }); return { signin: true, cleared }; }
+  const cleared = await clearGoogleState(identity).catch(() => 0);
+  sender.loadURL(googleSignInUrl(identity, '', { otherAccount })).catch(() => {});
+  return { signin: true, cleared };
+}
+
+// Google's own sign-in address for a folder. The folder's address goes in as a hint only when one
+// is on file and the person did not ask for a different account; without it Google simply asks.
+function googleSignInUrl(identity, cont = '', { otherAccount = false } = {}) {
+  const who = otherAccount ? '' : String(emailOf(identity) || '').trim();
   const u = new URL('https://accounts.google.com/AccountChooser');
+  if (cont) {
+    u.searchParams.set('continue', cont);
+    if (/@/.test(who)) u.searchParams.set('Email', who);
+    return u.toString();
+  }
   // NOT /mail/u/0/. The /u/<n>/ index is a SLOT in whatever list of accounts the
   // jar happens to hold, not an account, so slot 0 is only his inbox when his is
   // the first one Google lists. Sign-in then succeeds and Gmail still answers
@@ -991,10 +1523,9 @@ async function googleSignIn(identity) {
   // YouTube keeps working throughout, which is what makes this look like "Gmail
   // is broken": YouTube has no /u/<n>/ in its address, so it never picks a slot.
   // ?authuser=<the address> names the account outright and cannot drift.
-  u.searchParams.set('continue', googleForFolder('https://mail.google.com/mail/', identity));
+  u.searchParams.set('continue', otherAccount ? 'https://mail.google.com/mail/' : googleForFolder('https://mail.google.com/mail/', identity));
   if (/@/.test(who)) u.searchParams.set('Email', who);
-  const tab = await openTab({ url: u.toString(), identity });
-  return { tab, cleared };
+  return u.toString();
 }
 
 // His Chrome keeps BOTH Google accounts signed in to one profile, so whatever is
@@ -1005,7 +1536,7 @@ async function googleSignIn(identity) {
 // does NOT go in the path: /mail/u/<address>/ answers 404.
 const GOOGLE_PER_ACCOUNT = /^(mail|calendar|drive|docs|contacts|photos|keep|groups)\.google\.[a-z.]+$|^(www|studio|music)\.youtube\.[a-z.]+$/i;
 function googleForFolder(url, identity) {
-  const who = String(settings().identityLabels[identity] || '').trim();
+  const who = emailOf(identity);
   if (!who || !/@/.test(who)) return url;
   try {
     const u = new URL(url);
@@ -1023,9 +1554,12 @@ function googleForFolder(url, identity) {
 async function carrySignIn(t) {
   if (!t || !t.view) return;
   if (t.identity === 'vanish') { sendEvent('toast', 'Vanish keeps nothing, so there is nowhere to put a sign-in.'); return; }
+  if (!canCarryFromChrome()) { sendEvent('toast', 'There is no Chrome on this computer to bring a sign-in from.'); return; }
   const site = siteName(t.url);
   if (!site) { sendEvent('toast', 'Open the site first, then try this again.'); return; }
-  const where = (IDENTITIES[t.identity] || {}).name || t.identity;
+  // Never Google: a copied Google sign-in is cancelled by Google, together with the original.
+  if (GOOGLE_WIPE_HOST.test(site)) { sendEvent('toast', 'Google is signed in to here, not brought over. Use Sign in to Google in Settings.'); return; }
+  const where = folderName(t.identity);
   if (!process.env.CUE_TEST) {
     const { response } = await dialog.showMessageBox(mainWin, {
       type: 'question', buttons: ['Bring it over', 'Cancel'], defaultId: 0, cancelId: 1,
@@ -1035,8 +1569,9 @@ async function carrySignIn(t) {
     if (response !== 0) return;
   }
   const re = new RegExp(`(^|\\.)${site.replace(/\./g, '\\.')}$`, 'i');
-  const r = await carryFromChrome(t.identity, re, [`https://${site}`, `https://www.${site}`]);
+  const r = await carryFromChrome(t.identity, re, [`https://${site}`, `https://www.${site}`], site);
   if (r.error) { sendEvent('toast', r.error); return; }
+  if (r.cancelled) return;
   if (!r.count) { sendEvent('toast', `Chrome had no ${site} sign-in to bring over.`); return; }
   sendEvent('toast', `Your ${site} sign-in came over from Chrome (${r.from}).`);
   t.view.webContents.reload();
@@ -1056,15 +1591,17 @@ function siteName(url) {
 // Every way a page can be asked for - typed, clicked, restored at launch, woken
 // from sleep - goes through here, so a site on today's list is stopped whichever
 // way you arrived at it.
-function guardUrl(url) {
+function guardUrl(url, ok = dangerOk) {
   if (!shield || settings().warnDangerous === false || !/^https?:/i.test(String(url || ''))) return url;
-  if (dangerOk.has(shield.hostOf(url))) return url;
+  if (ok.has(shield.hostOf(url))) return url;
   const bad = shield.verdict(url);
   return bad ? `cue://danger?kind=${bad}&site=${encodeURIComponent(url)}` : url;
 }
 
 // The same guards for every tab, Vanish included. Vanish passes no note, so nothing is written down.
 function protectPage(wc, t, note) {
+  const inVanish = t.identity === 'vanish';
+  const noHttps = inVanish ? VANISH_NO_HTTPS : NO_HTTPS;
   // On a VPN, this is the one thing a browser does that gives your real address
   // away. Video calling asks the operating system for every network address
   // this Mac has and hands the lot to the page, which is how a site reads your
@@ -1074,14 +1611,14 @@ function protectPage(wc, t, note) {
   // ---- known-dangerous sites, and trying the secure address first
   const guard = (e, url, isMain) => {
     if (!isMain) return;
-    const warn = guardUrl(url);
+    const warn = guardUrl(url, inVanish ? vanishDangerOk : dangerOk);
     if (warn !== url) {
       e.preventDefault();
       wc.loadURL(warn).catch(() => {});
       if (note) note(`dangerous site ${url}`);
       return;
     }
-    const safe = settings().httpsFirst !== false ? secureVersion(url) : null;
+    const safe = settings().httpsFirst !== false ? secureVersion(url, noHttps) : null;
     if (safe) {
       e.preventDefault();
       t.httpsFrom = url;
@@ -1095,11 +1632,113 @@ function protectPage(wc, t, note) {
     if (!isMain || !t.httpsFrom) return;
     const back = t.httpsFrom; t.httpsFrom = null;
     if (!NO_SECURE_DOOR.has(Number(code)) || !/^https:/.test(url)) return;
-    try { NO_HTTPS.add(new URL(back).hostname); } catch {}
+    try { noHttps.add(new URL(back).hostname); } catch {}
     if (note) sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
     wc.loadURL(back).catch(() => {});
   });
   wc.on('did-finish-load', () => { t.httpsFrom = null; });
+}
+
+// ---------------------------------------------------------------- Google's refusals, without a dead end
+// Google can answer a sign-in with "signin/rejected" ("This browser or app may not be secure") or
+// CookieMismatch. Probed again and again, the cause is the folder's own leftover Google state, not
+// the browser - so the cure is to empty ONLY that folder's Google jar and try again. Cue does that
+// once by itself, in any folder, with or without an address on file. If Google answers the same
+// way again within ten minutes, Cue does not try a third time (that is how a loop starts) and shows
+// cue://signin-blocked instead, which says in plain words what to try next.
+const RETRY_EVERY = 10 * 60 * 1000;
+function makeSigninGate(windowMs = RETRY_EVERY) {
+  const last = new Map();
+  return {
+    mayRetry(folder, now = Date.now()) {
+      const at = last.get(folder);
+      if (at !== undefined && now - at < windowMs) return false;
+      last.set(folder, now);
+      return true;
+    },
+    forget(folder) { last.delete(folder); },
+  };
+}
+const signinGate = makeSigninGate();
+const GOOGLE_SIGNIN_HOST = /^https:\/\/accounts\.google\.[a-z.]+\//i;
+const NOT_SECURE_WORDS = /this browser or app may not be secure/i;
+
+// Where to send a retry: back to where the sign-in was going (an OAuth pop-up's own continuation
+// included), as long as that is a plain https address.
+function continueOf(u) {
+  try { const c = new URL(u).searchParams.get('continue'); if (c && /^https:\/\//i.test(c)) return c; } catch {}
+  return '';
+}
+
+const popupIdentity = new WeakMap(); // a pop-up's webContents -> the folder it belongs to
+
+function watchGoogleRefusal(wc, getIdentity) {
+  let mismatchFixed = false;
+  let busy = false;
+  const refused = async (kind, u) => {
+    const identity = getIdentity();
+    if (identity === 'vanish' || busy || wc.isDestroyed()) return;
+    // CookieMismatch right after a GOOD sign-in is the /u/<n>/ slot pointing at an account this jar
+    // does not hold. With the folder's address on file, naming it outright cures that without
+    // touching a cookie. Once per page, so it cannot become a loop of its own.
+    if (kind === 'mismatch' && !mismatchFixed) {
+      const back = googleForFolder('https://mail.google.com/mail/', identity);
+      if (back !== 'https://mail.google.com/mail/') { mismatchFixed = true; wc.loadURL(back).catch(() => {}); return; }
+    }
+    busy = true;
+    try {
+      if (signinGate.mayRetry(identity)) {
+        const cleared = await clearGoogleState(identity).catch(() => 0);
+        logAgent({ tool: 'signin', note: `google ${kind} in ${identity}: cleared ${cleared}, retrying once` });
+        if (!wc.isDestroyed()) wc.loadURL(googleSignInUrl(identity, continueOf(u))).catch(() => {});
+      } else {
+        logAgent({ tool: 'signin', note: `google ${kind} again in ${identity}: showing the help page` });
+        if (!wc.isDestroyed()) wc.loadURL(`cue://signin-blocked?why=${kind}`).catch(() => {});
+      }
+    } finally { busy = false; }
+  };
+  const look = (u) => {
+    if (GOOGLE_REFUSED.test(u)) refused('refused', u);
+    else if (GOOGLE_MISMATCH.test(u)) refused('mismatch', u);
+  };
+  wc.on('did-navigate', (_e, u) => look(u));
+  // Google's sign-in is one page that rewrites itself, so a refusal can arrive without a page load.
+  wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) look(u); });
+  // ...and occasionally as words on a page whose address says nothing.
+  wc.on('did-stop-loading', () => {
+    const u = wc.getURL();
+    if (!GOOGLE_SIGNIN_HOST.test(u) || GOOGLE_REFUSED.test(u) || GOOGLE_MISMATCH.test(u)) return;
+    wc.executeJavaScript('document.body ? document.body.innerText.slice(0, 3000) : ""', true)
+      .then((txt) => { if (NOT_SECURE_WORDS.test(txt)) refused('refused', u); }).catch(() => {});
+  });
+}
+
+// A "Sign in with Google" (or Apple, Microsoft, Meta) window. It opens in the opener's folder, with
+// the same page script as a tab, and is wired the same way for the things that matter in a sign-in:
+// the dangerous-site guard, Google's refusals, and what its own links open. window.opener and
+// window.close are Chromium's own and are left alone, so the round trip back to the page works.
+function popupFor(identity, agent) {
+  return {
+    action: 'allow',
+    overrideBrowserWindowOptions: {
+      width: 520, height: 680, autoHideMenuBar: true, ...(process.env.CUE_TEST ? { show: false } : {}),
+      webPreferences: { session: sessionFor(identity), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true },
+    },
+  };
+}
+function wirePopup(win, getIdentity, agent) {
+  const wc = win && win.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  popupIdentity.set(wc, getIdentity());
+  protectPage(wc, {}, null);
+  watchGoogleRefusal(wc, getIdentity);
+  wc.setWindowOpenHandler(({ url, disposition }) => {
+    if (refuseOpen(url, wc.getURL())) return { action: 'deny' };
+    if (whereToOpen(url, disposition, wc.getURL()) === 'popup') return popupFor(getIdentity(), agent);
+    openTab({ url, identity: getIdentity(), agent });
+    return { action: 'deny' };
+  });
+  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, agent));
 }
 
 function wireTab(t) {
@@ -1108,33 +1747,14 @@ function wireTab(t) {
   protectPage(wc, t, (what) => logTab(t, 'blocked', what));
   wc.on('page-title-updated', (_e, title) => {
     t.title = title; if (t.popout) t.popout.setTitle(`${t.mini ? 'Cue mini' : 'Cue'} \u00b7 ${title}`);
-    if (remembers(t)) lib.title(wc.getURL(), title);
+    if (remembers(t)) lib.in(t.identity).title(wc.getURL(), title);
     t.badge = countIn(t, title);
     pushState(); persist();
   });
   wc.on('page-favicon-updated', (_e, favs) => { t.favicon = favs[0] || null; pushState(); persist(); });
   wc.on('did-navigate', () => { t.holdAwake = false; t.dirty = false; t.crashed = false; if (shield) shield.reset(wc.id); });
-  // Google's dead end is almost always a folder holding cancelled cookies, not Cue's engine
-  // (probed 2-Nov-2026: a clean session reaches the password step). Cue says so and offers the
-  // one cure - empty this folder's Google jar and start again.
-  // Google's sign-in is one page that rewrites itself, so the refusal arrives without a page load.
-  // CookieMismatch is a different animal from a refusal, and it was being left to
-  // rot: the sign-in WORKED, and Gmail then threw the session away because the
-  // /u/<n>/ slot in the address pointed at an account this jar no longer holds.
-  // Sending the tab to the same inbox named by its address clears it without
-  // touching a single cookie. Once per tab, so a mismatch that is really about
-  // something else cannot put the tab in a loop.
-  let mismatchFixed = false;
-  const googleGate = (u) => {
-    if (t.identity === 'vanish') return;
-    if (GOOGLE_REFUSED.test(u)) { wc.loadURL('cue://signin-blocked').catch(() => {}); return; }
-    if (!mismatchFixed && GOOGLE_MISMATCH.test(u) && isFolder(t.identity)) {
-      const back = googleForFolder('https://mail.google.com/mail/', t.identity);
-      if (back !== 'https://mail.google.com/mail/') { mismatchFixed = true; wc.loadURL(back).catch(() => {}); }
-    }
-  };
-  wc.on('did-navigate', (_e, u) => { googleGate(u); sayProtected(u); });
-  wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) googleGate(u); });
+  watchGoogleRefusal(wc, () => t.identity);
+  wc.on('did-navigate', (_e, u) => sayProtected(u));
   const nav = () => {
     t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
@@ -1148,7 +1768,7 @@ function wireTab(t) {
     const url = wc.getURL();
     if (!remembers(t) || !/^https?:/.test(url)) return;
     if (lastCode >= 400 || BROKEN_PAGE.test((wc.getTitle() || '').trim())) return;
-    lib.visit(url, wc.getTitle());
+    lib.in(t.identity).visit(url, wc.getTitle()); // in this folder's history only
   };
   wc.on('did-navigate', (_e, _u, code) => { lastCode = Number(code) || 200; nav(); });
   wc.on('did-navigate-in-page', (_e, _u, main) => { nav(); if (main) visit(); });
@@ -1204,20 +1824,23 @@ function wireTab(t) {
   wc.on('context-menu', (_e, p) => contextMenu(t, p));
   wc.on('did-finish-load', () => {
     if (t.volume !== 1) wc.send('cue:volume', t.volume);
+    if (isStart(wc.getURL())) dressStartPage(wc);
     teamSignedIn(t);
     sniffWhose(t); // keep the folder honest about which account is live in it
   });
   wc.on('did-navigate-in-page', () => teamSignedIn(t)); // the team site signs in without a page load
+  wc.on('did-create-window', (win) => wirePopup(win, () => t.identity, t.agent));
   wc.setWindowOpenHandler(({ url, disposition }) => {
     if (recTabId === t.id || refuseOpen(url, wc.getURL())) return { action: 'deny' };
     const where = whereToOpen(url, disposition, wc.getURL());
-    if (where === 'popup') {
-      return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, webPreferences: { session: sessionFor(t.identity) } } };
-    }
+    if (where === 'popup') return popupFor(t.identity, t.agent);
     if (where === 'here') { wc.loadURL(url).catch(() => {}); return { action: 'deny' }; }
-    const calm = t.playing && settings().videoSwitch === 'stay'; // stay on the video; the new tab opens quietly behind it
+    // 'both' (the default from 0.7, as in other browsers): go to the new tab and pause nothing.
+    // 'switch': pause the old one and play the new. 'stay': stay; the new tab waits quietly.
+    const mode = settings().videoSwitch || 'both';
+    const calm = t.playing && mode === 'stay'; // stay on the video; the new tab opens quietly behind it
     const nt = openTab({ url, identity: t.identity, background: calm || disposition === 'background-tab', after: t, agent: t.agent });
-    if (calm) nt.calm = true; else if (t.playing) { nt.from = t.id; nt.openedAt = Date.now(); }
+    if (calm) nt.calm = true; else if (t.playing && mode === 'switch') { nt.from = t.id; nt.openedAt = Date.now(); }
     return { action: 'deny' };
   });
 }
@@ -1251,19 +1874,23 @@ function hostOf(u) {
   try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
-// The handful of sites he keeps open all day. Each identity gets its own pinned tab for each one,
-// once, so Personal's Instagram and the school's are two separate sign-ins and WhatsApp is two
-// separate phones. Pin or unpin them after this and Cue leaves the choice alone.
-const EVERYDAY = ['https://mail.google.com/', 'https://www.facebook.com/', 'https://www.instagram.com/', 'https://web.whatsapp.com/'];
+// The handful of sites kept open all day (settings().everyday: the ones picked on the first-run
+// sheet, or the owner's four from before). Each folder listed in store.data.everydayPinned gets its
+// own pinned tab for each one, once, so each folder's Instagram is its own sign-in and each
+// WhatsApp its own phone. Pin or unpin them after this and Cue leaves the choice alone.
+const everyday = () => (Array.isArray(settings().everyday) ? settings().everyday : []);
 
+// Only for the folders listed - a new person's folder starts with nothing in it but what they
+// open themselves.
 function seedEveryday() {
   const done = store.data.everydayPinned || {};
-  for (const identity of ['personal', 'school']) {
+  const list = everyday();
+  for (const identity of Object.keys(done).filter(isPerson)) {
     // Remember which ones have been put there, not just that it happened once,
-    // so a site added to the list later still arrives - and one he unpins
+    // so a site added to the list later still arrives - and one that is unpinned
     // stays unpinned.
-    const had = Array.isArray(done[identity]) ? done[identity] : (done[identity] ? EVERYDAY.slice(0, 3) : []);
-    for (const url of EVERYDAY) {
+    const had = Array.isArray(done[identity]) ? done[identity] : (done[identity] ? list.slice(0, 3) : []);
+    for (const url of list) {
       if (had.includes(url)) continue;
       had.push(url);
       const host = hostOf(url);
@@ -1295,10 +1922,11 @@ function placeTab(t, from) {
 // Go to the tab already showing this site in the folder he has open, rather than piling up a
 // second WhatsApp. A blank url means he asked for a new tab.
 function jumpTo(url) {
+  const folder = openFolder();
+  if (isLocked(folder)) { askUnlock(folder); return; }
   if (!url) { openTab({}); return; }
   let want = '';
   try { want = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { want = ''; }
-  const folder = store.data.folder;
   const here = tabs.find((t) => !t.private && t.identity === folder
     && String(hostOf(t.url) || '').toLowerCase().replace(/^www\./, '') === want);
   if (here) { activate(here.id); return; }
@@ -1318,13 +1946,11 @@ const ONE_PER_FOLDER = [
   /^([a-z0-9-]+\.)?instagram\.com$/i,
   /^([a-z0-9-]+\.)?facebook\.com$/i,
 ];
-// The four apps that are a PLACE, not a page: your inbox, your WhatsApp, your
-// Instagram, your Facebook. There is nothing to have two of, so Cue keeps them
-// in the strip at the top of the sidebar for ever - one per folder, yours in
-// Personal and the school's in School - and they never appear as a row you have
-// to pin, unpin or tidy. Everything else is an ordinary tab.
-const ALWAYS_PINNED = [/^web\.whatsapp\.com$/i, /^mail\.google\.com$/i, /^([a-z0-9-]+\.)?instagram\.com$/i, /^([a-z0-9-]+\.)?facebook\.com$/i];
-const alwaysPinned = (url) => { const h = hostOf(url); return !!h && ALWAYS_PINNED.some((r) => r.test(h)); };
+// Apps that are a PLACE, not a page, kept in the strip at the top of the sidebar for ever - one per
+// folder - so they never appear as a row to pin, unpin or tidy (settings().alwaysPinned, a list of
+// sites). A plain install has none: anything pinned can be unpinned. The owner's install keeps its
+// four (WhatsApp, Gmail, Instagram, Facebook), and so does the school's starting setup.
+const alwaysPinned = (url) => { const h = hostOf(url); return !!h && presets.hostIn(h, settings().alwaysPinned || []); };
 // YouTube is three different jobs under one address, and he uses all three at
 // once: the channel he is watching, Studio where he publishes, and the posts
 // page where the community lives. Each keeps its own tab. Everything else on
@@ -1376,9 +2002,10 @@ function mergeDupes() {
   return drop.length;
 }
 
-function openTab({ url, identity, background, after, agent, pinned, focusUi, own } = {}) {
+function openTab({ url, identity, background, after, agent, pinned, focusUi, own, temp } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
-  const who = IDENTITIES[identity] ? identity : folderForNewTab();
+  const who = identityOf(identity) ? identity : folderForNewTab();
+  if (isLocked(who)) throw new Error(`${folderName(who)} is locked. Type its passcode first.`);
   // `own`: an agent's own tab, beside his. Without it, "one Gmail per folder" would hand the agent
   // HIS inbox and move it to the agent's search while he reads.
   const only = url && isFolder(who) && !own ? soleTab(url, who) : null;
@@ -1394,7 +2021,8 @@ function openTab({ url, identity, background, after, agent, pinned, focusUi, own
     return only;
   }
   const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
-  const t = makeTab({ url: safe || url || START_URL, identity, agent, pinned });
+  // A link opened from a "Just for now" tab is just for now too, unless asked otherwise.
+  const t = makeTab({ url: safe || url || START_URL, identity: who, agent, pinned, temp: temp ?? !!(after && after.temp && after.identity === who && !agent) });
   if (safe) t.httpsFrom = url;
   if (after) {
     const i = tabs.indexOf(after);
@@ -1419,6 +2047,7 @@ function openTab({ url, identity, background, after, agent, pinned, focusUi, own
 // engine row appeared, and the letters went into the empty start page instead.
 function activate(id, by = 'user', { keepUiFocus = false } = {}) {
   const t = byId(id); if (!t) return;
+  if (isLocked(t.identity)) { if (by === 'user') askUnlock(t.identity); return; }
   if (by !== 'user' && isFolder(t.identity) && t.identity !== openFolder()) return;
   if (t.space !== store.data.space && t.id !== programId) enterSpace(t.space);
   if (t.id !== programId && by === 'user') followFolder(t);
@@ -1430,6 +2059,18 @@ function activate(id, by = 'user', { keepUiFocus = false } = {}) {
   if (sp.mode !== 'single' && !sp.ids.includes(id)) sp.ids = [id];
   layout(); pushState(); persist();
   if (t.view && t.host === 'main' && !keepUiFocus) t.view.webContents.focus();
+}
+
+// The last tab closed IN THE FOLDER THAT IS OPEN. Another person's closed tabs are theirs.
+function reopenClosed(folder = openFolder()) {
+  if (isLocked(folder)) return null;
+  for (let i = closedStack.length - 1; i >= 0; i--) {
+    if (closedStack[i].identity !== folder) continue;
+    const [s] = closedStack.splice(i, 1);
+    const t = makeTab(s); tabs.push(t); activate(t.id);
+    return t;
+  }
+  return null;
 }
 
 function closeTab(id) {
@@ -1446,8 +2087,11 @@ function closeTab(id) {
   store.data.split.ids = store.data.split.ids.filter((x) => x !== id);
   fitSplit(store.data.split);
   if (activeId === id) {
-    const next = byId(store.data.split.ids[0]) || spaceOrder()[0];
-    if (next) activate(next.id); else openTab({});
+    // The next tab of the same folder, so closing a tab never walks you into somebody else's.
+    const next = byId(store.data.split.ids[0]) || spaceOrder().find((x) => x.identity === t.identity);
+    if (next) activate(next.id);
+    else if (isFolder(t.identity) && !isLocked(t.identity)) openTab({ identity: t.identity });
+    else { const any = spaceOrder()[0]; if (any) activate(any.id); else if (!isLocked(openFolder())) openTab({}); }
   }
   layout(); pushState(); persist();
 }
@@ -1463,11 +2107,51 @@ function destroyView(t) {
 
 function serialize(t) {
   const { uid, url, title, name, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent } = t;
-  return { uid, url, title, name, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent };
+  return { uid, url, title, name, favicon, identity, pinned, groupOverride, volume, muted, private: p, obsScene, order, zoom, aiAllowed, space, lastActive, agent, ...(t.temp ? { temp: true, tempAt: t.tempAt } : {}) };
+}
+
+// ---------------------------------------------------------------- the two tiers of tabs
+// Tier 1, kept: pinned apps and ordinary tabs stay until the person closes them (archiveDays 0).
+// Tier 2, "Just for now": their own section under the ordinary tabs. With tempClear 'quit' they
+// are never written to cue.json at all, so neither a quit nor a crash brings them back; with a
+// number of hours they are saved and cleared once that long has passed since they became temp.
+const tempHours = () => { const v = settings().tempClear; return v === 'quit' || v == null ? 0 : Math.max(1, Number(v) || 0); };
+const savesTemp = () => tempHours() > 0;
+// Make a tab "Just for now" or keep it. A pinned tab is kept by definition, so making one
+// temporary unpins it - except the strip apps, which are one per folder for good.
+function setTemp(t, on) {
+  if (!t || !isFolder(t.identity)) return { error: 'Only a tab in a folder can be just for now.' };
+  on = !!on;
+  if (on && t.pinned && alwaysPinned(t.url)) return { error: `${tabName(t)} lives in the strip, one in each folder, so it is always kept.` };
+  if (on === !!t.temp) return { ok: true };
+  if (on) { t.temp = true; t.tempAt = Date.now(); t.pinned = false; } else { delete t.temp; delete t.tempAt; }
+  t.order = Date.now();
+  pushState(); persist();
+  return { ok: true };
+}
+// Throw "Just for now" tabs away: no archive, and out of Reopen Closed Tab for good.
+// `folder` limits it to one person's folder; `olderThan` (ms timestamp) to tabs past the limit.
+function clearTemp({ folder, olderThan, spare = [] } = {}) {
+  const gone = tabs.filter((t) => t.temp && (!folder || t.identity === folder) && (!olderThan || (t.tempAt || 0) <= olderThan) && !spare.includes(t.id));
+  const uids = new Set(gone.map((t) => t.uid));
+  for (const t of gone) closeTab(t.id);
+  for (let i = closedStack.length - 1; i >= 0; i--) {
+    const c = closedStack[i];
+    if (uids.has(c.uid) || (c.temp && (!folder || c.identity === folder) && (!olderThan || (c.tempAt || 0) <= olderThan))) closedStack.splice(i, 1);
+  }
+  if (gone.length) { layout(); pushState(); persist(); }
+  return gone.length;
+}
+// From the one-minute timer. `now` is a parameter so the test can move the clock.
+function sweepTemp(now = Date.now()) {
+  const h = tempHours();
+  if (!h) return 0;
+  // The tab you are reading and the one on air wait for the next sweep after you leave them.
+  return clearTemp({ olderThan: now - h * 3600000, spare: [activeId, programId].filter(Boolean) });
 }
 
 function persist() {
-  store.data.tabs = tabs.filter((t) => t.identity !== 'vanish' && !t.agentTemp).map(serialize);
+  store.data.tabs = tabs.filter((t) => t.identity !== 'vanish' && !(t.temp && !savesTemp())).map(serialize);
   store.data.cue = cueTabs().map((t) => t.uid);
   const a = byId(activeId);
   store.data.activeIndex = a ? store.data.tabs.findIndex((s) => s.uid === a.uid) : 0;
@@ -1629,9 +2313,11 @@ function addToSplit(id) {
   layout(); pushState(); persist();
 }
 
+// A locked folder's tabs are in no list at all: not the sidebar, not the agents', not the pedal's,
+// not Ctrl-Tab's. They are still there, asleep, for when the folder is unlocked.
 function sidebarOrder() {
-  const order = GROUP_LIST.map((g) => g.id);
-  return [...tabs].sort((a, b) => (b.pinned - a.pinned) || (order.indexOf(groupOf(a)) - order.indexOf(groupOf(b))) || (a.order - b.order));
+  const order = groupList().map((g) => g.id);
+  return tabs.filter((t) => !isLocked(t.identity)).sort((a, b) => (b.pinned - a.pinned) || (order.indexOf(groupOf(a)) - order.indexOf(groupOf(b))) || (a.order - b.order));
 }
 function spaceOrder() { return sidebarOrder().filter((t) => t.space === store.data.space); }
 
@@ -1642,20 +2328,24 @@ function enterSpace(name) {
   store.data.spaceSplit[store.data.space] = store.data.split;
   store.data.space = name;
   const saved = store.data.spaceSplit[name] || { mode: 'single', ids: [] };
-  store.data.split = fitSplit({ mode: saved.mode, ids: saved.ids.filter((id) => byId(id)) });
+  store.data.split = fitSplit({ mode: saved.mode, ids: saved.ids.filter((id) => byId(id) && !isLocked(byId(id).identity)) });
   if (store.data.split.ids.length < 2) store.data.split = { mode: 'single', ids: [] };
   store.data.split.ids.forEach((id) => ensureView(byId(id)));
 }
 function switchSpace(name) {
   if (name === store.data.space) return;
   enterSpace(name);
-  const list = tabs.filter((t) => t.space === name && t.id !== programId).sort((a, b) => b.lastActive - a.lastActive);
+  const list = tabs.filter((t) => t.space === name && t.id !== programId && !isLocked(t.identity)).sort((a, b) => b.lastActive - a.lastActive);
   const first = list.find((t) => store.data.split.ids.includes(t.id)) || list[0];
   // Landing on a tab takes you into that tab's folder (activate does it). An
   // empty Space has no tab to follow, so it falls back to the folder this Space
   // usually uses — Teach to School, Create to Personal, as set in Settings.
   if (first) activate(first.id);
-  else { store.data.folder = usualFolderFor(name); openTab({}); }
+  else {
+    const usual = usualFolderFor(name);
+    if (!isLocked(usual)) store.data.folder = usual;
+    if (!isLocked(openFolder())) openTab({});
+  }
   layout(); pushState(); persist();
 }
 
@@ -1806,7 +2496,9 @@ let cueNextId = null;
 // window with no sidebar and no address bar in it.
 let stageIds = [];
 const stageTabs = () => stageIds.map(byId).filter((t) => t && t.view && t.host === 'stage');
-const cueTabs = () => cueIds.map(byId).filter(Boolean);
+const cueTabs = () => cueIds.map(byId).filter((t) => t && !isLocked(t.identity));
+// Every folder a tab can be opened in right now, Vanish last: the menus' "Open as" lists.
+const openableIds = () => [...allFolders().filter((k) => !isLocked(k)), 'vanish'];
 const CUE_MAX = 6;
 
 function cueWake() {
@@ -2000,11 +2692,11 @@ function navigate({ text, engine, newTab, identity }) {
 function contextMenu(t, p) {
   const wc = t.view.webContents;
   const items = [];
-  const ids = Object.keys(IDENTITIES);
+  const ids = openableIds();
   if (p.linkURL) {
     items.push({ label: 'Open link in new tab', click: () => openTab({ url: p.linkURL, identity: t.identity, background: true, after: t }) });
     items.push({ label: 'Peek at this link', click: () => openPeek(p.linkURL, t) });
-    items.push({ label: 'Open link as…', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: p.linkURL, identity: i, after: t }) })) });
+    items.push({ label: 'Open link as…', submenu: ids.map((i) => ({ label: folderName(i), click: () => openTab({ url: p.linkURL, identity: i, after: t }) })) });
     items.push({ label: 'Copy link', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' });
   }
   if (p.mediaType === 'image' && p.srcURL) {
@@ -2014,8 +2706,9 @@ function contextMenu(t, p) {
     items.push({ label: 'Search this image with Google Lens', click: () => openTab({ url: 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(p.srcURL), identity: t.identity, after: t }) });
     items.push({ label: 'Ask Claude about this image', click: () => askAI('claude', `Tell me about this image: ${p.srcURL}`) });
     if (kit('designer') && t.identity !== 'vanish') {
-      const boards = lib.boardList();
-      items.push({ label: 'Add to board', submenu: [...boards.map((b) => ({ label: b.name, click: () => addToBoard(t, p, b.id) })), { type: 'separator' }, { label: 'New board', click: () => addToBoard(t, p, lib.boardCreate(`Board ${boards.length + 1}`)) }] });
+      const mine = lib.in(t.identity); // this folder's boards, never another's
+      const boards = mine.boardList();
+      items.push({ label: 'Add to board', submenu: [...boards.map((b) => ({ label: b.name, click: () => addToBoard(t, p, b.id) })), { type: 'separator' }, { label: 'New board', click: () => addToBoard(t, p, mine.boardCreate(`Board ${boards.length + 1}`)) }] });
       items.push({ label: 'Palette from this image', click: () => imagePalette(t, p) });
     }
     items.push({ type: 'separator' });
@@ -2048,27 +2741,37 @@ function contextMenu(t, p) {
 
 function tabMenu(t) {
   if (!t) return;
-  const ids = Object.keys(IDENTITIES);
+  Menu.buildFromTemplate(tabMenuItems(t)).popup({ window: mainWin });
+}
+function tabMenuItems(t) {
+  const ids = openableIds();
+  const moveTo = allFolders().filter((i) => i !== t.identity && !isLocked(i));
   const items = [
-    { label: t.pinned ? 'Unpin' : 'Pin', click: () => { t.pinned = !t.pinned; pushState(); persist(); } },
+    { label: t.pinned ? 'Unpin' : 'Pin', click: () => { t.pinned = !t.pinned; if (t.pinned) { delete t.temp; delete t.tempAt; } pushState(); persist(); } },
+    // The two tiers: a tab is kept until you close it, or it is just for now.
+    ...(isFolder(t.identity) ? [t.temp
+      ? { label: 'Keep this tab', click: () => setTemp(t, false) }
+      : { label: 'Just for now', enabled: !(t.pinned && alwaysPinned(t.url)), click: () => { const r = setTemp(t, true); if (r.error) sendEvent('toast', r.error); } }] : []),
     { label: t.muted ? 'Unmute' : 'Mute', click: () => setMuted(t, !t.muted) },
+    // Opens the tab's volume control in the sidebar, with the keyboard in it.
+    { label: `Volume… (${Math.round((t.volume ?? 1) * 100)}%)`, click: () => { try { uiView.webContents.focus(); } catch {} sendEvent('volume-pop', { id: t.id }); } },
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     // Two different things, named for what they do: one leaves this tab where
     // it is and opens a second copy elsewhere; the other takes this tab with you.
-    { label: 'Move to folder', enabled: isFolder(t.identity), submenu: FOLDERS.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => moveToFolder({ id: t.id, to: i }) })) },
-    { label: 'Open a copy in…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: IDENTITIES[i].name, click: () => openTab({ url: t.url, identity: i, after: t }) })) },
+    { label: 'Move to folder', enabled: isFolder(t.identity) && moveTo.length > 0, submenu: moveTo.length ? moveTo.map((i) => ({ label: folderName(i), click: () => moveToFolder({ id: t.id, to: i }) })) : [{ label: 'No other folder', enabled: false }] },
+    { label: 'Open a copy in…', submenu: ids.filter((i) => i !== t.identity).map((i) => ({ label: folderName(i), click: () => openTab({ url: t.url, identity: i, after: t }) })) },
     { label: 'Add to split view', click: () => addToSplit(t.id) },
     { label: 'Move to Space', submenu: spaces().map((n) => ({ label: n, type: 'radio', checked: t.space === n, click: () => { t.space = n; const sp = store.data.split; sp.ids = sp.ids.filter((x) => x !== t.id); fitSplit(sp); if (t.id === activeId) { const o = spaceOrder().filter((x) => x.id !== t.id)[0]; if (o) activate(o.id); else openTab({}); } pushState(); persist(); } })) },
     { label: t.mini ? 'Back from the mini player' : 'Mini player (floats while you work)', click: () => miniPlay(t) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
-    { label: 'Private: never goes on air', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
+    { label: 'Off air: never shown to the class', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
     { label: 'Let AI agents use this tab', type: 'checkbox', checked: t.aiAllowed || t.agent, enabled: !t.agent, click: () => { t.aiAllowed = !t.aiAllowed; pushState(); persist(); } },
-    { label: 'Move to group', submenu: [{ label: 'Automatic', type: 'radio', checked: !t.groupOverride, click: () => { t.groupOverride = null; pushState(); persist(); } }, ...GROUP_LIST.map((g) => ({ label: g.name, type: 'radio', checked: t.groupOverride === g.id, click: () => { t.groupOverride = g.id; pushState(); persist(); } }))] },
+    { label: 'Move to group', submenu: [{ label: 'Automatic', type: 'radio', checked: !t.groupOverride, click: () => { t.groupOverride = null; pushState(); persist(); } }, ...groupList().map((g) => ({ label: g.name, type: 'radio', checked: t.groupOverride === g.id, click: () => { t.groupOverride = g.id; pushState(); persist(); } }))] },
     { type: 'separator' },
     { label: 'Close tab', click: () => closeTab(t.id) },
   ];
-  Menu.buildFromTemplate(items).popup({ window: mainWin });
+  return items;
 }
 
 // Picture of a tab, even one that is behind others: briefly show it underneath the visible tabs.
@@ -2124,11 +2827,44 @@ function pushState() {
   stateTimer = setTimeout(() => { stateTimer = null; sendState(); }, 30);
 }
 
+// The sidebar is told about ONE folder: the one that is open. Every other folder is a name, a
+// colour, a picture, whether it is locked, and counts - never a title, an address or an account.
+// A locked folder is not even counted. The only tabs of another folder that are named at all are
+// the ones on air or in the cue, because the class can already see those, and even they go with
+// no address.
+function folderFaces(here) {
+  const ids = allFolders().filter((k) => k !== 'agent' || tabs.some((t) => t.identity === 'agent'));
+  const identities = { vanish: { name: BUILTIN.vanish.name, color: BUILTIN.vanish.color } };
+  const info = {};
+  for (const id of ids) {
+    const v = identityOf(id);
+    const locked = isLocked(id);
+    identities[id] = { name: v.name, color: v.color, picture: v.picture, locked, ...(id === here ? { about: v.about } : {}) };
+    if (locked) { info[id] = { locked: true }; continue; }
+    const mine = tabs.filter((t) => t.identity === id);
+    info[id] = {
+      tabs: mine.length,
+      here: mine.filter((t) => t.space === store.data.space).length,
+      unread: mine.reduce((n, t) => n + (t.badge || 0), 0),
+    };
+  }
+  return { ids, identities, info };
+}
+
 function sendState() {
   if (!uiView || uiView.webContents.isDestroyed()) return;
   const s = settings();
-  uiView.webContents.send('ui:state', {
-    tabs: sidebarOrder().map((t) => ({
+  const here = openFolder();
+  const shut = isLocked(here);
+  const faces = folderFaces(here);
+  const mine = shut ? [] : sidebarOrder().filter((t) => t.identity === here);
+  const shown = new Set([programId, ...stageIds, ...cueIds]);
+  const away = shut ? [] : sidebarOrder().filter((t) => t.identity !== here && shown.has(t.id)).map((t) => ({
+    id: t.id, url: '', title: t.title, name: t.name || null, siteName: tabName(t), identity: t.identity, away: true,
+    pinned: false, group: 'other', space: t.space, muted: t.muted, volume: t.volume, host: t.host, private: t.private,
+  }));
+  lastState = {
+    tabs: [...mine.map((t) => ({
       id: t.id, url: isStart(t.url) ? '' : t.url, title: t.title, name: t.name || null, favicon: t.favicon, identity: t.identity, pinned: t.pinned,
       siteName: tabName(t), siteLogo: siteLogo(t),
       group: groupOf(t), volume: t.volume, muted: t.muted, private: t.private, obsScene: t.obsScene, agent: t.agent,
@@ -2138,28 +2874,37 @@ function sendState() {
       aiHanded: !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'),
       playing: t.playing, audible: t.audible, loading: t.loading, sleeping: !t.view,
       host: t.host, mini: !!t.mini, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
-      lastActive: t.lastActive,
+      lastActive: t.lastActive, temp: !!t.temp, tempAt: t.tempAt || 0,
       aiBusy: !!t.aiBusy,
       blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
-    })),
-    space: store.data.space, spaces: spaces(), kits: KITS, peek: peek ? { title: peek.title, url: peek.url } : null,
-    ai: aiView ? { which: aiWhich(), names: AI_NAMES, folder: aiIdentity } : null, strip: stripOpen, recording: recTabId, alertCount: alertCount(), billCount: billCount(),
-    activeId, programId, live, cue: cueIds.filter((id) => byId(id)), cueNext: cueNextId, stageIds, groups: GROUP_LIST, identities: IDENTITIES, labels: s.identityLabels,
-    // The top row is the accounts that are HIS. The AI agent folder is no
-    // longer one of them: agents work in his folders now, so it only appears
-    // while it still holds tabs from before.
-    folder: openFolder(), folders: FOLDERS,
-    pickFolders: FOLDERS.filter((k) => k !== 'agent' || tabs.some((t) => t.identity === 'agent')),
-    aiPaused: aiPaused(), aiCount: aiTabs().length,
-    whose: store.data.whose || {},
-    split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(), settings: { ...s, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
-    collapsed: store.data.collapsed, obs: obs.status, downloads: downloads.slice(0, 8),
-    agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: agentLog[agentLog.length - 1] || null,
+    })), ...away],
+    space: store.data.space, spaces: spaces(), spaceList: spaceList(), spaceTints: SPACE_TINTS, kits: KITS,
+    preset: (() => { const p = presets.active(); return p ? { id: p.id, name: p.name, commands: p.commands || [], appLabel: p.appLabel || 'App', undo: !!s.presetUndo } : null; })(),
+    peek: peek && peek.identity === here ? { title: peek.title, url: peek.url } : null,
+    ai: aiView ? { which: aiWhich(), names: AI_NAMES, folder: aiIdentity } : null, strip: stripOpen, recording: recTabId, alertCount: shut ? 0 : alertCount(), billCount: shut ? 0 : billCount(),
+    canCarryFromChrome: canCarryFromChrome(),
+    activeId: shut ? null : activeId, programId, live, cue: cueIds.filter((id) => byId(id)), cueNext: cueNextId, stageIds, groups: groupList(),
+    identities: faces.identities, labels: shut ? {} : { [here]: emailOf(here) },
+    // The top row is the people's folders. The AI agent folder only appears while it still holds
+    // tabs from before, because agents work in the folders they are allowed into now.
+    folder: here, folderLocked: shut, folders: faces.ids, pickFolders: faces.ids, folderInfo: faces.info,
+    aiPaused: aiPaused(), aiCount: shut ? 0 : aiTabs().filter((t) => t.identity === here).length,
+    whose: shut ? {} : { [here]: whoseIn(here) },
+    split: store.data.split, panes, gutters, sideReveal, sideWidth: sideWidth(), aiWidth: aiWidth(),
+    // Settings without anything that belongs to another folder: no account names, and only this
+    // folder's own nine number keys.
+    settings: { ...s, identityLabels: undefined, presetUndo: undefined, quickKeys: shut ? [] : quickKeysFor(here), sharedPairs: undefined, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
+    collapsed: store.data.collapsed, obs: obs.status, downloads: shut ? [] : downloads.filter((d) => d.folder === here).slice(0, 8),
+    agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: (() => { const l = agentLog[agentLog.length - 1]; return l ? { agent: l.agent, tool: l.tool, ok: l.ok } : null; })(),
       sites: Object.entries(AGENT_SITES).map(([id, v]) => ({ id, name: v.name, what: v.what })) },
     update: updater ? updater.state() : null,
-  });
+    vanishKeys: VANISH_KEYS_SHOWN,
+  };
+  uiView.webContents.send('ui:state', lastState);
 }
+let lastState = null; // what the sidebar was last told, kept for the tests that prove what it was NOT told
+const VANISH_KEYS_SHOWN = vanishKeys.shown();
 
 function sendEvent(name, data) { if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send('ui:event', name, data); }
 
@@ -2206,17 +2951,22 @@ ipcMain.on('cue:note', (e, n) => {
   if (t.noteTimes.length >= 5) return;
   t.noteTimes.push(now);
   if (live) heldCount++;
-  addAlert({ source: hostName(t.url), title: String(n.title || '').slice(0, 200), body: String(n.body || '').slice(0, 500), url: t.url, held: live });
+  addAlert({ source: hostName(t.url), title: String(n.title || '').slice(0, 200), body: String(n.body || '').slice(0, 500), url: t.url, held: live, folder: t.identity });
 });
-const sharesPasswords = (identity, origin) => (identity === 'personal' || identity === 'school') && !hasTwoAccounts(hostName(origin));
+// A password saved in one folder is offered in another ONLY when the person paired those two
+// folders, and never on a site where people keep two accounts.
+const sharesPasswords = (identity, origin) => partnersOf(identity).length > 0 && !hasTwoAccounts(hostName(origin));
 // Which saved login applies here, found the same way for both handlers below so
 // the answer to "is there one" can never differ from the one that is handed out.
 function credFor(e) {
   const t = byWC(e.sender);
-  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t)) return null;
+  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t) || isLocked(t.identity)) return null;
   const origin = safeOrigin(e.senderFrame.url);
   if (!securePage(origin)) return null;
-  const c = vault.find(t.identity, origin) || (sharesPasswords(t.identity, origin) ? vault.find(t.identity === 'school' ? 'personal' : 'school', origin) : null);
+  let c = vault.find(t.identity, origin);
+  if (!c && sharesPasswords(t.identity, origin)) {
+    for (const p of partnersOf(t.identity)) { if (isLocked(p)) continue; c = vault.find(p, origin); if (c) break; }
+  }
   return c ? { c, origin } : null;
 }
 
@@ -2248,7 +2998,11 @@ ipcMain.on('cue:cred-offer', (e, c) => {
 });
 ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   if (!e.senderFrame.url.startsWith('cue://') || !internal[cmd]) throw new Error('Not allowed');
-  return internal[cmd](a, byWC(e.sender), e.sender);
+  const from = byWC(e.sender);
+  // A cue:// page acts on the folder of the tab it is in. One that is in no tab of Cue's (a Vanish
+  // window) reads no folder's library at all.
+  if (from && isLocked(from.identity)) throw new Error('Not allowed');
+  return internal[cmd](a, from, e.sender);
 });
 
 // A brand-new tab's page grabs the keyboard the moment it finishes loading,
@@ -2272,9 +3026,124 @@ function holdOmnibox(t) {
   for (const ms of [80, 250, 600]) setTimeout(hold, ms);
 }
 
+// Anything that goes wrong in a command - a locked folder refusing a new tab, say - is said in a
+// line on screen rather than lost in the log.
 function uiCommand(cmd, a = {}) {
-  const t = a.id ? byId(a.id) : byId(activeId);
+  try { return uiCommandRaw(cmd, a); } catch (e) {
+    sendEvent('toast', String((e && e.message) || e));
+    return { error: String((e && e.message) || e) };
+  }
+}
+// What the person did that changes a folder. Each says so on screen when it cannot be done.
+function folderCommand(cmd, a) {
+  const say = (r) => { if (r && r.error && !process.env.CUE_TEST) sendEvent('toast', r.error); return r; };
+  switch (cmd) {
+    case 'folder.add': {
+      const r = addFolder({ name: a.name, color: a.color });
+      if (r.ok && a.open !== false) setFolder(r.folder.id);
+      return say(r);
+    }
+    case 'folder.rename': return say(renameFolder(a));
+    case 'folder.color': return say(recolorFolder(a));
+    case 'folder.email': return say(setFolderEmail(a));
+    case 'folder.agents': return say(setFolderAgents(a));
+    case 'folder.share': return say(setShared(a));
+    case 'folder.lock-now': return lockFolder(a.id) ? { ok: true } : say({ error: 'That folder has no passcode yet. Set one in Settings, under Folders and accounts.' });
+    case 'folder.remove': return removeFolder(a).then(say);
+    case 'folder-menu': {
+      const f = folderById(a.id);
+      if (!f) return null;
+      Menu.buildFromTemplate([
+        { label: hasLock(f.id) ? (isLocked(f.id) ? 'Locked' : 'Lock now') : 'Lock now (set a passcode first)', enabled: hasLock(f.id) && !isLocked(f.id), click: () => lockFolder(f.id) },
+        { type: 'separator' },
+        { label: 'Folders and accounts…', click: () => sendEvent('open-settings', 'folders') },
+      ]).popup({ window: mainWin });
+      return { ok: true };
+    }
+    default: return null;
+  }
+}
+function tidyDupes() {
+  const n = mergeDupes();
+  layout(); pushState(); persist();
+  return n ? `Closed ${n} duplicate${n === 1 ? '' : 's'}. One Gmail, one WhatsApp, one YouTube per folder.` : 'Nothing to tidy: you already have one of each.';
+}
+// Spaces, by name. Renaming carries every tab, login, layout and collapsed group filed under the
+// old name, so the only thing that changes is the word. Removing never closes a tab: they move
+// to the first Space that is left. Every answer is { ok, said } or { error }.
+function spaceCommand(cmd, a = {}) {
+  const list = spaceList();
+  const at = (n) => list.findIndex((x) => x.name === n);
+  const save = (next, extra) => {
+    store.data.spaces = next.map(({ name, tint }) => ({ name, tint }));
+    if (extra) extra();
+    buildMenu(); store.save(); persist(); layout(); pushState();
+  };
+  const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 18);
+  switch (cmd) {
+    case 'space.rename': {
+      const i = at(a.from); const to = clean(a.name);
+      if (i < 0) return { error: 'That Space is not there any more.' };
+      if (!to) return { error: 'A Space needs a name.' };
+      if (to === a.from) return { ok: true, said: '' };
+      if (at(to) >= 0) return { error: `You already have a Space called ${to}.` };
+      list[i] = { ...list[i], name: to };
+      save(list, () => {
+        for (const x of tabs) if (x.space === a.from) x.space = to;
+        for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, settings().spaceLogins, store.data.collapsed]) {
+          if (box && Object.prototype.hasOwnProperty.call(box, a.from)) { box[to] = box[a.from]; delete box[a.from]; }
+        }
+        if (store.data.space === a.from) store.data.space = to;
+      });
+      return { ok: true, said: `That Space is called ${to} now.` };
+    }
+    case 'space.tint': {
+      const i = at(a.name);
+      if (i < 0) return { error: 'That Space is not there any more.' };
+      if (!SPACE_TINTS.includes(a.tint)) return { error: 'That colour is not one of the swatches.' };
+      list[i] = { ...list[i], tint: a.tint };
+      save(list);
+      return { ok: true, said: '' };
+    }
+    case 'space.move': {
+      const i = at(a.name); const j = i + (Number(a.dir) < 0 ? -1 : 1);
+      if (i < 0 || j < 0 || j >= list.length) return { ok: true, said: '' };
+      [list[i], list[j]] = [list[j], list[i]];
+      save(list);
+      return { ok: true, said: `${a.name} is number ${j + 1} now.` };
+    }
+    case 'space.add': {
+      if (list.length >= SPACES_MAX) return { error: 'Nine Spaces is the most Cue keeps.' };
+      const to = clean(a.name) || `Space ${list.length + 1}`;
+      if (at(to) >= 0) return { error: `You already have a Space called ${to}.` };
+      const used = new Set(list.map((x) => x.tint));
+      list.push({ name: to, tint: SPACE_TINTS.includes(a.tint) ? a.tint : (SPACE_TINTS.find((x) => !used.has(x)) || tintFor(to, list.length)) });
+      save(list);
+      return { ok: true, said: `${to} is ready. Click it in the sidebar to work there.` };
+    }
+    case 'space.remove': {
+      const i = at(a.name);
+      if (i < 0) return { error: 'That Space is not there any more.' };
+      if (list.length <= 1) return { error: 'The last Space stays.' };
+      list.splice(i, 1);
+      const home = list[0].name;
+      let moved = 0;
+      save(list, () => {
+        for (const x of tabs) if (x.space === a.name) { x.space = home; moved++; }
+        for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, store.data.collapsed]) if (box) delete box[a.name];
+        if (settings().spaceLogins) delete settings().spaceLogins[a.name];
+        if (store.data.space === a.name) store.data.space = home;
+      });
+      return { ok: true, said: moved ? `${a.name} is gone. Its ${moved} tab${moved === 1 ? '' : 's'} moved to ${home}.` : `${a.name} is gone.` };
+    }
+    default: return { error: 'Unknown Space command.' };
+  }
+}
+function uiCommandRaw(cmd, a = {}) {
+  let t = a.id ? byId(a.id) : byId(activeId);
+  if (t && isLocked(t.identity)) t = null; // a locked folder's tab cannot be touched from here
   const wc = t && t.view ? t.view.webContents : null;
+  if (cmd.startsWith('folder.') || cmd === 'folder-menu') return folderCommand(cmd, a);
   switch (cmd) {
     case 'navigate': navigate(a); break;
     case 'activate': activate(a.id); break;
@@ -2282,7 +3151,7 @@ function uiCommand(cmd, a = {}) {
     case 'close': closeTab(a.id); break;
     case 'new-tab':
       if (!a.identity && vanish.focused()) { vanish.add(); break; }
-      { const nt = openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined, focusUi: true });
+      { const nt = openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined, focusUi: true, temp: !!a.temp });
         uiView.webContents.focus(); sendEvent('focus-omnibox'); holdOmnibox(nt); }
       break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
@@ -2301,9 +3170,13 @@ function uiCommand(cmd, a = {}) {
       // WhatsApp, Gmail, Instagram and Facebook stay in the strip. There is only
       // ever one of each per folder, so taking it out of the strip just turns it
       // into a row to tidy up later.
-      if (!on && alwaysPinned(t.url)) { sendEvent('toast', `${hostOf(t.url)} lives in the strip at the top \u2014 one for Personal, one for School. Nothing to unpin.`); break; }
-      t.pinned = on; t.order = Date.now(); pushState(); persist(); break;
+      if (!on && alwaysPinned(t.url)) { sendEvent('toast', `${hostOf(t.url)} lives in the strip at the top \u2014 one in each folder. Nothing to unpin.`); break; }
+      t.pinned = on; t.order = Date.now();
+      if (on) { delete t.temp; delete t.tempAt; } // pinning keeps it
+      pushState(); persist(); break;
     }
+    case 'tab-temp': { const r = setTemp(t, a.on === undefined ? !(t && t.temp) : !!a.on); if (r && r.error) sendEvent('toast', r.error); break; }
+    case 'temp-clear': clearTemp({ folder: openFolder() }); break;
     case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
@@ -2323,8 +3196,8 @@ function uiCommand(cmd, a = {}) {
     case 'setting': setSetting(a.key, a.value); break;
     case 'find': if (wc) { if (a.stop || !a.text) wc.stopFindInPage('clearSelection'); else wc.findInPage(a.text, { forward: a.forward !== false, findNext: !!a.next }); } break;
     case 'zoom': if (vanish.focused()) { vanish.zoom(a); break; } if (wc) { t.zoom = a.reset ? 0 : t.zoom + (a.dir || 0) * 0.5; wc.setZoomLevel(t.zoom); persist(); } break;
-    case 'download-open': { const d = downloads.find((x) => x.id === a.id); if (d) shell.showItemInFolder(d.file); break; }
-    case 'downloads-clear': downloads.length = 0; pushState(); break;
+    case 'download-open': { const d = downloads.find((x) => x.id === a.id && x.folder === openFolder()); if (d) shell.showItemInFolder(d.file); break; }
+    case 'downloads-clear': { const keep = downloads.filter((x) => x.folder !== openFolder()); downloads.splice(0, downloads.length, ...keep); pushState(); break; }
     case 'obs-connect': obs.connect(settings().obs); break;
     case 'share-choose': {
       const cb = pendingShare; pendingShare = null; setOverlay(false);
@@ -2350,62 +3223,12 @@ function uiCommand(cmd, a = {}) {
     case 'clear-cache': clearCaches(); break;
     // Some sites genuinely break when their ads are blocked. This lets that one
     // site through and leaves every other site alone.
-    // Renaming a Space moves everything filed under the old name across with
-    // it - the tabs, which login it opens, the layout it was left in - so the
-    // only thing that changes is the word.
-    case 'space-rename': {
-      const list = [...spaces()];
-      const i = list.indexOf(a.from);
-      const to = String(a.name || '').trim().slice(0, 18);
-      if (i < 0 || !to || list.includes(to)) break;
-      list[i] = to;
-      store.data.spaces = list;
-      for (const x of tabs) if (x.space === a.from) x.space = to;
-      for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, settings().spaceLogins, store.data.collapsed]) {
-        if (box && Object.prototype.hasOwnProperty.call(box, a.from)) { box[to] = box[a.from]; delete box[a.from]; }
-      }
-      if (store.data.space === a.from) store.data.space = to;
-      buildMenu(); store.save(); persist(); pushState();
-      sendEvent('toast', `That Space is called ${to} now.`);
-      break;
-    }
-    case 'space-add': {
-      const list = [...spaces()];
-      if (list.length >= SPACES_MAX) { sendEvent('toast', `Nine Spaces is the most Cue keeps.`); break; }
-      const to = String(a.name || '').trim().slice(0, 18) || `Space ${list.length + 1}`;
-      if (list.includes(to)) { sendEvent('toast', `You already have a Space called ${to}.`); break; }
-      list.push(to);
-      store.data.spaces = list;
-      buildMenu(); store.save(); persist(); pushState();
-      sendEvent('toast', `${to} is ready. Click it in the sidebar to work there.`);
-      break;
-    }
-    // Removing a Space never throws tabs away: they move to the first Space,
-    // where he can find them again.
-    case 'space-remove': {
-      const list = [...spaces()];
-      const i = list.indexOf(a.name);
-      if (i < 0 || list.length <= 1) break;
-      list.splice(i, 1);
-      store.data.spaces = list;
-      const home = list[0];
-      let moved = 0;
-      for (const x of tabs) if (x.space === a.name) { x.space = home; moved++; }
-      for (const box of [store.data.spaceSplit, store.data.savedSpaceSplit, store.data.collapsed]) {
-        if (box) delete box[a.name];
-      }
-      if (settings().spaceLogins) delete settings().spaceLogins[a.name];
-      if (store.data.space === a.name) { store.data.space = home; }
-      buildMenu(); store.save(); persist(); layout(); pushState();
-      sendEvent('toast', moved ? `${a.name} is gone. Its ${moved} tab${moved === 1 ? '' : 's'} moved to ${home}.` : `${a.name} is gone.`);
-      break;
-    }
-    case 'tidy-dupes': {
-      const n = mergeDupes();
-      layout(); pushState(); persist();
-      sendEvent('toast', n ? `Closed ${n} duplicate${n === 1 ? '' : 's'}. One Gmail, one WhatsApp, one YouTube per folder.` : 'Nothing to tidy — you already have one of each.');
-      break;
-    }
+    // The Space commands answer in words; from the sidebar the words are a toast, and from
+    // Settings they are shown on the row (uiInvoke 'space.*').
+    case 'space-rename': { const r = spaceCommand('space.rename', a); if (r.error || r.said) sendEvent('toast', r.error || r.said); break; }
+    case 'space-add': { const r = spaceCommand('space.add', a); if (r.error || r.said) sendEvent('toast', r.error || r.said); break; }
+    case 'space-remove': { const r = spaceCommand('space.remove', a); if (r.error || r.said) sendEvent('toast', r.error || r.said); break; }
+    case 'tidy-dupes': sendEvent('toast', tidyDupes()); break;
     case 'ads-here': {
       if (!shield || !t) break;
       const host = shield.hostOf(t.url);
@@ -2423,6 +3246,9 @@ function uiCommand(cmd, a = {}) {
     }
     case 'ai-door': {
       doorOpen = !!a.on;
+      // Switching AI tools on for the first time also opens the port they knock on, and it stays
+      // listening from then on (settings().agentPort), the way an upgraded install always was.
+      if (doorOpen && settings().agentPort === false) { settings().agentPort = true; openAgentPort(); }
       setSetting('aiDoor', doorOpen);
       if (!doorOpen) agentSeen.clear();
       sendEvent('toast', doorOpen
@@ -2447,14 +3273,15 @@ function uiCommand(cmd, a = {}) {
     case 'strip': stripOpen = !stripOpen; layout(); pushState(); break;
     case 'music': if (wc) wc.send('cue:music', a.op, a.value); break;
     case 'tool': runTool(a.name, t); break;
-    case 'open-page': openCuePage(a.page, byId(activeId)?.identity); break;
-    case 'cred-save': if (pendingCred) { vault.save({ ...pendingCred, auto: !!a.auto }); pendingCred = null; sendEvent('toast', 'Password saved.'); } break;
+    case 'open-page': openCuePage(a.page, openFolder()); break;
+    case 'cred-save': if (pendingCred && !isLocked(pendingCred.identity)) { vault.save({ ...pendingCred, auto: !!a.auto }); pendingCred = null; sendEvent('toast', 'Password saved.'); } break;
     case 'cred-never': if (pendingCred) { vault.neverFor(pendingCred.origin); pendingCred = null; } break;
     case 'cred-dismiss': pendingCred = null; break;
-    case 'pw-auto': vault.setAuto(a.pw, a.on); break;
-    case 'pw-remove': vault.remove(a.pw); break;
+    // Only a login of the folder that is open can be changed from its Settings.
+    case 'pw-auto': { const pw = vault.get(a.pw); if (pw && pw.identity === openFolder() && !isLocked(pw.identity)) vault.setAuto(a.pw, a.on); break; }
+    case 'pw-remove': { const pw = vault.get(a.pw); if (pw && pw.identity === openFolder() && !isLocked(pw.identity)) vault.remove(a.pw); break; }
     case 'download-run': {
-      const d = downloads.find((x) => x.id === a.id);
+      const d = downloads.find((x) => x.id === a.id && x.folder === openFolder());
       if (d) { shell.openPath(d.file); if (d.kind === 'Installers') { store.data.installersOpened.push({ file: d.file, at: Date.now() }); store.save(); } }
       break;
     }
@@ -2464,22 +3291,42 @@ function uiCommand(cmd, a = {}) {
     case 'update-get': if (updater) updater.download(); break;
     case 'update-install': if (updater) updater.install(); break;
     case 'update-notes': if (updater) updater.openPage(); break;
+    case 'update-dismiss': if (updater) updater.dismiss(); break;
     case 'agent-copy': clipboard.writeText(agentSetupText()); sendEvent('toast', 'AI setup copied.'); break;
     default: break;
   }
 }
 ipcMain.on('ui:cmd', (_e, cmd, a = {}) => uiCommand(cmd, a));
 
-ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
+ipcMain.handle('ui:invoke', (_e, cmd, a = {}) => uiInvoke(cmd, a));
+async function uiInvoke(cmd, a = {}) {
   if (cmd === 'obs-scenes') return obs.scenes();
   if (cmd === 'suggest') { const r = suggestions(a.q); warmUp(r); return r; }
   if (cmd === 'import-find') return findImports();
   if (cmd === 'import-run') return runImport(a);
   if (cmd === 'open-disk-access') return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
-  if (cmd === 'passwords') return vault.list();
+  if (cmd === 'passwords') return isLocked(openFolder()) ? [] : vault.list(openFolder());
+  // ---- people's folders
+  if (cmd === 'folders') return { rows: folderRows(), lockMinutes: Number(settings().lockMinutes ?? 15) };
+  if (cmd === 'folder-unlock') {
+    const r = tryUnlock(a.id, a.code);
+    if (r.ok) setFolder(a.id);
+    return r;
+  }
+  if (cmd === 'folder-passcode') return setPasscode(a);
+  if (cmd.startsWith('folder.')) { try { return await folderCommand(cmd, a); } catch (e) { return { error: e.message }; } }
   if (cmd === 'storage') return storageReport();
-  if (cmd === 'team-vault') return loadTeamVault();
+  // Settings asks for these and shows the answer on the row, so it never has to close.
+  if (cmd.startsWith('space.')) return spaceCommand(cmd, a);
+  if (cmd === 'tidy-dupes') return { ok: true, said: tidyDupes() };
+  if (cmd === 'temp.clear') return { ok: true, n: clearTemp({ folder: openFolder() }) };
+  if (cmd === 'team-vault') return teamSite() ? loadTeamVault(teamSite(), { into: [openFolder()] }) : { signedIn: false };
   if (cmd === 'team-offered') return teamImportOffered();
+  if (cmd === 'welcome.finish') return finishWelcome(a);
+  if (cmd === 'welcome.skip') { if (store.data.welcome === 'pending') { store.data.welcome = 'done'; store.save(); } return { ok: true }; }
+  if (cmd === 'preset.apply') return applyPreset(String(a.id || ''));
+  if (cmd === 'preset.remove') return removePreset();
+  if (cmd === 'presets') return presets.available();
   if (cmd === 'ext-find') return findExtensions();
   if (cmd === 'ext-add') return addExtension(a);
   if (cmd === 'ext-remove') return removeExtension(a.id);
@@ -2487,7 +3334,7 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   // A tab's view is built lazily, so a tab that has not been looked at yet has
   // none. Recording used to refuse with "Open a tab first" in that case, which
   // is both wrong and baffling. Build the view, then record it.
-  if (cmd === 'rec-start') { const t = byId(activeId); if (!t) return null; ensureView(t); if (!t.view) return null; recTabId = t.id; pushState(); return { title: t.title }; }
+  if (cmd === 'rec-start') { const t = byId(activeId); if (!t || isLocked(t.identity)) return null; ensureView(t); if (!t.view) return null; recTabId = t.id; pushState(); return { title: t.title }; }
   if (cmd === 'rec-cancel') { recTabId = null; pushState(); return true; }
   if (cmd === 'rec-save') {
     recTabId = null; pushState();
@@ -2501,7 +3348,7 @@ ipcMain.handle('ui:invoke', async (_e, cmd, a = {}) => {
   // work - it just could never say so.
   if (cmd === 'shield.status' || cmd === 'shield.refresh') return internal[cmd]({});
   return null;
-});
+}
 
 function reorder({ id, beforeId, group }) {
   const t = byId(id); if (!t) return;
@@ -2514,6 +3361,7 @@ function reorder({ id, beforeId, group }) {
       const prev = list[i - 1];
       t.order = prev ? (prev.order + b.order) / 2 : b.order - 1;
       if (b.pinned !== t.pinned) t.pinned = b.pinned;
+      if (t.pinned) { delete t.temp; delete t.tempAt; }
     }
   } else t.order = Date.now();
   pushState(); persist();
@@ -2534,8 +3382,8 @@ function reorder({ id, beforeId, group }) {
 // own — this is the only thing that moves one, and only you can start it.
 async function moveToFolder({ id, to, confirmed }) {
   const t = byId(id);
-  if (!t || !isFolder(to) || !isFolder(t.identity) || t.identity === to) return;
-  const from = IDENTITIES[t.identity].name; const into = IDENTITIES[to].name;
+  if (!t || !isFolder(to) || !isFolder(t.identity) || t.identity === to || isLocked(to) || isLocked(t.identity)) return;
+  const from = folderName(t.identity); const into = folderName(to);
   if (!confirmed) {
     const r = await dialog.showMessageBox(hostWindow(t), {
       type: 'question', buttons: [`Move to ${into}`, 'Cancel'], defaultId: 0, cancelId: 1,
@@ -2578,9 +3426,11 @@ function setSetting(key, value) {
   const s = settings();
   if (key.startsWith('obs.')) { s.obs[key.slice(4)] = key === 'obs.port' ? Number(value) || 4455 : value; }
   else if (key.startsWith('agentSites.')) { s.agentSites = { ...s.agentSites, [key.slice(11)]: !!value }; }
-  else if (key.startsWith('label.')) { s.identityLabels[key.slice(6)] = value; }
+  // label.<folder> is the Google address the folder holds; it lives on the folder now.
+  else if (key.startsWith('label.')) { const who = key.slice(6); if (isPerson(who)) setFolderEmail({ id: who, email: value }); else s.identityLabels[who] = value; }
   else if (key.startsWith('kit.')) { s.kits[key.slice(4)] = !!value; buildMenu(); if (key === 'kit.music' && !value) stripOpen = false; layout(); }
-  else if (key.startsWith('spaceLogin.')) { s.spaceLogins[key.slice(11)] = value; }
+  else if (key.startsWith('spaceLogin.')) { if (isPerson(value)) s.spaceLogins[key.slice(11)] = value; }
+  else if (key === 'sharedPairs') { s.sharedPairs = Array.isArray(value) ? value : []; wireSharing(); }
   // quick.<slot>.name / quick.<slot>.url - a number key he has re-pointed. The menu carries the
   // accelerators, so it has to be rebuilt or the key would still go to the old site.
   else if (key.startsWith('quick.')) {
@@ -2591,16 +3441,20 @@ function setSetting(key, value) {
     const [slot, field] = isFolder(parts[1]) ? [parts[2], parts[3]] : [parts[1], parts[2]];
     const list = quickKeysFor(who).map((q) => ({ ...q }));
     const i = Number(slot) - 1;
-    if (list[i] && (field === 'name' || field === 'url')) {
+    if (list[i] && (field === 'name' || field === 'url') && !isLocked(who)) {
       list[i][field] = String(value || '').trim();
       // An older flat list becomes a folder each, once, the first time one is edited.
       const was = s.quickKeys;
-      const box = Array.isArray(was) || !was ? Object.fromEntries(FOLDERS.map((f) => [f, quickKeysFor(f)])) : { ...was };
+      const box = Array.isArray(was) || !was ? Object.fromEntries(allFolders().map((f) => [f, quickKeysFor(f)])) : { ...was };
       box[who] = list;
       s.quickKeys = box;
       buildMenu();
     }
   }
+  else if (key === 'archiveDays') s.archiveDays = Math.max(0, Math.round(Number(value) || 0));
+  // 'quit' (never written to disk) or a number of hours. Saving at once means switching to
+  // "when Cue closes" takes the "Just for now" tabs out of cue.json there and then.
+  else if (key === 'tempClear') { s.tempClear = [1, 4, 12, 24].includes(Number(value)) ? Number(value) : 'quit'; if (store) persist(); }
   else if (key === 'muteSites') {
     s.muteSites = String(value || '').split(/[\n,]/).map((x) => x.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(Boolean);
   }
@@ -2616,6 +3470,7 @@ function setSetting(key, value) {
   // Settings has to move the page over there and then, like the ⌘\ key does.
   if (key === 'sideHidden') { setSideHidden(!!value); return; }
   if (key === 'showDownloads') layout();
+  if (key.startsWith('vanish') && vanish) vanish.applyPrefs();
   if (key === 'githubUser') loadRepos();
   store.save();
   if (key === 'originalSound') tabs.forEach((x) => x.view && x.view.webContents.send('cue:original-sound', value));
@@ -2648,15 +3503,17 @@ function countIn(t, title) {
 }
 
 // ---------------------------------------------------------------- one bar, Cmd+K
-function suggestions(q) {
+// Only the open folder's history, bookmarks and Boards - and nothing at all from a locked one.
+function suggestions(q, folder = openFolder()) {
   const ql = String(q || '').trim().toLowerCase();
-  if (!ql) return { history: [], bookmarks: [], boards: [], apps: [], repos: [] };
+  if (!ql || isLocked(folder)) return { history: [], bookmarks: [], boards: [], apps: [], repos: [] };
   const hit = (x) => `${x.name} ${x.what || ''}`.toLowerCase().includes(ql);
+  const mine = lib.in(folder);
   return {
-    history: lib.suggest(ql, 6),
-    bookmarks: lib.bookmarks(ql, 5),
-    boards: kit('designer') ? lib.searchBoards(ql) : [],
-    apps: NSM_APPS.filter(hit).slice(0, 5),
+    history: mine.suggest(ql, 6),
+    bookmarks: mine.bookmarks(ql, 5),
+    boards: kit('designer') ? mine.searchBoards(ql) : [],
+    apps: presets.apps().filter(hit).slice(0, 5),
     repos: repos.filter(hit).slice(0, 5),
   };
 }
@@ -2665,7 +3522,7 @@ function suggestions(q) {
 function warmUp(r) {
   const top = r.history[0] || r.bookmarks[0];
   if (!top || !/^https:/.test(top.url)) return;
-  try { sessionFor(byId(activeId)?.identity || 'personal').preconnect({ url: top.url, numSockets: 1 }); } catch {}
+  try { sessionFor(openFolder()).preconnect({ url: top.url, numSockets: 1 }); } catch {}
 }
 
 async function loadRepos() {
@@ -2694,7 +3551,7 @@ async function folderBytes(dir) {
   }
   return total;
 }
-const persistentLogins = () => Object.keys(IDENTITIES).filter((k) => k !== 'vanish');
+const persistentLogins = () => allFolders();
 async function cacheBytes(ses) { let n = 0; for (const d of CACHE_DIRS) n += await folderBytes(path.join(ses.storagePath, d)); return n; }
 async function dropCaches(ses) {
   await ses.clearCache().catch(() => {});
@@ -2730,19 +3587,6 @@ function newerVersion(a, b) {
   const [x, y] = [p(a), p(b)];
   for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
   return false;
-}
-// Only says a new version exists. Nothing installs by itself, least of all in the middle of a class.
-async function checkUpdate() {
-  if (process.env.CUE_TEST) return;
-  try {
-    const r = await net.fetch('https://api.github.com/repos/jasonzacmusic/cue/releases/latest', { headers: { accept: 'application/vnd.github+json' } });
-    if (!r.ok) return;
-    const v = String((await r.json()).tag_name || '').replace(/^v/, '');
-    if (!newerVersion(v, app.getVersion()) || store.data.updateTold === v) return;
-    store.data.updateTold = v;
-    addAlert({ source: 'Cue', title: `Cue ${v} is ready`, body: 'Open this to get the new version.', url: LABS_PAGE });
-    sendEvent('toast', `Cue ${v} is ready. See Bills & alerts.`);
-  } catch {}
 }
 
 // ---------------------------------------------------------------- peek
@@ -2789,7 +3633,8 @@ function toggleAI(which) {
   layout(); pushState();
 }
 function openAI(which, url) {
-  const id = isFolder(openFolder()) ? openFolder() : settings().defaultIdentity;
+  const id = openFolder();
+  if (isLocked(id)) throw new Error(`${folderName(id)} is locked. Type its passcode first.`);
   store.data.aiWhich = AI_HOME[which] ? which : aiWhich(); store.save();
   if (aiView && aiIdentity !== id) {
     const v = aiView; aiView = null;
@@ -2819,13 +3664,20 @@ async function askAboutPage(which) {
 }
 
 // ---------------------------------------------------------------- alerts and bills
+// An alert belongs to the folder it came from (a.folder) and is only shown there. One with no
+// folder - Cue's own "a new version is ready" - is everybody's.
 function addAlert(a) {
   store.data.alerts.unshift({ id: Date.now() + Math.random(), at: Date.now(), held: false, ...a });
   store.data.alerts.length = Math.min(store.data.alerts.length, 200);
   store.save(); pushState();
 }
-const alertCount = () => store.data.alerts.filter((a) => !a.seen).length + tabs.reduce((n, t) => n + (t.badge || 0), 0);
-const billCount = () => store.data.bills.filter((b) => ['due', 'failed'].includes(bills.status(b))).length;
+const alertsOf = (folder) => store.data.alerts.filter((a) => !a.folder || a.folder === folder);
+// Bills from before folders were kept for the whole browser; they are filed under Personal, as the
+// history is.
+const billFolder = (b) => b.folder || 'personal';
+const billsOf = (folder) => store.data.bills.filter((b) => billFolder(b) === folder);
+const alertCount = (folder = openFolder()) => alertsOf(folder).filter((a) => !a.seen).length + tabs.filter((t) => t.identity === folder).reduce((n, t) => n + (t.badge || 0), 0);
+const billCount = (folder = openFolder()) => billsOf(folder).filter((b) => ['due', 'failed'].includes(bills.status(b))).length;
 
 function checkBills() {
   store.data.bills.forEach((b) => bills.roll(b));
@@ -2836,7 +3688,7 @@ function checkBills() {
     if (b.warned === key) continue;
     b.warned = key;
     const d = b.renews ? bills.daysUntil(b.renews) : null;
-    addAlert({ source: b.name, title: st === 'failed' ? `${b.name}: card failed` : `${b.name}: due in ${d} day${d === 1 ? '' : 's'}`, body: b.amountINR ? `₹${b.amountINR.toLocaleString('en-IN')}` : '', url: b.url });
+    addAlert({ source: b.name, title: st === 'failed' ? `${b.name}: card failed` : `${b.name}: due in ${d} day${d === 1 ? '' : 's'}`, body: b.amountINR ? `₹${b.amountINR.toLocaleString('en-IN')}` : '', url: b.url, folder: billFolder(b) });
   }
   store.save(); pushState();
 }
@@ -2848,18 +3700,25 @@ function readBillPage(t) {
   // invoice, subscription or plan is read, in any folder but Vanish.
   if (!kit('business') || t.identity === 'vanish' || !/^https?:/.test(t.url || '') || !bills.BILLING_URL.test(t.url)) return;
   const url = t.url;
+  const folder = t.identity;
   setTimeout(async () => {
     if (!t.view || t.url !== url) return;
     try {
       const text = await t.view.webContents.executeJavaScript('document.body ? document.body.innerText.slice(0, 40000) : ""', true);
-      if (bills.fromPage(store.data.bills, url, text, store.data.usdToInr)) checkBills();
+      // Read against this folder's own bills, and a new one is filed in this folder.
+      const mine = billsOf(folder);
+      const b = bills.fromPage(mine, url, text, store.data.usdToInr);
+      if (b) {
+        if (!store.data.bills.includes(b)) { b.folder = folder; store.data.bills.push(b); }
+        checkBills();
+      }
     } catch {}
   }, 2500);
 }
 
 function bookmarkTab(t) {
   if (!t || t.identity === 'vanish' || !/^https?:/.test(t.url)) { sendEvent('toast', 'This page can\'t be bookmarked.'); return; }
-  lib.importBookmarks([{ url: t.url, title: t.title, folder: '' }]);
+  lib.in(t.identity).importBookmarks([{ url: t.url, title: t.title, folder: '' }]);
   sendEvent('toast', 'Bookmarked.');
 }
 
@@ -2894,7 +3753,8 @@ function archiveOldTabs() {
     const cutoff = Date.now() - days * 86400000;
     let went = 0;
     for (const t of [...tabs]) {
-      if (keepForever(t, inSplit) || isStart(t.url) || t.lastActive > cutoff) continue;
+      // "Just for now" tabs are never archived: they have their own clock (sweepTemp).
+      if (t.temp || keepForever(t, inSplit) || isStart(t.url) || t.lastActive > cutoff) continue;
       store.data.archived.unshift({ id: Date.now() + Math.random(), url: t.url, title: t.title, identity: t.identity, space: t.space, archivedAt: Date.now() });
       destroyView(t); tabs.splice(tabs.indexOf(t), 1); went++;
     }
@@ -2903,51 +3763,73 @@ function archiveOldTabs() {
     // went wrong unless you are told where everything went.
     if (went) sendEvent('toast', `${went} tab${went === 1 ? '' : 's'} you had not opened in ${days} day${days === 1 ? '' : 's'} went to Library \u2192 Archived.`);
   }
-  if (!tabs.some((t) => isFolder(t.identity))) openTab({});
+  if (!tabs.some((t) => isFolder(t.identity)) && !isLocked(openFolder())) openTab({});
   pushState(); persist();
 }
 
 // ---------------------------------------------------------------- Cue's own pages
-// One Library, one Boards, one Bills: go back to the page you already have open.
+// One Library, one Boards, one Bills per folder: go back to the page this folder already has open.
 function openCuePage(page, identity) {
-  const open = tabs.filter((x) => x.url.startsWith(`cue://${page}`));
+  const who = isFolder(identity) ? identity : openFolder();
+  const open = tabs.filter((x) => x.url.startsWith(`cue://${page}`) && x.identity === who);
   const have = open.find((x) => x.space === store.data.space) || open[0];
   if (have) { activate(have.id); return have; }
-  return openTab({ url: `cue://${page}`, identity: identity === 'vanish' ? undefined : identity });
+  return openTab({ url: `cue://${page}`, identity: who });
 }
 
+// The folder a cue:// page acts on: the folder of the tab it is in. A call with no page behind it
+// (the test rig, Settings) means the open folder. A page that is in none of Cue's tabs - a Vanish
+// window - has no folder, and reads and changes nothing.
+const pageFolder = (from, sender) => {
+  if (from) return isFolder(from.identity) && !isLocked(from.identity) ? from.identity : null;
+  if (sender) return null;
+  const f = openFolder();
+  return isLocked(f) ? null : f;
+};
+const inPage = (fn, empty) => (a = {}, from, sender) => {
+  const f = pageFolder(from, sender);
+  return f ? fn(a, f, from, sender) : empty;
+};
+
 const internal = {
-  open: ({ url }) => { if (/^https?:/.test(url)) openTab({ url }); },
-  'boards.list': () => lib.boardList(),
-  'boards.create': ({ name }) => lib.boardCreate(name),
-  'boards.rename': ({ id, name }) => lib.boardRename(id, name),
-  'boards.delete': ({ id }) => lib.boardDelete(id),
-  'boards.removeItem': ({ itemId }) => lib.boardRemoveItem(itemId),
-  'bills.list': () => { store.data.bills.forEach((b) => bills.roll(b)); return { bills: store.data.bills.map((b) => ({ ...b, status: bills.status(b) })), usdToInr: store.data.usdToInr }; },
-  'bills.save': ({ bill }) => {
+  open: inPage(({ url }, f) => { if (/^https?:/.test(url)) openTab({ url, identity: f }); }),
+  'boards.list': inPage((_a, f) => lib.in(f).boardList(), []),
+  'boards.create': inPage(({ name }, f) => lib.in(f).boardCreate(name), null),
+  'boards.rename': inPage(({ id, name }, f) => lib.in(f).boardRename(id, name)),
+  'boards.delete': inPage(({ id }, f) => lib.in(f).boardDelete(id)),
+  'boards.removeItem': inPage(({ itemId }, f) => lib.in(f).boardRemoveItem(itemId)),
+  'bills.list': inPage((_a, f) => {
+    const mine = billsOf(f);
+    mine.forEach((b) => bills.roll(b));
+    return { bills: mine.map((b) => ({ ...b, status: bills.status(b) })), usdToInr: store.data.usdToInr, currency: store.data.currency || 'USD' };
+  }, { bills: [], usdToInr: 1, currency: 'USD' }),
+  'bills.save': inPage(({ bill }, f) => {
     const cur = store.data.bills.find((b) => b.id === bill.id);
-    if (cur) Object.assign(cur, bill); else store.data.bills.push({ ...bill, id: bill.id || Date.now().toString(36) });
+    if (cur && billFolder(cur) !== f) return;
+    if (cur) Object.assign(cur, bill, { folder: f }); else store.data.bills.push({ ...bill, id: bill.id || Date.now().toString(36), folder: f });
     checkBills();
-  },
-  'bills.delete': ({ id }) => { store.data.bills = store.data.bills.filter((b) => b.id !== id); store.save(); pushState(); },
+  }),
+  'bills.delete': inPage(({ id }, f) => { store.data.bills = store.data.bills.filter((b) => !(b.id === id && billFolder(b) === f)); store.save(); pushState(); }),
   'bills.setRate': ({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); },
-  'alerts.list': () => {
-    store.data.alerts.forEach((a) => { a.seen = true; }); store.save(); pushState();
-    const counts = tabs.filter((t) => t.badge).map((t) => ({ id: `tab${t.id}`, source: hostName(t.url), title: `${t.badge} new`, body: t.title, at: Date.now(), url: t.url, held: false }));
-    return [...counts, ...store.data.alerts];
-  },
-  'alerts.clear': () => { store.data.alerts = []; store.save(); pushState(); },
-  'library.bookmarks': () => lib.bookmarks(''),
-  'library.history': ({ q }) => lib.history(q, 500),
-  'library.sites': ({ q }) => {
+  'alerts.list': inPage((_a, f) => {
+    const mine = alertsOf(f);
+    mine.forEach((a) => { a.seen = true; }); store.save(); pushState();
+    const counts = tabs.filter((t) => t.badge && t.identity === f).map((t) => ({ id: `tab${t.id}`, source: hostName(t.url), title: `${t.badge} new`, body: t.title, at: Date.now(), url: t.url, held: false }));
+    return [...counts, ...mine];
+  }, []),
+  'alerts.clear': inPage((_a, f) => { store.data.alerts = store.data.alerts.filter((a) => a.folder && a.folder !== f); store.save(); pushState(); }),
+  'library.bookmarks': inPage((_a, f) => lib.in(f).bookmarks(''), []),
+  'library.history': inPage(({ q }, f) => lib.in(f).history(q, 500), []),
+  'library.sites': inPage(({ q }, f) => {
     // Filed under the same headings the sidebar uses, so History reads the way
     // your tabs do: Nathaniel School, AI & Subscriptions, Google, Social, Code.
-    const name = (id) => (id === 'other' ? 'Everything else' : (GROUP_LIST.find((g) => g.id === id) || {}).name || 'Everything else');
-    const rank = (id) => (id === 'other' ? 99 : GROUP_LIST.findIndex((g) => g.id === id));
-    return lib.sites(q, 400).map((r) => { const id = groupFor(`https://${r.host}/`); return { ...r, title: siteLabel(r.host, r.title), group: name(id), rank: rank(id) }; });
-  },
-  'library.pages': ({ host }) => lib.pages(host, 500),
-  'library.forget': ({ host }) => { lib.forgetSite(host); return true; },
+    const groups = groupList();
+    const name = (id) => (id === 'other' ? 'Everything else' : (groups.find((g) => g.id === id) || {}).name || 'Everything else');
+    const rank = (id) => (id === 'other' ? 99 : groups.findIndex((g) => g.id === id));
+    return lib.in(f).sites(q, 400).map((r) => { const id = groupFor(`https://${r.host}/`); return { ...r, title: siteLabel(r.host, r.title), group: name(id), rank: rank(id) }; });
+  }, []),
+  'library.pages': inPage(({ host }, f) => lib.in(f).pages(host, 500), []),
+  'library.forget': inPage(({ host }, f) => { lib.in(f).forgetSite(host); return true; }, false),
   'shield.status': () => (shield ? { ...shield.status(), on: shield.status().on && settings().blockAds !== false } : { on: false, lists: 0, dangerous: 0, listsAt: 0, dangerAt: 0, allowed: [] }),
   'shield.refresh': async () => {
     if (!shield) return null;
@@ -2961,34 +3843,41 @@ const internal = {
     if (!shield || !/^https?:\/\//i.test(String(site || ''))) return false;
     const host = shield.hostOf(site);
     if (!host) return false;
+    // A Vanish tab has no entry in Cue's tab list, so it must never fall through to the active tab,
+    // and its "open it anyway" is forgotten with the Vanish window.
+    if (!from && sender && vanish && vanish.tabs.some((x) => x.view.webContents === sender)) { vanishDangerOk.add(host); sender.loadURL(site).catch(() => {}); return true; }
     dangerOk.add(host);
-    // A Vanish tab has no entry in Cue's tab list, so it must never fall through to the active tab.
-    if (!from && sender && vanish && vanish.tabs.some((x) => x.view.webContents === sender)) { sender.loadURL(site).catch(() => {}); return true; }
     const t = from || byId(activeId);
     if (t && t.view) t.view.webContents.loadURL(site).catch(() => {});
     return true;
   },
-  'library.archived': () => store.data.archived,
-  'library.restore': ({ id }) => {
-    const a = store.data.archived.find((x) => x.id === id); if (!a) return;
+  'library.archived': inPage((_a, f) => store.data.archived.filter((x) => x.identity === f), []),
+  'library.restore': inPage(({ id }, f) => {
+    const a = store.data.archived.find((x) => x.id === id && x.identity === f); if (!a) return;
     store.data.archived = store.data.archived.filter((x) => x !== a);
     openTab({ url: a.url, identity: a.identity });
+  }),
+  'library.history.clear': inPage((_a, f) => lib.in(f).clearHistory()),
+  // The two ways on from cue://signin-blocked. The name 'signin.from-chrome' is the old one and is
+  // kept for the page; nothing is carried from Chrome - it clears this folder's Google state and
+  // opens Google's own form again. In a pop-up it signs in again right there.
+  'signin.from-chrome': (a, t, sender) => signInAgain(t, sender, false),
+  'signin.other-account': (a, t, sender) => signInAgain(t, sender, true),
+  'signin.google': (a) => googleSignIn(isFolder(a.identity) ? a.identity : openFolder()).then(({ cleared }) => ({ signin: true, cleared })),
+  'signin.close': (_a, t, sender) => {
+    if (t) { closeTab(t.id); return; }
+    if (sender && popupIdentity.has(sender)) { const w = require('electron').BrowserWindow.fromWebContents(sender); if (w) w.close(); }
   },
-  'library.history.clear': () => lib.clearHistory(),
-  'signin.from-chrome': async (_a, t) => {
-    if (!t) return { error: 'This page is not in a tab.' };
-    const { cleared } = await googleSignIn(t.identity);
-    return { signin: true, cleared };
-  },
-  'signin.google': (a) => googleSignIn(isFolder(a.identity) ? a.identity : store.data.folder).then(({ cleared }) => ({ signin: true, cleared })),
-  'signin.close': (_a, t) => { if (t) closeTab(t.id); },
   // Meta's sign-ins, into one folder, from the folder's own row in Settings.
   // Instagram and Facebook accept a carried jar; Google does not - see
   // carryAllFromChrome for what copying Google's cookies actually did.
   'signin.carry-all': async (a) => {
-    const who = isFolder(a.identity) ? a.identity : store.data.folder;
-    const name = (IDENTITIES[who] || {}).name || who;
+    const who = isFolder(a.identity) ? a.identity : openFolder();
+    if (isLocked(who)) return [{ name: 'Instagram and Facebook', error: `${folderName(who)} is locked.` }];
+    const name = folderName(who);
+    if (!canCarryFromChrome()) { sendEvent('toast', 'There is no Chrome on this computer to bring a sign-in from.'); return []; }
     const done = await carryAllFromChrome(who);
+    if (done.length && done.every((d) => d.cancelled)) return done;
     const got = done.filter((d) => d.count);
     const stuck = done.find((d) => d.error);
     if (got.length) {
@@ -3008,18 +3897,24 @@ function findImports() {
     profiles: b.profiles.map((p) => ({ ...p, counts: importer.summarize(b, p), identity: guessIdentity(p) })),
   }));
 }
+// The folder whose Google address matches that browser profile's, or the one that is open.
 function guessIdentity(p) {
-  const labels = settings().identityLabels;
-  const hit = Object.keys(labels).find((k) => labels[k] && labels[k].toLowerCase() === String(p.email || '').toLowerCase());
-  return hit || 'personal';
+  const want = String(p.email || '').toLowerCase();
+  const hit = want && userFolders().find((f) => !isLocked(f.id) && emailOf(f.id).toLowerCase() === want);
+  return hit ? hit.id : openFolder();
 }
+// Everything moved in goes into the ONE folder picked for it: its bookmarks, history, tabs,
+// passwords and sign-ins, and nowhere else.
 async function runImport({ browser, profile, identity, what }) {
   const b = importer.findBrowsers().find((x) => x.id === browser);
   const p = b && b.profiles.find((x) => x.dir === profile);
   if (!b || !p) return { error: 'That browser was not found.' };
+  if (!isPerson(identity)) return { error: 'Pick the folder to move it into.' };
+  if (isLocked(identity)) return { error: `${folderName(identity)} is locked. Unlock it first.` };
   const done = {};
-  if (what.bookmarks) done.bookmarks = lib.importBookmarks(importer.readBookmarks(b, p));
-  if (what.history) done.history = lib.importHistory(importer.readHistory(b, p));
+  const mine = lib.in(identity);
+  if (what.bookmarks) done.bookmarks = mine.importBookmarks(importer.readBookmarks(b, p));
+  if (what.history) done.history = mine.importHistory(importer.readHistory(b, p));
   if (what.tabs) { const list = importer.readOpenTabs(b, p); list.forEach((x) => { const t = makeTab({ url: x.url, title: x.title, identity }); tabs.push(t); }); done.tabs = list.length; pushState(); persist(); }
   if (what.passwords || what.cookies) {
     const key = await importer.getKey(b);
@@ -3030,9 +3925,9 @@ async function runImport({ browser, profile, identity, what }) {
         const ses = sessionFor(identity); let n = 0;
         for (const c of importer.readCookies(b, p, key)) { try { await ses.cookies.set(c); n++; } catch {} }
         await ses.cookies.flushStore(); done.cookies = n;
-        await sharedLogins.syncNow();
-        if (await teamImportOffered()) { // only ever true for Nathaniel School staff
-          const team = await loadTeamVault(TEAM_SITE, { quiet: true });
+        await syncShared(identity);
+        if (await teamImportOffered(identity)) { // only ever true with a starting setup that has a team site
+          const team = await loadTeamVault(teamSite(), { quiet: true, into: [identity] });
           if (team.count) done.passwords = (done.passwords || 0) + team.count;
         }
       }
@@ -3061,23 +3956,26 @@ const READ_TEAM_VAULT = `(async () => {
 })()`;
 // A one-time import for the school's own staff. Everyone else moves in from Chrome or Safari,
 // so nothing about it shows unless this computer is signed in to the team site.
-async function teamImportOffered() {
-  if (settings().teamLoaded) return false;
-  for (const who of persistentLogins()) {
-    if ((await sessionFor(who).cookies.get({ domain: new URL(TEAM_SITE).hostname })).length) return true;
-  }
-  return false;
+// Asked of one folder: the one that is open, or the one being moved into.
+async function teamImportOffered(folder = openFolder()) {
+  if (!teamSite() || settings().teamLoaded || !isPerson(folder) || isLocked(folder)) return false;
+  return (await sessionFor(folder).cookies.get({ domain: new URL(teamSite()).hostname })).length > 0;
 }
 let teamLoading = false;
 async function teamSignedIn(t) { // runs itself the first time staff sign in to the team site
-  if (teamLoading || settings().teamLoaded || !t.url.startsWith(TEAM_SITE) || t.identity === 'vanish' || t.agent) return;
+  if (teamLoading || !teamSite() || settings().teamLoaded || !t.url.startsWith(teamSite()) || !isPerson(t.identity) || t.agent) return;
   teamLoading = true;
-  try { await loadTeamVault(TEAM_SITE, { quiet: true }); } catch {}
+  try { await loadTeamVault(teamSite(), { quiet: true, into: [t.identity] }); } catch {}
   teamLoading = false;
 }
-async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
-  const open = tabs.find((t) => t.url.startsWith(site) && t.identity !== 'vanish');
-  const t = open || openTab({ url: `${site}/vault`, identity: 'school', background: true });
+// `into`: the folders the logins go into - only the ones the person picked (the folder they are
+// in when they press Load, or the folder they signed in to the team site in). Never every folder.
+async function loadTeamVault(site = teamSite(), { quiet = false, into } = {}) {
+  if (!site) return { signedIn: false };
+  const targets = (Array.isArray(into) && into.length ? into : [openFolder()]).filter((f) => isPerson(f) && !isLocked(f));
+  if (!targets.length) return { signedIn: false, error: 'Pick a folder that is not locked.' };
+  const open = tabs.find((t) => t.url.startsWith(site) && t.identity === targets[0]);
+  const t = open || openTab({ url: `${site}/vault`, identity: targets[0], background: true });
   ensureView(t);
   const wc = t.view.webContents;
   for (let i = 0; i < 100 && wc.isLoading(); i++) await wait(100);
@@ -3088,7 +3986,7 @@ async function loadTeamVault(site = TEAM_SITE, { quiet = false } = {}) {
     activate(t.id); sendEvent('toast', 'Sign in to the team site here, then press Load again.'); return { signedIn: false };
   }
   let n = 0;
-  for (const who of ['school', 'personal']) n = vault.importMany(who, got.rows);
+  for (const who of targets) n = vault.importMany(who, got.rows);
   vault.autoForOwnSites();
   if (n) { settings().teamLoaded = true; store.save(); }
   if (!open) closeTab(t.id);
@@ -3112,7 +4010,7 @@ function findExtensions() {
 }
 async function addExtension({ id, dir, name }) {
   const to = extensions.adopt(extDir, { id, dir });
-  for (const k of ['personal', 'school', 'agent']) {
+  for (const k of allFolders()) { // every folder, as sessionFor loads them at start
     try { await sessionFor(k).extensions.loadExtension(to); } catch (e) { return { ok: false, error: e.message, name }; }
   }
   return { ok: true, name };
@@ -3121,7 +4019,7 @@ async function addExtension({ id, dir, name }) {
 // an extension removed by mistake can be put back.
 function removeExtension(id) {
   if (!/^[a-p]{32}$/.test(String(id || ''))) return false;
-  for (const k of ['personal', 'school', 'agent']) {
+  for (const k of allFolders()) {
     const ses = sessionFor(k); const ext = ses.extensions.getAllExtensions().find((e) => path.basename(e.path) === id);
     if (ext) ses.extensions.removeExtension(ext.id);
   }
@@ -3153,7 +4051,7 @@ async function addToBoard(t, p, boardId) {
     const img = await wc.capturePage(r);
     if (!img.isEmpty()) thumb = `data:image/jpeg;base64,${img.resize({ width: 360 }).toJPEG(82).toString('base64')}`;
   } catch {}
-  lib.boardAdd(boardId, { img: p.srcURL, source: wc.getURL(), title: p.titleText || p.altText || wc.getTitle(), thumb });
+  lib.in(t.identity).boardAdd(boardId, { img: p.srcURL, source: wc.getURL(), title: p.titleText || p.altText || wc.getTitle(), thumb });
   sendEvent('toast', 'Added to board.');
 }
 
@@ -3301,8 +4199,80 @@ function sleepAgain(t) {
   layout();
 }
 
-const whatsapp = makeWhatsApp({ tabs, openTab, ensureView, hostOf, activate, programId: () => programId, frontId: () => activeId, wake });
-// The agent's own Gmail tab in a folder: never his inbox (see `own` in openTab).
+// Which folder an agent means, from what it said: a folder's name or id, any case. It is refused
+// - in words that say why - when the folder is locked or the person has not opened it to AI
+// agents. "agent" is the agents' own lane, always theirs.
+function agentFolder(said, what = 'that') {
+  const key = String(said || '').trim().toLowerCase();
+  if (key === 'agent' || key === 'ai agent') return 'agent';
+  const id = resolveWho(said, userFolders().map((f) => ({ id: f.id, name: f.name })), what);
+  const name = folderName(id);
+  if (isLocked(id)) throw new Error(`${possessive(name)} folder is locked. Nothing in it can be used until the person unlocks it. Nothing was done.`);
+  if (!agentsMay(id)) throw new Error(`${possessive(name)} folder is not open to AI agents. The person can allow it in Cue Settings, under Folders and accounts. Nothing was done.`);
+  return id;
+}
+
+// ---- files, for agents: cue_attach puts files from this computer onto a page (src/main/attach.js),
+// cue_download saves one into Downloads/Cue Agents. Neither shows a dialog or brings anything forward.
+const attacher = attachKit.makeAttach();
+// Cue's own data folder is never handed to a page, wherever it lives (CUE_USER_DATA in tests).
+const agentFiles = (list) => attachKit.vetFiles(list, { protectedDirs: [app.getPath('userData'), path.join(app.getPath('appData'), 'Cue')], exempt: [path.join(app.getPath('downloads'), 'Cue Agents')] });
+function agentDownloadDir() { const d = path.join(app.getPath('downloads'), 'Cue Agents'); fs.mkdirSync(d, { recursive: true }); return d; }
+const agentDownloads = [];
+// Called by will-download: is this the download an agent is waiting for in that tab?
+function takeAgentDownload(item, fromWc) {
+  const now = Date.now();
+  for (let i = agentDownloads.length - 1; i >= 0; i--) if (agentDownloads[i].until < now) agentDownloads.splice(i, 1);
+  let chain = []; try { chain = item.getURLChain(); } catch {}
+  const k = agentDownloads.findIndex((w) => fromWc && w.wcId === fromWc.id && (!w.url || w.url === item.getURL() || chain.includes(w.url)));
+  return k < 0 ? null : agentDownloads.splice(k, 1)[0];
+}
+async function agentDownload(t, a = {}) {
+  const wc = t.view.webContents;
+  let url = a.url ? agentApi.safeUrl(a.url) : '';
+  let click = false;
+  if (!url && !a.selector) throw new Error('Say what to download: url (the file\'s address) or selector (the link or button on the page). Nothing was downloaded.');
+  if (!url) {
+    const hit = await wc.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(String(a.selector))}); if (!el) return null;
+      const link = el.closest('a[href]'); const href = link ? link.href : (el.src || ''); return { href: /^https?:/.test(href) ? href : '' }; })()`, true).catch(() => null);
+    if (!hit) throw new Error(`Nothing on the page matches “${a.selector}”. Nothing was downloaded.`);
+    if (hit.href) url = hit.href; else click = true;
+  }
+  if (url && shield && shield.verdict(url)) throw new Error(`Cue will not download from ${shield.hostOf(url)}: that site is reported for ${shield.verdict(url)}. Nothing was downloaded.`);
+  let wait;
+  const done = new Promise((ok, no) => {
+    const w = {
+      wcId: wc.id, url: click ? '' : url, until: Date.now() + 20000,
+      fail: (m) => { clearTimeout(wait); no(new Error(m)); },
+      started: (item, file) => {
+        clearTimeout(wait);
+        wait = setTimeout(() => { try { item.cancel(); } catch {} no(new Error(`The download of ${path.basename(file)} took longer than ten minutes, so Cue stopped it. Nothing was saved.`)); }, 10 * 60000);
+        item.once('done', (_e, state) => {
+          clearTimeout(wait);
+          const saved = item.getSavePath() || file;
+          if (state === 'completed') ok({ file: saved, size: item.getReceivedBytes() });
+          else no(new Error(`The download of ${path.basename(saved)} ${state === 'cancelled' ? 'was cancelled' : 'stopped'}. Nothing was saved.`));
+        });
+      },
+    };
+    agentDownloads.push(w);
+    wait = setTimeout(() => {
+      const i = agentDownloads.indexOf(w); if (i >= 0) agentDownloads.splice(i, 1);
+      no(new Error(click ? `Clicking “${a.selector}” did not start a download within 20 seconds. Nothing was saved.` : `${url} did not start downloading within 20 seconds. Nothing was saved.`));
+    }, 20000);
+  });
+  if (click) await wc.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(String(a.selector))}); el.click(); return true; })()`, true);
+  else wc.downloadURL(url);
+  const got = await done;
+  return { text: `Saved ${path.basename(got.file)} (${attachKit.human(got.size)}) to ${got.file}\nAttach it anywhere with cue_attach and files:[${JSON.stringify(got.file)}].`, path: got.file, size: got.size };
+}
+
+const whatsapp = makeWhatsApp({
+  tabs, openTab, ensureView, hostOf, activate, programId: () => programId, frontId: () => activeId, wake,
+  who: (said) => agentFolder(said, 'WhatsApp'), nameOf: folderName,
+  vetFiles: (list) => agentFiles(list), attachFiles: (wc, files, opts) => attacher.attach(wc, files, opts),
+});
+// The agent's own Gmail tab in a folder: never the person's inbox (see `own` in openTab).
 function agentGmailTab(identity, url) {
   const host = hostOf(url);
   const home = url.split('#')[0].split('?')[0];
@@ -3312,7 +4282,8 @@ function agentGmailTab(identity, url) {
   t.aiBusy = Date.now(); clearTimeout(t.aiTimer); t.aiTimer = setTimeout(() => { t.aiBusy = 0; pushState(); }, 60000); pushState();
   return t;
 }
-const gmail = makeGmail({ agentTab: agentGmailTab, wake, label: (id) => (id === 'personal' ? 'Personal' : 'School') });
+const gmail = makeGmail({ agentTab: agentGmailTab, wake, label: folderName, who: (said) => agentFolder(said, 'Gmail'),
+  vetFiles: (list) => agentFiles(list), attachFiles: (wc, files, opts) => attacher.attach(wc, files, opts) });
 
 const agentApi = {
   doorOpen: () => doorOpen,
@@ -3323,29 +4294,36 @@ const agentApi = {
     lastKnock = now;
     sendEvent('toast', `${who} asked to use Cue. The AI door is closed - open it in Settings.`);
   },
-  identities: () => Object.entries(IDENTITIES).filter(([k]) => k !== 'vanish').map(([k, v]) => ({ id: k, name: v.name, account: settings().identityLabels[k] || '' })),
-  list: () => sidebarOrder().filter((t) => t.identity !== 'vanish').map((t) => ({
-    id: t.id, title: hiddenFromAI(t) ? 'Private' : t.title, url: isStart(t.url) || hiddenFromAI(t) ? '' : t.url, identity: t.identity, group: groupOf(t),
+  // Only the folders an agent may use: unlocked, and opened to agents by the person. A locked
+  // folder, or one kept private from agents, is not even named.
+  identities: () => [...userFolders().filter((f) => agentsMay(f.id)).map((f) => ({ id: f.id, name: f.name, account: emailOf(f.id) })),
+    { id: 'agent', name: BUILTIN.agent.name, account: emailOf('agent') }],
+  list: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && agentsMay(t.identity)).map((t) => ({
+    id: t.id, title: hiddenFromAI(t) ? 'Private' : t.title, url: isStart(t.url) || hiddenFromAI(t) ? '' : t.url, identity: t.identity, folder: folderName(t.identity), group: groupOf(t),
     onAir: t.id === programId, private: t.private, agentTab: t.agent, aiCanAct: agentCanAct(t), audible: t.audible, muted: t.muted, volume: t.volume,
   })),
   get: (id) => byId(Number(id)),
-  canRead: (t) => !!t && t.identity !== 'vanish' && !hiddenFromAI(t) && !/^(cue|file):/.test(t.url), // your Library, Bills and own files stay yours
+  canRead: (t) => !!t && t.identity !== 'vanish' && agentsMay(t.identity) && !hiddenFromAI(t) && !/^(cue|file):/.test(t.url), // your Library, Bills and own files stay yours
   canAct: (t) => agentCanAct(t),
   paused: () => aiPaused(),
   open: ({ url, identity, background = true, newTab = false }) => {
     const target = agentApi.safeUrl(url);
-    // An agent works in HIS accounts, in the folder he has open, not in a
-    // separate browser of its own. That is what stops a second WhatsApp and a
-    // second inbox appearing beside the ones he uses. The old AI agent folder
-    // is still there for anything already filed in it, but nothing new goes
-    // there unless an agent names it.
-    const who = IDENTITIES[identity] && identity !== 'vanish' ? identity : openFolder();
+    // An agent works in the person's accounts, in the folder they have open (or the one it
+    // names), not in a separate browser of its own. That is what stops a second WhatsApp and a
+    // second inbox appearing beside the ones they use. A folder that is locked or not opened to
+    // agents is refused, named or not.
+    let who;
+    if (identity !== undefined && identity !== null && identity !== '' && identity !== 'vanish') who = agentFolder(identity);
+    else {
+      who = openFolder();
+      if (!agentsMay(who)) throw new Error(`The folder that is open (${folderName(who)}) is not open to AI agents${isLocked(who) ? ', and it is locked' : ''}. Name a folder from cue_identities with identity, or "agent" for your own lane. Nothing was opened.`);
+    }
     // One tab per site, not one per instruction. An agent sent to WhatsApp six
     // times used to leave six WhatsApp tabs behind; now it goes back to the one
-    // it already has open for that site and navigates it. A tab Jason has handed
+    // it already has open for that site and navigates it. A tab the person has handed
     // over counts as that one tab: opening WhatsApp used to build a twin beside
-    // his own linked tab, which left two of everything in the sidebar.
-    // His own handed-over tab is never navigated away from the page he left it
+    // their own linked tab, which left two of everything in the sidebar.
+    // Their own handed-over tab is never navigated away from the page they left it
     // on: it is reused only when it already sits on the address asked for.
     // Anything that needs a different page goes to the agent's own tab.
     if (!newTab) {
@@ -3377,29 +4355,41 @@ const agentApi = {
   close: (t) => closeTab(t.id),
   fullPage: (t) => capture.fullPage(t.view.webContents, t.title),
   problems: (t) => t.log,
-  alert: (a) => addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '' }),
-  bills: () => store.data.bills.map((b) => ({ ...b, status: bills.status(b) })),
-  // WhatsApp is its own narrow door. A general agent may not click or type in Jason's own
-  // tabs, and that stays true; this tool can work in the pinned WhatsApp tabs because it can
-  // do nothing else there — list chats, read one, send a message he asked for, and say whether
-  // the account is linked. Private tabs, Vanish tabs and the tab on air are still off limits.
+  // Everyone's tray unless the agent names the folder it is about.
+  alert: (a) => {
+    let folder;
+    if (a.identity || a.folder) folder = agentFolder(a.identity || a.folder);
+    return addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '', ...(folder && folder !== 'agent' ? { folder } : {}) });
+  },
+  bills: () => store.data.bills.filter((b) => agentsMay(billFolder(b))).map((b) => ({ ...b, status: bills.status(b) })),
+  // WhatsApp is its own narrow door. A general agent may not click or type in the person's own
+  // tabs, and that stays true; this tool can work in a folder's WhatsApp tab because it can
+  // do nothing else there — list chats, read one, send a message they asked for, and say whether
+  // the account is linked. Private tabs, Vanish tabs, the tab on air, locked folders and folders
+  // not opened to agents are still off limits.
   whatsapp: (a) => {
-    if (aiPaused()) throw new Error('Jason has paused AI agents in Cue, WhatsApp included. Stop here and tell him — do not open WhatsApp another way.');
+    if (aiPaused()) throw new Error('AI agents are paused in Cue, WhatsApp included. Stop here and say so — do not open WhatsApp another way.');
     return whatsapp(a);
   },
   // Gmail, the same narrow way: search and read, in the agent's own Gmail tab of that folder.
   gmail: (a) => {
-    if (aiPaused()) throw new Error('Jason has paused AI agents in Cue, Gmail included. Stop here and tell him.');
-    if ((settings().agentSites || {}).gmail === false) throw new Error('Jason has switched Gmail off for agents in Cue Settings.');
+    if (aiPaused()) throw new Error('AI agents are paused in Cue, Gmail included. Stop here and say so.');
+    if ((settings().agentSites || {}).gmail === false) throw new Error('Gmail is switched off for agents in Cue Settings.');
     return gmail(a);
   },
   wake: (t) => wake(t),
+  // Files (cue_attach, cue_download). The door checks the tab first; these do the work.
+  vetFiles: (list) => agentFiles(list),
+  attachFiles: (t, files, opts) => attacher.attach(t.view.webContents, files, opts),
+  sayAttached: attachKit.sayAttached,
+  fileTargets: (t) => attacher.targets(t.view.webContents),
+  download: (t, a) => agentDownload(t, a),
   setMuted, setVolume,
   // ---- the teaching rig's door (Stream Deck pedal + OBS), not an AI agent's.
   // OBS captures Cue as an application, so the class sees whatever tab is
   // showing in Cue's window. A pedal press is therefore just "show slot N".
   // Jason's own tabs are the slots: a background tab an agent opened must
-  // never become what a class is looking at.
+  // never become what a class is looking at. A locked folder has no slots.
   slots: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent)
     .map((t) => ({ id: t.id, title: t.private ? 'Private' : t.title, url: isStart(t.url) || t.private ? '' : t.url, showing: t.id === activeId })),
   show: (id) => activate(Number(id)),
@@ -3424,24 +4414,34 @@ const agentApi = {
   log: logAgent,
 };
 
+// The AI port, opened once per launch at most.
+let portUp = false;
+function openAgentPort() {
+  if (portUp) return;
+  portUp = true;
+  startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
+    .catch((e) => { portUp = false; logAgent({ tool: 'port', error: e.message }); });
+}
+
 function hiddenFromAI(t) { return t.private || t.id === programId; }
-// WhatsApp is the one site Jason handed over on purpose: the agents answer for him there, in
-// the tab his phone is linked to, because a second linked browser is not a thing WhatsApp
-// allows. Everything else still has to be a tab an agent opened, or one he ticked himself.
+// WhatsApp is the one site handed over on purpose: the agents answer for the person there, in
+// the tab their phone is linked to, because a second linked browser is not a thing WhatsApp
+// allows. Everything else still has to be a tab an agent opened, or one the person ticked.
 // The host comes from whatsapp.js so there is one answer to "is this WhatsApp", not two
 // that drift apart the day either side changes.
 // Two sites are handed over by the setting rather than tab by tab, because handing them over one
 // tab at a time is the thing nobody keeps up with. WhatsApp has to work this way - a second linked
-// browser is not a thing WhatsApp allows, so the agents answer in the tab his phone is linked to.
-// Gmail is here because he asked for it: the agents read and draft in the same inbox he has open,
+// browser is not a thing WhatsApp allows, so the agents answer in the tab the phone is linked to.
+// Gmail is here because he asked for it: the agents read and draft in the same inbox that is open,
 // in whichever folder it belongs to, instead of a second copy. Either can be switched off in
-// Settings, and neither reaches a private tab, a Vanish tab or the tab on air.
+// Settings, and neither reaches a private tab, a Vanish tab, the tab on air, or a folder that is
+// locked or not opened to agents.
 const AGENT_SITES = {
   whatsapp: { name: 'WhatsApp', what: 'Read and reply in the tab your phone is linked to', is: (h) => h === WA_HOST() },
   gmail: { name: 'Gmail', what: 'Read and draft in the inbox you already have open', is: (h) => h === 'mail.google.com' },
 };
 const handedOverSite = (t) => {
-  if (t.identity !== 'personal' && t.identity !== 'school') return null;
+  if (!isPerson(t.identity) || !agentsMay(t.identity)) return null;
   const h = hostOf(t.url); const on = settings().agentSites || {};
   const hit = Object.entries(AGENT_SITES).find(([k, v]) => on[k] !== false && v.is(h));
   return hit ? hit[1].name : null;
@@ -3451,11 +4451,11 @@ const HANDED_OVER = (t) => !!handedOverSite(t);
 // tabs stay handed over, so resuming is one click and nothing has to be set up
 // again.
 const aiPaused = () => !!settings().aiPaused;
-function agentCanAct(t) { return !aiPaused() && !!t && t.identity !== 'vanish' && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
+function agentCanAct(t) { return !aiPaused() && !!t && t.identity !== 'vanish' && agentsMay(t.identity) && !t.private && t.id !== programId && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t)); }
 // What the AI row in the sidebar counts: every tab an agent may work in, plus
 // any tab still sitting in the old AI agent folder. Paused or not — he needs to
 // see what is handed over even while it is on hold.
-const aiTabs = () => tabs.filter((t) => t.identity !== 'vanish' && !t.private && t.id !== programId
+const aiTabs = () => tabs.filter((t) => t.identity !== 'vanish' && agentsMay(t.identity) && !t.private && t.id !== programId
   && !t.url.startsWith('cue://') && (t.agent || t.aiAllowed || HANDED_OVER(t) || t.identity === 'agent'));
 
 // ---------------------------------------------------------------- menus
@@ -3467,7 +4467,9 @@ async function checkForUpdates() {
   const u = await updater.check({ quiet: false });
   if (u.state === 'available') return; // "Update Cue by itself" is off: the bar is asking already
   const waiting = u.state === 'ready' || u.state === 'downloading';
-  const said = u.state === 'error'
+  const said = u.blocked === 'readonly'
+    ? { message: 'Cue cannot update itself here.', detail: UPDATE_SAY.readonly }
+    : u.state === 'error'
     ? { message: 'Cue could not check for updates.', detail: u.error }
     : waiting
       ? { message: `Cue ${u.latest} is on its way.`, detail: 'It goes in the next time you close Cue.' }
@@ -3483,7 +4485,7 @@ function buildMenu() {
   const inVanish = () => { try { return vanish.focused(); } catch { return false; } };
   const mainOnly = (fn) => () => { if (inVanish()) return; fn(); };
   const cmd = (c, a) => mainOnly(raw(c, a));
-  const ids = Object.keys(IDENTITIES);
+  const ids = openableIds();
   const tpl = [
     ...(process.platform === 'darwin' ? [{
       label: app.name, submenu: [
@@ -3505,12 +4507,13 @@ function buildMenu() {
     {
       label: 'File', submenu: [
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: cmd('new-tab') },
+        { label: 'New Tab Just for Now', accelerator: 'CmdOrCtrl+Alt+T', click: cmd('new-tab', { temp: true }) },
         { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Shift+N', click: raw('new-tab', { identity: 'vanish' }) },
         { label: 'New Vanish Tab', accelerator: 'CmdOrCtrl+Alt+N', visible: false, acceleratorWorksWhenHidden: true, click: raw('new-tab', { identity: 'vanish' }) }, // for Macs where another app owns Cmd+Shift+N
-        { label: 'New Tab As', submenu: ids.map((i) => ({ label: IDENTITIES[i].name, click: cmd('new-tab', { identity: i }) })) },
+        { label: 'New Tab As', submenu: ids.map((i) => ({ label: folderName(i), click: cmd('new-tab', { identity: i }) })) },
         { label: 'Move In From Another Browser…', click: () => sendEvent('import') },
-        { label: 'Bring This Site\u2019s Sign-in Over From Chrome…', click: () => carrySignIn(byId(activeId)) },
-        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: mainOnly(() => { const s = closedStack.pop(); if (s) { const t = makeTab(s); tabs.push(t); activate(t.id); } }) },
+        { label: 'Bring This Site\u2019s Sign-in Over From Chrome…', visible: canCarryFromChrome(), click: () => carrySignIn(byId(activeId)) },
+        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: mainOnly(() => reopenClosed()) },
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('focus-omnibox'); }) },
         { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('palette-open'); }) },
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
@@ -3519,8 +4522,8 @@ function buildMenu() {
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => { if (vanish.focused()) vanish.closeTab(vanish.activeId()); else closeTab(activeId); } },
         { type: 'separator' },
         // His own nine. The label says where each key goes, so the menu is also the reminder.
-        ...quickKeys().map((q) => ({
-          label: q.url ? `Go to ${q.name}` : q.name,
+        ...quickKeys().filter((q) => !quickEmpty(q)).map((q) => ({
+          label: q.url ? `Go to ${q.name || hostOf(q.url) || q.url}` : q.name,
           accelerator: `CmdOrCtrl+${q.key}`,
           click: mainOnly(() => jumpTo(q.url)),
         })),
@@ -3545,53 +4548,78 @@ function buildMenu() {
         { label: 'Three Columns', accelerator: 'CmdOrCtrl+Alt+4', click: cmd('split', { mode: 'cols3' }) },
         { label: 'Grid of Four', accelerator: 'CmdOrCtrl+Alt+5', click: cmd('split', { mode: 'grid4' }) },
         { type: 'separator' },
-        { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: () => { const t = byId(activeId); if (t && t.view) t.view.webContents.toggleDevTools(); } },
+        { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: mainOnly(() => { const t = byId(activeId); if (t && t.view) t.view.webContents.toggleDevTools(); }) },
       ],
     },
     {
       label: 'History', submenu: [
         { label: 'Back', accelerator: 'CmdOrCtrl+[', click: cmd('back') },
         { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: cmd('forward') },
-        { label: 'Bookmark This Page', accelerator: 'CmdOrCtrl+D', click: () => bookmarkTab(byId(activeId)) },
+        { label: 'Bookmark This Page', accelerator: 'CmdOrCtrl+D', click: mainOnly(() => bookmarkTab(byId(activeId))) },
         { label: 'Bookmarks, History and Archived Tabs', accelerator: 'CmdOrCtrl+Y', click: cmd('open-page', { page: 'library' }) },
       ],
     },
     ...(kit('teacher') ? [{
       label: 'Live', submenu: [
-        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: () => setLive(!live) },
-        { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: () => take() },
+        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: mainOnly(() => setLive(!live)) },
+        { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: mainOnly(() => take()) },
         { type: 'separator' },
-        { label: 'Cue This Tab', accelerator: 'CmdOrCtrl+Shift+C', click: () => cueAdd(activeId) },
+        { label: 'Cue This Tab', accelerator: 'CmdOrCtrl+Shift+C', click: mainOnly(() => cueAdd(activeId)) },
         { label: 'Stage: One Tab', click: () => stageSplit(1) },
         { label: 'Stage: Two Side by Side', click: () => stageSplit(2) },
         { label: 'Stage: Three Side by Side', click: () => stageSplit(3) },
-        { label: 'Next Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Right', click: () => cueStep(1) },
-        { label: 'Previous Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Left', click: () => cueStep(-1) },
+        { label: 'Next Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Right', click: mainOnly(() => cueStep(1)) },
+        { label: 'Previous Cued Tab On Air', accelerator: 'CmdOrCtrl+Shift+Left', click: mainOnly(() => cueStep(-1)) },
         { type: 'separator' },
         // One key per slot, so a class is numbers, not hunting for a tab.
         ...[1, 2, 3, 4, 5, 6].map((n) => ({
           label: `On Air: Cue ${n}`, accelerator: `CmdOrCtrl+Shift+${n}`,
-          click: () => { const x = cueTabs()[n - 1]; if (x) take(x.id); else sendEvent('toast', `Nothing is cued at ${n} yet. Drag a tab onto the On-air box.`); },
+          click: mainOnly(() => { const x = cueTabs()[n - 1]; if (x) take(x.id); else sendEvent('toast', `Nothing is cued at ${n} yet. Drag a tab onto the On-air box.`); }),
         })),
       ],
     }] : []),
     { label: 'Tools', submenu: toolMenu(cmd) },
     {
       label: 'Tab', submenu: [
-        ...spaces().map((n, i) => ({ label: `Space: ${n}`, accelerator: `${MAC ? 'Ctrl' : 'Alt'}+${i + 1}`, click: () => switchSpace(n) })),
+        ...spaces().map((n, i) => ({ label: `Space: ${n}`, accelerator: `${MAC ? 'Ctrl' : 'Alt'}+${i + 1}`, click: mainOnly(() => switchSpace(n)) })),
         { type: 'separator' },
-        { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: () => cycle(1) },
-        { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => cycle(-1) },
+        { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: mainOnly(() => cycle(1)) },
+        { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: mainOnly(() => cycle(-1)) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
         { label: 'Mini Player (keeps playing while you work)', accelerator: 'Control+Cmd+M', click: cmd('mini') },
         { label: 'Picture in Picture', accelerator: 'CmdOrCtrl+Alt+P', click: () => { if (vanish.focused()) { vanish.pictureInPicture(); return; } const t = byId(activeId); if (t && t.view) t.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}); } },
-        ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: () => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); } })),
+        ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: mainOnly(() => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); }) })),
       ],
     },
-    { role: 'windowMenu' },
+    {
+      // 'window' (not 'windowMenu') so the Mac still lists open windows here and our items stay.
+      label: 'Window', role: 'window', submenu: [
+        { role: 'minimize' },
+        ...(MAC ? [{ role: 'zoom' }] : [{ role: 'close' }]),
+        { type: 'separator' },
+        { label: 'Vanish', id: 'vanish-menu', submenu: vanishMenu() },
+        ...(MAC ? [{ type: 'separator' }, { role: 'front' }] : []),
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
+}
+
+// Window > Vanish lists every Vanish shortcut from the same table the Vanish window's key handler
+// uses (vanish-keys.js), so the menu is also the reminder. The keys are written into the label
+// rather than registered: the Vanish window answers them itself, and registering them here as
+// well would put a second Cmd+T and Cmd+W into the menu and let them act from the main window.
+function vanishMenu() {
+  return vanishKeys.shown().filter((k) => k.id !== 'leave').map((k) => ({
+    label: `${k.label}   ${k.keys}`, id: `vanish-${k.id}`,
+    click: () => {
+      if (k.id === 'open') { vanish.add(); return; }
+      if (!vanish.window()) return;
+      if (k.id === 'goto') return; // a number, typed in the window
+      vanish.run(k.id);
+    },
+  }));
 }
 
 function toolMenu(cmd) {
@@ -3640,10 +4668,13 @@ setInterval(() => {
     if (t.videoAt > Date.now() - KEEP_PAUSED) continue; // waking a tab starts its video again from the top
     destroyView(t);
   }
+  if (store) { try { sweepTemp(); } catch (e) { logProblem('temp', e); } }
   pushState();
 }, 60000);
 
-setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(); loadRepos(); checkUpdate(); trimCaches(); } }, 3600000);
+setInterval(() => { if (store) { archiveOldTabs(); checkBills(); tidyInstallers(); loadRepos(); trimCaches(); } }, 3600000);
+// Folders with a passcode lock again after a spell of not being used (settings().lockMinutes).
+setInterval(() => { if (store && mainWin) { try { lockSweep(); } catch (e) { logProblem('lock', e); } } }, 30000);
 
 // ---------------------------------------------------------------- start
 async function setupBlocker() {
@@ -3652,6 +4683,7 @@ async function setupBlocker() {
   await shield.start({
     sessions: settings().blockAds === false ? [] : [...sessionsReady],
     allowSites: settings().adsAllowed || [],
+    presetSites: presets.field('adblockHosts', []),
     // The number on the shield is the only proof you ever get that any of this
     // is running, so it reaches the window as the requests are stopped.
     onCount: (wcId, n) => {
@@ -3693,11 +4725,15 @@ function createMain() {
   uiView.webContents.loadFile(UI_HTML);
   uiView.webContents.on('did-finish-load', () => {
     sendState();
+    if (isLocked(openFolder())) askUnlock(openFolder()); // nothing open but locked folders
     // You were never asked and never waited, so this is the only time the
     // update is mentioned at all: once, after it has already happened.
     const was = store.data.lastVersion;
     if (was && was !== app.getVersion()) sendEvent('toast', `Cue updated itself to ${app.getVersion()}.`);
+    const moved = settledMessage(); if (moved) sendEvent('toast', moved);
     store.data.lastVersion = app.getVersion(); store.save();
+    // A brand-new install says hello once, in the sidebar. Never in a test unless it asks.
+    if (store.data.welcome === 'pending' && !process.env.CUE_TEST && !process.env.CUE_SMOKE && !isLocked(openFolder())) sendEvent('welcome', welcomeData());
     if (process.env.CUE_SMOKE) { console.log('CUE_SMOKE_OK'); app.quit(); }
   });
   mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
@@ -3718,7 +4754,12 @@ function createMain() {
   mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
 
   const saved = store.data.tabs || [];
-  for (const s of saved) tabs.push(makeTab(s));
+  // A tab of a folder that is no longer there is dropped. It used to be shown in whatever folder
+  // was open, which put one person's page in somebody else's folder.
+  // "Just for now" tabs come back only when they are saved by the hours setting, and only until
+  // their time is up. With "when Cue closes" they were never written, and a stray one is dropped.
+  const tempCut = tempHours() ? Date.now() - tempHours() * 3600000 : Infinity;
+  for (const s of saved) if (isFolder(s.identity) && !(s.temp && (s.tempAt || 0) <= tempCut)) tabs.push(makeTab(s));
   // Deliberately NOT merged at launch. Closing his tabs for him, unasked, is
   // the kind of help nobody wants: the rule in openTab stops new copies being
   // made, and the button in Settings tidies the old ones when he says so.
@@ -3727,23 +4768,39 @@ function createMain() {
   cueIds = (store.data.cue || []).map((u) => (tabs.find((t) => t.uid === u) || {}).id).filter(Boolean);
   cueNextId = cueIds[0] || null;
   seedEveryday();
-  if (!tabs.length) tabs.push(makeTab({ url: START_URL }));
+  // Every passcode folder is locked at launch. Stand in one that is not, if there is one.
+  if (isLocked(openFolder())) {
+    const open = userFolders().find((f) => !isLocked(f.id));
+    if (open) store.data.folder = open.id;
+  }
+  const usable = () => tabs.filter((t) => !isLocked(t.identity));
+  if (!usable().some((t) => t.identity === openFolder()) && !isLocked(openFolder())) tabs.push(makeTab({ url: START_URL, identity: openFolder() }));
   // Where Cue lands when you open it. "The app I start in" puts you in the
   // folder's own WhatsApp (your own in Personal, the school's in School) rather
   // than wherever you happened to stop last night. Anything else, and it is the
   // tab you were last on, as before.
+  const list = usable();
+  if (!list.length) { askUnlock(openFolder()); return; } // every folder is locked: the sheet asks first
   let first = tabs[Math.max(0, Math.min(store.data.activeIndex || 0, tabs.length - 1))];
+  if (!first || isLocked(first.identity) || first.identity !== openFolder()) first = list.filter((t) => t.identity === openFolder()).sort((a, b) => b.lastActive - a.lastActive)[0] || list[0];
   if (settings().openOn === 'home') {
-    const who = store.data.folder;
+    const who = openFolder();
     const want = hostOf(settings().homeApp || '');
-    const mine = tabs.filter((t) => t.identity === who && t.id !== programId);
+    const mine = list.filter((t) => t.identity === who && t.id !== programId);
     const home = want && mine.find((t) => hostOf(t.url) === want);
     first = home || mine.sort((a, b) => b.lastActive - a.lastActive)[0] || first;
   }
-  const current = (sp) => ({ ...sp, uids: undefined, ids: (sp.uids || []).map((u) => tabs.find((t) => t.uid === u)?.id).filter(Boolean) });
+  const current = (sp) => ({ ...sp, uids: undefined, ids: (sp.uids || []).map((u) => tabs.find((t) => t.uid === u && !isLocked(t.identity))?.id).filter(Boolean) });
   store.data.spaceSplit = Object.fromEntries(Object.entries(store.data.savedSpaceSplit || {}).map(([k, v]) => [k, current(v)]));
   store.data.split = fitSplit(current(store.data.savedSplit || { mode: 'single' }));
-  if (!store.data.split.ids.includes(first.id)) store.data.split = { mode: 'single', ids: [] };
+  // The split you were in comes back even when the tab Cue opens on is not part of it: Cue opens
+  // on the split instead (the tab in it you used last), so the layout is never quietly dropped.
+  if (store.data.split.mode !== 'single' && store.data.split.ids.length >= 2) {
+    if (!store.data.split.ids.includes(first.id)) {
+      const inSplit = store.data.split.ids.map(byId).filter(Boolean).sort((a, b) => (b.identity === openFolder()) - (a.identity === openFolder()) || b.lastActive - a.lastActive);
+      if (inSplit[0]) first = inSplit[0];
+    }
+  } else if (!store.data.split.ids.includes(first.id)) store.data.split = { mode: 'single', ids: [] };
   store.data.split.ids.forEach((id) => ensureView(byId(id)));
   activate(first.id);
 }
@@ -3754,10 +4811,12 @@ app.on('second-instance', (_e, argv) => {
   if (!mainWin) return;
   if (mainWin.isMinimized()) mainWin.restore();
   mainWin.focus();
-  const url = argv.find((x) => /^https?:\/\//.test(x)); if (url) openTab({ url });
+  const url = argv.find((x) => /^https?:\/\//.test(x)); if (url) openFromApp(url);
 });
 let pendingUrls = [];
-app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openTab({ url }); else pendingUrls.push(url); });
+// A link clicked in another app (Mail, Slack, a PDF). Settings can start these in "Just for now".
+function openFromApp(url) { return openTab({ url, temp: settings().linksJustForNow === true }); }
+app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openFromApp(url); else pendingUrls.push(url); });
 app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL(file).href; if (mainWin) openTab({ url }); else pendingUrls.push(url); });
 
 // Protected video (Netflix, Prime Video, JioHotstar, Disney+, Spotify) needs
@@ -3778,21 +4837,278 @@ async function widevineReady() {
   }
 }
 
+// ---------------------------------------------------------------- the owner's world, frozen
+// Up to 0.6.18 a lot of Cue's behaviour came from defaults in the code that were his: four Spaces
+// named for his work, number keys to the school's apps, WhatsApp/Gmail/Instagram/Facebook kept in
+// the strip, every kit on, WhatsApp silent, the AI door listening, bills in rupees. From 0.7 a new
+// install is plain. So an install that has run before gets every one of those values WRITTEN into
+// its cue.json, once ('legacy-freeze-0.7' in MIGRATIONS), before any default changes under it, and
+// the school's starting setup switched on - after which it looks and behaves exactly as 0.6.18 did.
+// `raw` is cue.json exactly as it was read, so a value that was only ever a code default is told
+// apart from one he saved. `overwrite` (tests only) writes the old values over whatever is there.
+function legacyWorld() {
+  const p = presets.load('nsm') || {};
+  return {
+    spaces: [...(p.spaces || [])], spaceLogins: { ...(p.spaceLogins || {}) }, quickKeys: (p.quickKeys || PLAIN_KEYS).map((q) => ({ ...q })),
+    kits: { teacher: true, music: true, creator: true, designer: true, video: true, business: true },
+    everyday: [...(p.pinned || [])], alwaysPinned: [...(p.alwaysPinned || [])],
+    openOn: 'home', homeApp: 'https://web.whatsapp.com/', muteSites: ['web.whatsapp.com'], quietSites: ['web.whatsapp.com'],
+    agentPort: true, agentSites: { whatsapp: true, gmail: true },
+    aiWhich: 'claudecode', currency: 'INR', usdToInr: 88, space: p.startSpace || 'Teach', folder: p.startFolder || 'school',
+  };
+}
+function freezeLegacy(data, raw = {}, { overwrite = false } = {}) {
+  const L = legacyWorld();
+  const rs = (!overwrite && raw && raw.settings) || {};
+  const s = data.settings = data.settings || {};
+  const missing = (k) => overwrite || rs[k] === undefined;
+  // Spaces, the Space and folder that were open, the AI panel, the money.
+  if (overwrite || !Array.isArray(raw.spaces)) data.spaces = [...L.spaces];
+  for (const k of ['space', 'folder', 'aiWhich', 'currency', 'usdToInr']) if (overwrite || raw[k] === undefined) data[k] = L[k];
+  // Settings that were code defaults.
+  s.spaceLogins = { ...L.spaceLogins, ...(overwrite ? {} : rs.spaceLogins || {}) };
+  s.kits = { ...L.kits, ...(overwrite ? {} : rs.kits || {}) };
+  for (const k of ['everyday', 'alwaysPinned', 'openOn', 'homeApp', 'muteSites', 'quietSites', 'agentPort', 'agentSites']) if (missing(k)) s[k] = structuredClone(L[k]);
+  // The nine, resolved the way 0.6.18 resolved them, so an empty name keeps showing the old one.
+  const mat = (list) => L.quickKeys.map((d, i) => { const x = list[i] || {}; return { key: d.key, name: String(x.name || d.name), url: typeof x.url === 'string' ? x.url : d.url }; });
+  const nine = (list) => (Array.isArray(list) && list.length === 9 ? mat(list) : L.quickKeys.map((q) => ({ ...q })));
+  const q = overwrite ? undefined : rs.quickKeys;
+  if (q && typeof q === 'object' && !Array.isArray(q)) {
+    s.quickKeys = Object.fromEntries(Object.entries(q).map(([f, list]) => [f, nine(list)]));
+    for (const f of ['personal', 'school']) if (!s.quickKeys[f]) s.quickKeys[f] = nine(null);
+  } else s.quickKeys = nine(q);
+  // 0.6.18 put the four in both of his folders on every launch.
+  const ep = (!overwrite && raw.everydayPinned && typeof raw.everydayPinned === 'object') ? { ...raw.everydayPinned } : {};
+  for (const f of ['personal', 'school']) if (ep[f] === undefined) ep[f] = [];
+  data.everydayPinned = ep;
+  s.preset = 'nsm';
+  return s;
+}
+
+// ---------------------------------------------------------------- money
+// The bills reader works in the person's own money: the currency of the country the computer is
+// set to, and how many of it one US dollar buys (US prices are converted at that rate). The rates
+// are only a starting point, changed on the Bills page.
+const EURO = ['AT', 'BE', 'HR', 'CY', 'EE', 'FI', 'FR', 'DE', 'GR', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PT', 'SK', 'SI', 'ES'];
+const COUNTRY_MONEY = { IN: 'INR', US: 'USD', GB: 'GBP', CA: 'CAD', AU: 'AUD', NZ: 'NZD', JP: 'JPY', SG: 'SGD', AE: 'AED', CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK', ZA: 'ZAR', BR: 'BRL', MX: 'MXN', CN: 'CNY', HK: 'HKD', KR: 'KRW', LK: 'LKR', PK: 'PKR', BD: 'BDT', NP: 'NPR', MY: 'MYR', ID: 'IDR', PH: 'PHP', TH: 'THB', SA: 'SAR', IL: 'ILS', TR: 'TRY', PL: 'PLN', ...Object.fromEntries(EURO.map((c) => [c, 'EUR'])) };
+const USD_RATE = { USD: 1, INR: 88, EUR: 0.86, GBP: 0.76, CAD: 1.4, AUD: 1.53, NZD: 1.75, JPY: 154, SGD: 1.3, AED: 3.67, CHF: 0.8, SEK: 9.5, NOK: 10.1, DKK: 6.4, ZAR: 17.3, BRL: 5.3, MXN: 18.4, CNY: 7.1, HKD: 7.8, KRW: 1450, LKR: 300, PKR: 281, BDT: 122, NPR: 141, MYR: 4.15, IDR: 16600, PHP: 58.5, THB: 32.5, SAR: 3.75, ILS: 3.25, TRY: 42, PLN: 3.65 };
+function localMoney() {
+  let cc = '';
+  try { cc = String(app.getLocaleCountryCode() || '').toUpperCase(); } catch {}
+  const code = COUNTRY_MONEY[cc] || 'USD';
+  return { code, rate: USD_RATE[code] || 1 };
+}
+
+// ---------------------------------------------------------------- starting setups
+// A preset (presets.js) is switched on or off from Settings, or chosen on the first-run sheet. It
+// never touches sign-ins, tabs or folders. Switching one on: its Spaces join yours (an empty plain
+// Home makes way), its number keys fill any folder whose saved keys are still the plain ones, every
+// kit comes on, its apps stay in the strip, and the money is its currency. What it changed is kept
+// in settings().presetUndo, so going back to plain puts exactly that back and leaves alone anything
+// changed since. With no presetUndo (an upgraded install, frozen above) going back to plain only
+// takes the organisation's own things away: its apps, tiles, trusted sites and group.
+const sameKey = (a, b) => !!a && !!b && String(a.name || '') === String(b.name || '') && String(a.url || '') === String(b.url || '');
+function applyPreset(id, { firstRun = false } = {}) {
+  const p = presets.load(id);
+  if (!p) return { error: 'Cue does not have that setup.' };
+  const s = settings();
+  if (s.preset === id) return { ok: true, already: true };
+  if (s.preset) removePreset();
+  const undo = { spaces: Array.isArray(store.data.spaces) ? [...store.data.spaces] : null, space: store.data.space, addedSpaces: [], addedLogins: [], kits: { ...s.kits }, addedPinned: [], currency: store.data.currency, usdToInr: store.data.usdToInr, keysSet: [], autoIds: [] };
+  // Spaces: yours first (an empty plain Home makes way), then the preset's. On the first-run sheet
+  // there is nothing of yours yet, so the preset's are the list and the first tab moves into it.
+  const held = (n) => tabs.some((t) => t.space === n);
+  const list = firstRun ? [] : spaces().filter((n) => !(SPACES_DEFAULT.includes(n) && !held(n)));
+  for (const n of p.spaces || []) if (!list.includes(n)) { list.push(n); if (!spaces().includes(n)) undo.addedSpaces.push(n); }
+  if (firstRun) for (const t of tabs) if (!list.includes(t.space)) t.space = list[0];
+  store.data.spaces = list.slice(0, SPACES_MAX);
+  if (!spaces().includes(store.data.space)) store.data.space = spaces().includes(p.startSpace) ? p.startSpace : spaces()[0];
+  s.spaceLogins = s.spaceLogins || {};
+  for (const [sp, f] of Object.entries(p.spaceLogins || {})) if (isPerson(f) && !s.spaceLogins[sp]) { s.spaceLogins[sp] = f; undo.addedLogins.push(sp); }
+  // Number keys: a folder whose saved nine are still the plain ones takes the preset's. (Unsaved
+  // ones follow the preset by themselves.)
+  if (s.quickKeys && Array.isArray(p.quickKeys)) {
+    const box = Array.isArray(s.quickKeys) ? Object.fromEntries(allFolders().map((f) => [f, s.quickKeys])) : { ...s.quickKeys };
+    for (const [f, nine] of Object.entries(box)) {
+      if (Array.isArray(nine) && nine.every((q, i) => sameKey(q, PLAIN_KEYS[i]) || quickEmpty(q))) { box[f] = p.quickKeys.map((q) => ({ ...q })); undo.keysSet.push(f); }
+    }
+    s.quickKeys = box;
+  }
+  s.kits = { ...s.kits, ...(p.kits || {}) };
+  s.alwaysPinned = Array.isArray(s.alwaysPinned) ? s.alwaysPinned : [];
+  for (const h of p.alwaysPinned || []) if (!s.alwaysPinned.includes(h)) { s.alwaysPinned.push(h); undo.addedPinned.push(h); }
+  if (p.currency) { store.data.currency = p.currency; if (p.usdRate) store.data.usdToInr = p.usdRate; }
+  s.preset = id;
+  s.presetUndo = undo;
+  undo.autoIds = vault ? vault.autoForOwnSites() : [];
+  presetChanged();
+  return { ok: true };
+}
+function removePreset() {
+  const s = settings();
+  const p = presets.active();
+  const u = s.presetUndo || null;
+  if (!s.preset) return { ok: true, already: true };
+  // Off first, so everything below reads the plain defaults (spaces() falls back to them).
+  delete s.preset; delete s.presetUndo;
+  if (u) {
+    const held = (n) => tabs.some((t) => t.space === n);
+    const list = spaces().filter((n) => !((u.addedSpaces || []).includes(n) && !held(n)));
+    if (!list.length || (u.spaces === null && list.length === 1 && SPACES_DEFAULT.includes(list[0]))) delete store.data.spaces;
+    else store.data.spaces = list;
+    if (!spaces().includes(store.data.space)) store.data.space = spaces().includes(u.space) ? u.space : spaces()[0];
+    for (const sp of u.addedLogins || []) if (s.spaceLogins && !spaces().includes(sp)) delete s.spaceLogins[sp];
+    for (const [k, was] of Object.entries(u.kits || {})) if (s.kits[k] === true && was === false) s.kits[k] = false;
+    s.alwaysPinned = (s.alwaysPinned || []).filter((h) => !(u.addedPinned || []).includes(h));
+    if (p && store.data.currency === p.currency && u.currency) { store.data.currency = u.currency; store.data.usdToInr = u.usdToInr; }
+    if (p && s.quickKeys && Array.isArray(p.quickKeys)) {
+      const fix = (nine) => (Array.isArray(nine) ? nine.map((q, i) => (sameKey(q, p.quickKeys[i]) ? { ...PLAIN_KEYS[i] } : q)) : nine);
+      s.quickKeys = Array.isArray(s.quickKeys) ? fix(s.quickKeys) : Object.fromEntries(Object.entries(s.quickKeys).map(([f, nine]) => [f, fix(nine)]));
+    }
+    if (vault) for (const id of u.autoIds || []) vault.setAuto(id, false);
+  }
+  presetChanged();
+  return { ok: true };
+}
+// Everything that reads the preset live, told it changed.
+function presetChanged() {
+  if (shield) shield.setPresetHosts(presets.field('adblockHosts', []));
+  buildMenu(); store.save(); persist(); layout(); pushState();
+  for (const t of tabs) if (t.view && !t.view.webContents.isDestroyed() && isStart(t.view.webContents.getURL())) t.view.webContents.reload();
+}
+// The preset's own tiles on the start page, put in by main so start.html itself names nobody.
+function dressStartPage(wc) {
+  const st = presets.field('startTiles', null);
+  if (!st || wc.isDestroyed()) return;
+  const code = `(() => {
+    const st = ${JSON.stringify(st)};
+    if (document.getElementById('preset-tiles')) return;
+    const main = document.querySelector('main'); if (!main) return;
+    for (const [from, to] of Object.entries(st.replace || {})) {
+      const a = [...document.querySelectorAll('.tiles a')].find((x) => x.getAttribute('href') === from);
+      if (a) { a.setAttribute('href', to.href); const sp = a.querySelector('span'); if (sp && to.note) sp.textContent = to.note; }
+    }
+    const h = document.createElement('h2'); h.textContent = st.heading || ''; h.id = 'preset-tiles';
+    const box = document.createElement('div'); box.className = 'tiles';
+    for (const t of st.tiles || []) {
+      const a = document.createElement('a'); a.href = t.href;
+      if (t.logo) { const i = document.createElement('img'); i.src = '../../assets/logos/' + t.logo; i.alt = ''; a.append(i); } else a.className = 'nologo';
+      const b = document.createElement('b'); b.textContent = t.name; const s = document.createElement('span'); s.textContent = t.note || '';
+      a.append(b, s); box.append(a);
+    }
+    main.append(h, box);
+  })()`;
+  wc.executeJavaScript(code, true).catch(() => {});
+}
+
+// ---------------------------------------------------------------- the first-run sheet
+// A brand-new install asks three small things in the sidebar (never a system dialog, and it can be
+// skipped): what to call the first folder, which everyday sites to pin, and which starting setup.
+const WELCOME_SITES = [
+  { name: 'WhatsApp', url: 'https://web.whatsapp.com/' }, { name: 'Gmail', url: 'https://mail.google.com/' },
+  { name: 'Google Calendar', url: 'https://calendar.google.com/' }, { name: 'Google Drive', url: 'https://drive.google.com/' },
+  { name: 'YouTube', url: 'https://www.youtube.com/' }, { name: 'Instagram', url: 'https://www.instagram.com/' },
+  { name: 'Facebook', url: 'https://www.facebook.com/' }, { name: 'X', url: 'https://x.com/' },
+  { name: 'LinkedIn', url: 'https://www.linkedin.com/' }, { name: 'ChatGPT', url: 'https://chatgpt.com/' }, { name: 'Claude', url: 'https://claude.ai/' },
+];
+function welcomeData() {
+  const f = userFolders()[0] || {};
+  return {
+    name: f.name || '', color: f.color || NEUTRAL, colors: FOLDER_COLORS, sites: WELCOME_SITES,
+    setups: presets.available().map((x) => ({ ...x, pinned: (presets.load(x.id) || {}).pinned || [], school: !!(presets.load(x.id) || {}).schoolFolder })),
+  };
+}
+function finishWelcome({ name, color, sites, preset, school } = {}) {
+  if (store.data.welcome !== 'pending') return { ok: true, already: true };
+  const f = userFolders()[0];
+  if (f) {
+    const nm = cleanName(name);
+    if (nm && nm !== f.name) { const r = renameFolder({ id: f.id, name: nm }); if (r.error) return r; }
+    if (/^#[0-9a-f]{6}$/i.test(String(color || ''))) f.color = color;
+    f.picture = ''; // a coloured initial; nobody's photo
+  }
+  store.data.welcome = 'done';
+  const p = preset ? presets.load(preset) : null;
+  if (p) {
+    const sf = p.schoolFolder;
+    if (school && sf && !folderById(sf.id)) {
+      const r = addFolder({ name: sf.name, color: sf.color, id: sf.id });
+      if (r.ok) Object.assign(r.folder, { picture: sf.picture || '', about: sf.about || '' });
+    }
+    applyPreset(preset, { firstRun: true });
+  }
+  const want = new Set((Array.isArray(sites) ? sites : []).map(String));
+  const urls = WELCOME_SITES.map((x) => x.url).concat(p ? (p.pinned || []) : []).filter((u, i, a) => want.has(u) && a.indexOf(u) === i);
+  if (f && urls.length) {
+    settings().everyday = urls;
+    store.data.everydayPinned = { ...(store.data.everydayPinned || {}), [f.id]: [] };
+    seedEveryday();
+  }
+  store.save(); persist(); layout(); pushState();
+  return { ok: true };
+}
+
+// One-time changes to an existing profile, each done once and remembered by name in
+// store.data.migrated, so turning a setting back on afterwards sticks. Each step is handed the
+// settings, the whole saved data, and cue.json as it was read (store.raw).
+const MIGRATIONS = {
+  // Before any 0.7 default changes, an existing install keeps 0.6.18's world (freezeLegacy above).
+  // A brand-new install has nothing to keep; it is marked done so it never runs later.
+  'legacy-freeze-0.7': (_s, data, raw) => { if (!store.fresh) freezeLegacy(data, raw); },
+  // Before 0.7 one video at a time was on for everyone. Other browsers never pause one tab for
+  // another, so it goes off once; Settings > Tabs and sound turns it back on.
+  'onePlayer-off-0.7': (s) => { s.onePlayer = false; },
+  // Ordinary tabs are kept until the person closes them; only "Just for now" tabs are cleared.
+  // Before 0.7 tabs unused for two days were put away into Library > Archived (a saved 7 was
+  // even forced down to 2), which is the opposite. Settings > Keeping tabs turns it back on.
+  'archive-off-0.7': (s) => { s.archiveDays = 0; },
+};
+function runMigrations() {
+  const done = store.data.migrated && typeof store.data.migrated === 'object' ? store.data.migrated : {};
+  let changed = false;
+  for (const [name, step] of Object.entries(MIGRATIONS)) {
+    if (done[name]) continue;
+    step(store.data.settings, store.data, store.raw || {});
+    done[name] = true; changed = true;
+  }
+  store.data.migrated = done;
+  if (changed) store.save();
+  return done;
+}
+
 app.whenReady().then(async () => {
+  // Windows and Linux: the first run from an unzipped folder copies Cue to its
+  // own per-user home and opens it again from there (src/main/settle.js).
+  const settled = await settle({ app, shell, log: (e) => console.error('settle', (e && e.message) || e) });
+  if (settled.relaunch) { app.relaunch(settled.relaunch); app.exit(0); return; }
   await widevineReady();
+  // The defaults are a plain browser's. An install that has run before keeps 0.6.18's own world:
+  // runMigrations() writes it into cue.json ('legacy-freeze-0.7') BEFORE these defaults fill
+  // anything in, so none of them ever reaches it.
   store = new Store(app.getPath('userData'), 'cue.json', {
     tabs: [], activeIndex: 0, bounds: null, split: { mode: 'single', ids: [] }, savedSplit: null, savedSpaceSplit: {}, collapsed: {}, permissions: {},
-    space: 'Teach', spaceSplit: {}, folder: 'school', whose: {}, aiWhich: 'claudecode', bills: [], usdToInr: 88, alerts: [], archived: [], installersOpened: [],
+    space: SPACES_DEFAULT[0], spaceSplit: {}, folder: 'personal', whose: {}, aiWhich: 'claudecode', bills: [], alerts: [], archived: [], installersOpened: [],
     settings: {
-      autoGroup: true, onePlayer: true, syncScroll: false, originalSound: false, safeShare: true,
+      autoGroup: true, onePlayer: false, syncScroll: false, originalSound: false, safeShare: true,
       stageWidth: 1920, stageHeight: 1080, obs: { host: '127.0.0.1', port: 4455, password: '' },
-      defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, agentPort: true, sleepMinutes: 15,
+      defaultIdentity: 'personal', identityLabels: { personal: '', school: '', agent: '' }, sleepMinutes: 15,
     },
   });
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: true, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: true, sleepMinutes: 15, archiveDays: 2, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'switch', quickKeys: QUICK_KEYS, showDownloads: true, quietSites: ['web.whatsapp.com'], muteSites: ['web.whatsapp.com'], openOn: 'home', homeApp: 'https://web.whatsapp.com/', agentSites: { whatsapp: true, gmail: true } }, ...store.data.settings };
+  presets.configure(() => (store && store.data.settings ? store.data.settings.preset : null));
+  if (store.fresh) {
+    // Nothing to repair on a brand-new install, and the one-off repairs below would otherwise put
+    // the owner's WhatsApp lists back in. The first-run sheet asks the rest.
+    Object.assign(store.data, { financeNamed: true, tidyDefaults: true, quietDefaults: true, stripDefaults: true, groupsRepaired: true, welcome: 'pending' });
+  }
+  runMigrations();
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: false, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: false, sleepMinutes: 15, archiveDays: 0, tempClear: 'quit', linksJustForNow: false, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'both', vanishOnePlayer: false, vanishNewTab: 'go', vanishNewTabPlace: 'next', vanishPauseOnBlur: false, vanishHideFromCapture: true, vanishFullScreen: false, showDownloads: true, quietSites: [], muteSites: [], openOn: 'last', homeApp: '', agentSites: { whatsapp: false, gmail: false }, alwaysPinned: [], everyday: [] }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
-  store.data.settings.kits = { teacher: true, music: true, creator: true, designer: true, video: true, business: true, ...(store.data.settings.kits || {}) };
-  store.data.settings.spaceLogins = { Teach: 'school', Create: 'personal', Finance: 'school', Build: 'personal', ...(store.data.settings.spaceLogins || {}) };
+  // Teacher (on air, OBS) and Business (bills) are one person's tools; a plain install starts
+  // without them, and they are one switch away in Settings > What you see.
+  store.data.settings.kits = { teacher: false, music: true, creator: true, designer: true, video: true, business: false, ...(store.data.settings.kits || {}) };
+  store.data.settings.spaceLogins = { ...(store.data.settings.spaceLogins || {}) };
+  if (!store.data.currency) { const m = localMoney(); store.data.currency = m.code; if (!(Number(store.data.usdToInr) > 0)) store.data.usdToInr = m.rate; }
+  if (!(Number(store.data.usdToInr) > 0)) store.data.usdToInr = USD_RATE[store.data.currency] || 1;
   // The Space called Business is the money one, so it says Finance. Done once;
   // double-click it in the sidebar to call it anything else.
   if (!store.data.financeNamed) {
@@ -3809,14 +5125,9 @@ app.whenReady().then(async () => {
       if (store.data.space === 'Business') store.data.space = 'Finance';
     }
   }
-  // Two one-off repairs, each done once and never again.
-  if (!store.data.tidyDefaults) {
-    store.data.tidyDefaults = true;
-    // Tabs used to pile up for a week before Cue touched them, which is how a
-    // sidebar gets to sixty tabs. Passing tabs now go after two days, into
-    // Library → Archived. Set it back in Settings if you miss them.
-    if (store.data.settings.archiveDays === 7) store.data.settings.archiveDays = 2;
-  }
+  // Spaces are saved as { name, tint } from 0.7; an older plain list of names becomes that here,
+  // each keeping the colour it already showed.
+  if (Array.isArray(store.data.spaces) && store.data.spaces.some((x) => typeof x === 'string')) store.data.spaces = spaceList();
   // Existing profiles had no quiet list, so WhatsApp kept popping boxes up.
   if (!store.data.quietDefaults) {
     store.data.quietDefaults = true;
@@ -3839,11 +5150,28 @@ app.whenReady().then(async () => {
     // from the right-click menu is set again the same way, in one click.
     for (const t of store.data.tabs || []) delete t.groupOverride;
   }
+  // The list of people's folders. An install that has run before, with no list saved yet, gets
+  // the owner's two folders back exactly as they were - same names, colours, pictures, ids (so
+  // the same partitions, sign-ins and tabs) - with sign-ins shared between them as before and
+  // agents allowed in both. A brand-new install starts with one plain folder, private in every
+  // way; naming it is a later step.
+  if (!Array.isArray(store.data.folders) || !store.data.folders.length) {
+    const labels = store.data.settings.identityLabels || {};
+    if (store.fresh) {
+      store.data.folders = [{ id: 'personal', name: 'Personal', color: NEUTRAL, picture: '', email: '', lock: null, agents: false }];
+      if (!Array.isArray(store.data.settings.sharedPairs)) store.data.settings.sharedPairs = [];
+    } else {
+      store.data.folders = ['personal', 'school'].map((id) => ({ id, ...LEGACY_FOLDERS[id], email: String(labels[id] || ''), lock: null, agents: true }));
+      if (!Array.isArray(store.data.settings.sharedPairs)) store.data.settings.sharedPairs = [['personal', 'school']];
+    }
+  }
+  if (!Array.isArray(store.data.settings.sharedPairs)) store.data.settings.sharedPairs = [];
+  if (store.data.settings.lockMinutes === undefined) store.data.settings.lockMinutes = 15;
   // Browsers that have been running since before folders existed have no folder
   // in the store. Open the one the tabs are actually in, not a guess.
-  if (!FOLDERS.includes(store.data.folder)) {
+  if (!isFolder(store.data.folder)) {
     const tally = {};
-    for (const t of store.data.tabs || []) if (FOLDERS.includes(t.identity)) tally[t.identity] = (tally[t.identity] || 0) + 1;
+    for (const t of store.data.tabs || []) if (isFolder(t.identity)) tally[t.identity] = (tally[t.identity] || 0) + 1;
     store.data.folder = Object.keys(tally).sort((a, b) => tally[b] - tally[a])[0] || usualFolderFor(store.data.space);
   }
   if (!store.data.whose || typeof store.data.whose !== 'object') store.data.whose = {};
@@ -3853,8 +5181,10 @@ app.whenReady().then(async () => {
   vanish = createVanish({
     drm: () => drmReady,
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
-    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl, protect: protectPage, prefs: () => settings(),
-    logo: (u) => pick(SITE_LOGOS, String(hostOf(u) || '').toLowerCase()),
+    uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl: (u) => guardUrl(u, vanishDangerOk), protect: protectPage, prefs: () => settings(),
+    sounding: SOUNDING,
+    onClosed: () => { vanishDangerOk.clear(); VANISH_NO_HTTPS.clear(); vanishLocationTold.clear(); },
+    logo: (u) => pick(siteLogos(), String(hostOf(u) || '').toLowerCase()),
   });
   ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
   vault = new Vault(app.getPath('userData'));
@@ -3876,20 +5206,18 @@ app.whenReady().then(async () => {
   // having to ask for it. mergeDupes never closes a pinned tab.
   setTimeout(() => { try { if (mergeDupes()) { layout(); pushState(); persist(); } } catch (e) { logProblem('tidy', e); } }, 8000);
   setTimeout(() => { try { archiveOldTabs(); } catch (e) { logProblem('tidy', e); } }, 20000);
-  checkBills(); tidyInstallers(); loadRepos(); setTimeout(checkUpdate, 8000); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
+  checkBills(); tidyInstallers(); loadRepos(); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
   setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch
   const launchLink = process.argv.slice(1).find((x) => /^https?:\/\//.test(x)); if (launchLink) pendingUrls.push(launchLink);
-  pendingUrls.forEach((url) => openTab({ url })); pendingUrls = [];
+  pendingUrls.forEach((url) => openFromApp(url)); pendingUrls = [];
   setupBlocker();
   startThumbs();
   // His switch, as he left it. When it is off the port still answers, so that an
   // AI tool that tries is told why in words and Cue can say so on screen - better
   // than a silence nobody can explain.
   doorOpen = settings().aiDoor === true;
-  if (settings().agentPort !== false) {
-    startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
-      .catch((e) => logAgent({ tool: 'port', error: e.message }));
-  }
+  // A plain install has no AI door at all until the person switches AI tools on in Settings.
+  if (settings().agentPort !== false) openAgentPort();
   updater = createUpdater({
     onState: () => pushState(),
     // A browser must never end a class. While a tab is on air, being recorded,
@@ -3915,9 +5243,26 @@ app.whenReady().then(async () => {
   // there, so a class would start with Cue and OBS not talking. OBS being shut
   // costs one failed socket and nothing else.
   if (settings().obs.autoConnect !== false && settings().obs.host) obs.connect(settings().obs);
-  sharedLogins = shareLogins(sessionFor('personal'), sessionFor('school'));
-  setTimeout(() => sharedLogins.syncNow().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView });
+  // Sign-ins are shared only between the folders the person paired (settings().sharedPairs).
+  wireSharing();
+  sharedLogins = { syncNow: () => syncShared() };
+  if (sharing.size) setTimeout(() => syncShared().catch(() => {}), 3000); // after the first pages, so start-up stays quick
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
+    // people's folders (test/people.js)
+    addFolder, removeFolder, renameFolder, lockFolder, tryUnlock, setPasscode, lockSweep, isLocked, folderRows, userFolders, setShared, reopenClosed,
+    lastState: () => lastState, sendState, closedStack, downloads, invoke: uiInvoke, internalAs: (cmd, a, from) => internal[cmd](a, from),
+    // Vanish (test/vanish-settings.js)
+    runMigrations, vanishMemory: () => ({ dangerOk: [...vanishDangerOk], noHttps: [...VANISH_NO_HTTPS] }),
+    // Google sign-in and the Chrome carry (test/signin.js)
+    signinGate: () => signinGate, chromeCarry: () => ({ canCarryFromChrome, chromeProfilesFor }),
+    // Settings, Spaces and the two tiers of tabs (test/settings-tabs.js)
+    spaceList, spaceCommand, setTemp, clearTemp, sweepTemp, tabMenuItems: (t) => tabMenuItems(t), openFromApp,
+    // starting setups, the frozen owner's world and the first-run sheet (test/first-run.js, test/world.js)
+    applyPreset, removePreset, presets, freezeLegacy, legacyFolders: () => structuredClone(LEGACY_FOLDERS), seedEveryday, buildMenu, wireSharing,
+    welcomeData, finishWelcome, showWelcome: () => { store.data.welcome = 'pending'; sendEvent('welcome', welcomeData()); },
+    midiAsks: () => [...midiAsks], portUp: () => portUp, agentPort: AGENT_PORT, startUrl: START_URL, spaces, alwaysPinned, credReady: (identity, origin) => { const c = vault.find(identity, origin); return c ? { handsFree: !!c.auto || Vault.ownSite(origin) } : null; },
+    // Volume on the pinned apps (test/tile-volume.js): put a tab to sleep the way Cue does
+    destroyView });
 });
 
 app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });

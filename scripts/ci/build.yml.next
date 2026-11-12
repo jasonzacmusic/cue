@@ -1,0 +1,212 @@
+# Builds Cue for Windows and Linux in the cloud (the Mac build is done by hand, signed and notarized).
+# Runs on a version tag (v*) and on manual dispatch. Windows and Linux builds are NOT code-signed;
+# their only proof of origin is cue-feed.json, signed here with the secret CUE_FEED_KEY (Ed25519,
+# see scripts/feed-keygen.js) and verified by every copy of Cue with the key in src/main/update-core.js.
+name: Build Windows and Linux
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: win-x64
+            script: dist:win
+            app_dir: build/Cue-win32-x64
+            exe: build/Cue-win32-x64/Cue.exe
+          - os: ubuntu-latest
+            label: linux-x64
+            script: dist:linux
+            app_dir: build/Cue-linux-x64
+            exe: build/Cue-linux-x64/Cue
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Read version and check the tag matches it
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $REF_NAME does not match package.json version $VERSION"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run ${{ matrix.script }}
+
+      - name: Install Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          EXE: ${{ matrix.exe }}
+        run: node scripts/smoke.js "$EXE"
+
+      - name: Smoke test (Linux, virtual display)
+        if: runner.os == 'Linux'
+        env:
+          EXE: ${{ matrix.exe }}
+        run: xvfb-run -a node scripts/smoke.js "$EXE" --no-sandbox --disable-gpu
+
+      # The updater's own tests, with no Electron window: signed feed, size/sha,
+      # staged copy reuse, Linux swap + roll-back, first-run settle. On Windows
+      # this also runs the real win-swap.ps1 against a dummy install, a dummy
+      # staged copy and a short-lived dummy process (swap, roll-back, and
+      # surviving the process that started it). It fails while
+      # FEED_PUBLIC_KEY is still the placeholder, on purpose.
+      - name: Update tests (signed feed, swap and roll-back)
+        env:
+          CUE_UPDATE_TMP: ${{ runner.temp }}
+        run: node test/update-cross.js
+
+      # Can a copy in the home folder (where Cue settles itself) run with
+      # Chromium's sandbox on this Ubuntu? Recorded, not required: Ubuntu 23.10+
+      # restricts unprivileged user namespaces through AppArmor, and a user-folder
+      # copy can neither carry an AppArmor profile nor a setuid chrome-sandbox.
+      - name: Linux sandbox probe (home-folder copy, sandbox ON)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          APP_DIR: ${{ matrix.app_dir }}
+        run: |
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+          mkdir -p "$HOME/.local/share"
+          rm -rf "$HOME/.local/share/cue"
+          cp -a "$APP_DIR" "$HOME/.local/share/cue"
+          if xvfb-run -a node scripts/smoke.js "$HOME/.local/share/cue/Cue" --disable-gpu; then
+            echo "::notice::A home-folder Cue runs WITH the Chromium sandbox on this runner."
+          else
+            echo "::warning::A home-folder Cue does NOT run with the Chromium sandbox on this runner; the launcher's --no-sandbox fallback is needed here."
+            exit 1
+          fi
+
+      - name: Linux launcher (the documented --no-sandbox fallback) starts Cue
+        if: runner.os == 'Linux'
+        env:
+          APP_DIR: ${{ matrix.app_dir }}
+        run: |
+          mkdir -p "$HOME/.local/share"
+          rm -rf "$HOME/.local/share/cue"
+          cp -a "$APP_DIR" "$HOME/.local/share/cue"
+          node -e "require('./src/main/settle').ensureEntries({ platform: 'linux', home: process.env.HOME + '/.local/share/cue' })"
+          cat "$HOME/.local/share/applications/cue.desktop"
+          xvfb-run -a node scripts/smoke.js "$HOME/.local/bin/cue" --disable-gpu
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "build/Cue-win32-x64" -DestinationPath "dist/Cue-$env:VERSION-win-x64.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -czf "dist/Cue-${VERSION}-linux-x64.tar.gz" -C build Cue-linux-x64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Cue-${{ matrix.label }}
+          path: dist/Cue-*
+          if-no-files-found: error
+
+  release:
+    name: Attach to GitHub Release
+    needs: build
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: The feed signing key is set
+        env:
+          CUE_FEED_KEY: ${{ secrets.CUE_FEED_KEY }}
+        run: |
+          if [ -z "$CUE_FEED_KEY" ]; then
+            echo "::error::The secret CUE_FEED_KEY is not set. Make a keypair with 'node scripts/feed-keygen.js', put the private key in Settings > Secrets and variables > Actions as CUE_FEED_KEY, and paste the public key into FEED_PUBLIC_KEY in src/main/update-core.js. Without it Windows and Linux copies of Cue cannot update."
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Download builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Cue-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write and sign cue-feed.json, add fixed-name copies
+        env:
+          CUE_FEED_KEY: ${{ secrets.CUE_FEED_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          node scripts/feed-write.js "$VERSION" dist
+          # Fixed names, so the Labs page can link releases/latest/download/<name> for ever.
+          cp "dist/Cue-${VERSION}-win-x64.zip" dist/Cue-win-x64.zip
+          cp "dist/Cue-${VERSION}-linux-x64.tar.gz" dist/Cue-linux-x64.tar.gz
+          cat dist/cue-feed.json
+
+      - name: Attach files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --title "Cue ${TAG#v}" --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+          fi

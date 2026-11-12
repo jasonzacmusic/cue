@@ -66,6 +66,7 @@ async function waitLoaded(t, ms = 20000) {
 module.exports = async function run(c) {
   const t0 = Date.now();
   C = c;
+  require('./world').asOwner(c); // real NSM sites, his folders and Spaces
   const uwc = c.ui().webContents; const origSend = uwc.send.bind(uwc);
   uwc.send = (ch, ...a) => { if (ch === 'ui:state') lastState = a[0]; return origSend(ch, ...a); };
   c.app.focus({ steal: true }); c.win().setAlwaysOnTop(true);
