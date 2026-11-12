@@ -27,13 +27,11 @@ jobs:
         include:
           - os: windows-latest
             label: win-x64
-            test_shell: pwsh
             script: dist:win
             app_dir: build/Cue-win32-x64
             exe: build/Cue-win32-x64/Cue.exe
           - os: ubuntu-latest
             label: linux-x64
-            test_shell: bash
             script: dist:linux
             app_dir: build/Cue-linux-x64
             exe: build/Cue-linux-x64/Cue
@@ -92,8 +90,15 @@ jobs:
       # staged copy and a short-lived dummy process (swap, roll-back, and
       # surviving the process that started it). It fails while
       # FEED_PUBLIC_KEY is still the placeholder, on purpose.
-      - name: Update tests (signed feed, swap and roll-back)
-        shell: ${{ matrix.test_shell }}
+      - name: Update tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CUE_UPDATE_TMP: ${{ runner.temp }}
+        run: node test/update-cross.js
+
+      - name: Update tests (Linux)
+        if: runner.os == 'Linux'
         env:
           CUE_UPDATE_TMP: ${{ runner.temp }}
         run: node test/update-cross.js
