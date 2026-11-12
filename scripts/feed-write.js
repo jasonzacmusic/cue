@@ -23,6 +23,11 @@ try { derived = crypto.createPublicKey(crypto.createPrivateKey(pem)).export({ ty
 if (derived !== core.FEED_PUBLIC_KEY) die('CUE_FEED_KEY does not match FEED_PUBLIC_KEY in src/main/update-core.js. Copies of Cue would refuse this feed.');
 
 const repo = process.env.GITHUB_REPOSITORY || 'jasonzacmusic/cue';
+const tag = process.env.GITHUB_REF_NAME || `v${version}`;
+const [baseTag, build, ...extra] = tag.split('+');
+if (baseTag !== `v${version}` || extra.length || (build !== undefined && !/^desktop\.[1-9][0-9]*$/.test(build))) {
+  die('The release tag must match the application version.');
+}
 const files = { 'win32-x64': `Cue-${version}-win-x64.zip`, 'linux-x64': `Cue-${version}-linux-x64.tar.gz` };
 const platforms = {};
 for (const [key, name] of Object.entries(files)) {
@@ -30,7 +35,7 @@ for (const [key, name] of Object.entries(files)) {
   if (!fs.existsSync(file)) die(`${name} is not in ${dist}`);
   const bytes = fs.readFileSync(file);
   platforms[key] = {
-    url: `https://github.com/${repo}/releases/download/v${version}/${name}`,
+    url: `https://github.com/${repo}/releases/download/${tag}/${name}`,
     sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     size: bytes.length,
   };
