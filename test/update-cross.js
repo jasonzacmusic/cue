@@ -311,7 +311,8 @@ const settle = async (u) => {
       const c = calls[0] || { args: [], opts: {} };
       check('Windows: at quit a hidden, detached swap script is started and let go', did === true && c.opts.detached === true && c.opts.windowsHide === true && c.unref === true, c.opts);
       check('Windows: it is told to wait for this process', c.args[c.args.indexOf('-WaitPid') + 1] === String(process.pid));
-      check('Windows: the script was written outside app.asar, beside the update', fs.existsSync(path.join(upd, 'win-swap.ps1')));
+      check('Windows: the script runs from the update directory, outside the app being replaced',
+        c.opts.cwd === upd && fs.existsSync(path.join(upd, 'win-swap.ps1')));
     }
   }
 
@@ -387,18 +388,19 @@ const settle = async (u) => {
       const started = Date.now();
       let exited = false;
       let launchError = '';
+      let exitStatus;
       let output = '';
       const spawnObserved = (cmd, args, opts) => {
         const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
         for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { output += chunk; });
         child.on('error', (error) => { launchError = error.message; exited = true; });
-        child.on('close', () => { exited = true; });
+        child.on('close', (code, signal) => { exitStatus = signal || code; exited = true; });
         return child;
       };
       core.startWindowsSwap({ script, waitPid: dummy.pid, live, staged, result, version: '1.1.0', failAfterAside: fail, timeoutSec: 30, spawnFn: spawnObserved });
       for (let i = 0; i < 240 && !exited && !fs.existsSync(result); i += 1) await sleep(250);
       const report = core.readResult(result);
-      if (!report) console.log('[cue-update-cross] Windows swap produced no result:', launchError || output.trim() || '(no PowerShell output)');
+      if (!report) console.log('[cue-update-cross] Windows swap produced no result:', exitStatus, launchError || output.trim() || '(no PowerShell output)');
       return { live, staged, result: report, waited: Date.now() - started };
     };
     const a = await runSwap();
