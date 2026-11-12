@@ -290,10 +290,18 @@ function writeWinSwap(dir) {
 }
 
 function startWindowsSwap({ script, waitPid, live, staged, result, version = '', relaunch = '', failAfterAside = false, timeoutSec = 90, spawnFn = spawn, env = process.env } = {}) {
-  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script,
-    '-WaitPid', String(waitPid), '-Install', live, '-Staged', staged, '-Result', result, '-Version', String(version), '-TimeoutSec', String(timeoutSec)];
-  if (relaunch) args.push('-Relaunch', relaunch);
-  if (failAfterAside) args.push('-FailAfterAside');
+  // Pass the invocation as one PowerShell command. Script parameters like
+  // -Version then belong to the script, never to powershell.exe itself.
+  const literal = (value) => "'" + String(value).replaceAll("'", "''") + "'";
+  const command = [
+    '&', literal(script), '-WaitPid', literal(waitPid), '-Install', literal(live),
+    '-Staged', literal(staged), '-Result', literal(result), '-Version', literal(version),
+    '-TimeoutSec', literal(timeoutSec),
+  ];
+  if (relaunch) command.push('-Relaunch', literal(relaunch));
+  if (failAfterAside) command.push('-FailAfterAside');
+  const encoded = Buffer.from(command.join(' ') + '; exit $LASTEXITCODE', 'utf16le').toString('base64');
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded];
   // Node hides the detached process. PowerShell's -WindowStyle expects a
   // console window, and inheriting Cue's cwd can lock the install directory.
   const child = spawnFn(powershellPath(env), args, {

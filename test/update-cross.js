@@ -310,7 +310,8 @@ const settle = async (u) => {
       const did = w.installOnQuit();
       const c = calls[0] || { args: [], opts: {} };
       check('Windows: at quit a hidden, detached swap script is started and let go', did === true && c.opts.detached === true && c.opts.windowsHide === true && c.unref === true, c.opts);
-      check('Windows: it is told to wait for this process', c.args[c.args.indexOf('-WaitPid') + 1] === String(process.pid));
+      const command = Buffer.from(c.args.at(-1), 'base64').toString('utf16le');
+      check('Windows: it is told to wait for this process', command.includes(`-WaitPid '${process.pid}'`));
       check('Windows: the script runs from the update directory, outside the app being replaced',
         c.opts.cwd === upd && fs.existsSync(path.join(upd, 'win-swap.ps1')));
     }
