@@ -90,8 +90,8 @@ function defaultUpdatesDir() {
 // Everything but onState is optional; the tests pass the rest.
 //   appsDir     Mac: the folder holding Cue.app (instead of the running bundle)
 //   installDir  Windows/Linux: the install folder (instead of the running one)
-//   platform, arch, execPath, env, isPackaged, updatesDir, publicKey, spawnFn, failAfterAside
-function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, spawnFn, failAfterAside, homedir = os.homedir() } = {}) {
+//   platform, arch, execPath, env, isPackaged, updatesDir, publicKey, launchFn, failAfterAside
+function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, launchFn, failAfterAside, homedir = os.homedir() } = {}) {
   const autoOn = () => (auto ? auto() !== false : true);
   const PLATFORM = platform || process.platform;
   const MAC = PLATFORM === 'darwin';
@@ -342,7 +342,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, pla
       const script = core.writeWinSwap(UPDATES);
       core.startWindowsSwap({
         script, waitPid: process.pid, live: where.live, staged, result: RESULT, version: state.latest || '',
-        relaunch: relaunch ? where.exe : '', failAfterAside, spawnFn,
+        relaunch: relaunch ? where.exe : '', failAfterAside, launchFn,
       });
       return true;
     } catch (e) { say(`swap: ${e.message}`); return false; }

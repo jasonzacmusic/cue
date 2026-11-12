@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile, spawn } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 // Paste the public key printed by `node scripts/feed-keygen.js` here. While
 // this placeholder is in place, Windows and Linux refuse every feed (and
@@ -289,10 +289,10 @@ function writeWinSwap(dir) {
   return out;
 }
 
-function startWindowsSwap({ script, waitPid, live, staged, result, version = '', relaunch = '', failAfterAside = false, timeoutSec = 90, spawnFn = spawn, env = process.env } = {}) {
+function startWindowsSwap({ script, waitPid, live, staged, result, version = '', relaunch = '', failAfterAside = false, timeoutSec = 90, launchFn = execFileSync, env = process.env } = {}) {
   // Pass the invocation as one PowerShell command. Script parameters like
   // -Version then belong to the script, never to powershell.exe itself.
-  const literal = (value) => "'" + String(value).replaceAll("'", "''") + "'";
+  const literal = (value) => "'" + String(value).replace(/['\u2018-\u201b]/g, "$&$&") + "'";
   const command = [
     '&', literal(script), '-WaitPid', literal(waitPid), '-Install', literal(live),
     '-Staged', literal(staged), '-Result', literal(result), '-Version', literal(version),
@@ -300,16 +300,19 @@ function startWindowsSwap({ script, waitPid, live, staged, result, version = '',
   ];
   if (relaunch) command.push('-Relaunch', literal(relaunch));
   if (failAfterAside) command.push('-FailAfterAside');
-  const encoded = Buffer.from(command.join(' ') + '; exit $LASTEXITCODE', 'utf16le').toString('base64');
-  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded];
-  // Windows keeps the child alive after its parent exits. Use a hidden
-  // process without DETACHED_PROCESS, which can make Windows PowerShell
-  // exit before executing the script. Its cwd must be outside the install.
-  const child = spawnFn(powershellPath(env), args, {
-    cwd: path.dirname(script), windowsHide: true, stdio: 'ignore',
+  const encode = (text) => Buffer.from(text, 'utf16le').toString('base64');
+  const workerArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
+    encode(command.join(' ') + '; exit $LASTEXITCODE');
+  const executable = powershellPath(env);
+  // Let Windows launch the independent worker. Wait for the launch to
+  // succeed, but let the worker wait for Cue to exit before swapping files.
+  const launch = [
+    'Start-Process', '-FilePath', literal(executable), '-ArgumentList', literal(workerArgs),
+    '-WorkingDirectory', literal(path.dirname(script)), '-WindowStyle', 'Hidden', '-ErrorAction', 'Stop',
+  ].join(' ');
+  launchFn(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encode(launch)], {
+    windowsHide: true, timeout: 10_000, stdio: 'pipe',
   });
-  child.unref();
-  return child;
 }
 
 function readResult(file) {

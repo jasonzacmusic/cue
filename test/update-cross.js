@@ -302,18 +302,21 @@ const settle = async (u) => {
       check('Linux: Install and reopen swaps the app and starts through its executable launcher',
         markerOf(home) === 'new 1.1.0' && relaunched.at(-1)?.execPath === launcher && !!(fs.statSync(launcher).mode & 0o111));
     } else {
-      // Windows: the updater hands the swap to win-swap.ps1, detached and hidden.
+      // Windows: Cue waits for the worker to start, then lets it wait for Cue.
       const calls = [];
-      const fakeSpawn = (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { unref() { calls[calls.length - 1].unref = true; } }; };
-      const w = make({ installDir: inst, updatesDir: upd, spawnFn: fakeSpawn });
+      const launchFn = (cmd, args, opts) => { calls.push({ cmd, args, opts }); };
+      const w = make({ installDir: inst, updatesDir: upd, launchFn });
       await w.check(); await settle(w);
       const did = w.installOnQuit();
       const c = calls[0] || { args: [], opts: {} };
-      check('Windows: at quit a hidden swap script is started and let go', did === true && c.opts.windowsHide === true && c.opts.stdio === 'ignore' && c.unref === true, c.opts);
-      const command = Buffer.from(c.args.at(-1), 'base64').toString('utf16le');
+      const launch = Buffer.from(c.args.at(-1) || '', 'base64').toString('utf16le');
+      const payload = /-EncodedCommand ([A-Za-z0-9+/=]+)'/.exec(launch)?.[1] || '';
+      const command = Buffer.from(payload, 'base64').toString('utf16le');
+      check('Windows: the hidden worker is launched independently', did === true &&
+        c.opts.windowsHide === true && launch.includes('Start-Process') && launch.includes('-WindowStyle Hidden'));
       check('Windows: it is told to wait for this process', command.includes(`-WaitPid '${process.pid}'`));
       check('Windows: the script runs from the update directory, outside the app being replaced',
-        c.opts.cwd === upd && fs.existsSync(path.join(upd, 'win-swap.ps1')));
+        launch.includes(`-WorkingDirectory '${upd}'`) && fs.existsSync(path.join(upd, 'win-swap.ps1')));
     }
   }
 
@@ -380,29 +383,16 @@ const settle = async (u) => {
   if (WIN) {
     const script = core.writeWinSwap(fresh('ps'));
     const runSwap = async ({ fail = false } = {}) => {
-      const root = fresh(fail ? 'win-rollback' : 'win-swap');
+      const root = fresh(fail ? 'win-rollback' : 'win swap’s result');
       const live = path.join(root, 'Cue'); fakeInstall(live, 'old');
       const staged = path.join(fresh('win-staged'), APPDIR); fakeInstall(staged, 'new');
       const result = path.join(root, 'swap-result.json');
       // The dummy "Cue": a process that lives for two seconds.
       const dummy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 2000)'], { stdio: 'ignore' });
       const started = Date.now();
-      let exited = false;
-      let launchError = '';
-      let exitStatus;
-      let output = '';
-      const spawnObserved = (cmd, args, opts) => {
-        const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
-        for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { output += chunk; });
-        child.on('error', (error) => { launchError = error.message; exited = true; });
-        child.on('close', (code, signal) => { exitStatus = signal || code; exited = true; });
-        return child;
-      };
-      core.startWindowsSwap({ script, waitPid: dummy.pid, live, staged, result, version: '1.1.0', failAfterAside: fail, timeoutSec: 30, spawnFn: spawnObserved });
-      for (let i = 0; i < 240 && !exited && !fs.existsSync(result); i += 1) await sleep(250);
-      const report = core.readResult(result);
-      if (!report) console.log('[cue-update-cross] Windows swap produced no result:', exitStatus, launchError || output.trim() || '(no PowerShell output)');
-      return { live, staged, result: report, waited: Date.now() - started };
+      core.startWindowsSwap({ script, waitPid: dummy.pid, live, staged, result, version: '1.1.0', failAfterAside: fail, timeoutSec: 30 });
+      for (let i = 0; i < 80 && !fs.existsSync(result); i += 1) await sleep(250);
+      return { live, staged, result: core.readResult(result), waited: Date.now() - started };
     };
     const a = await runSwap();
     check('Windows script: it waited for the dummy Cue to exit', a.waited >= 1800, a.waited);
@@ -420,7 +410,7 @@ const settle = async (u) => {
     const result = path.join(root, 'swap-result.json');
     const coreFile = path.join(ROOT, 'src', 'main', 'update-core.js');
     spawn(process.execPath, ['-e', `require(${JSON.stringify(coreFile)}).startWindowsSwap({ script: ${JSON.stringify(script)}, waitPid: process.pid, live: ${JSON.stringify(live)}, staged: ${JSON.stringify(staged)}, result: ${JSON.stringify(result)}, version: '1.1.0' }); setTimeout(() => process.exit(0), 1000);`], { stdio: 'ignore' });
-    for (let i = 0; i < 240 && !fs.existsSync(result); i += 1) await sleep(250);
+    for (let i = 0; i < 80 && !fs.existsSync(result); i += 1) await sleep(250);
     const rr = core.readResult(result);
     check('Windows script: it survives the quitting process that started it, then swaps', rr && rr.ok === true && markerOf(live) === 'new', rr);
   } else {
