@@ -288,6 +288,19 @@ const settle = async (u) => {
       next.clearLeftovers();
       check('next launch removes the old folder and the used staged copy', !fs.existsSync(`${inst}.old`) && !fs.existsSync(path.join(upd, '1.1.0')), fs.readdirSync(upd));
       running = '1.0.0';
+
+      // The in-app Install and reopen button uses the same launcher as the
+      // desktop entry so it works where Chromium needs the sandbox fallback.
+      const homedir = fresh('linux-manual-home');
+      const env = { XDG_DATA_HOME: path.join(homedir, 'data') };
+      const home = core.perUserHome('linux', env, homedir);
+      fakeInstall(home, 'old 1.0.0');
+      const manual = make({ installDir: home, updatesDir: fresh('linux-manual-update'), env, homedir });
+      await manual.check(); await settle(manual);
+      await manual.install();
+      const launcher = path.join(homedir, '.local', 'bin', 'cue');
+      check('Linux: Install and reopen swaps the app and starts through its executable launcher',
+        markerOf(home) === 'new 1.1.0' && relaunched.at(-1)?.execPath === launcher && !!(fs.statSync(launcher).mode & 0o111));
     } else {
       // Windows: the updater hands the swap to win-swap.ps1, detached and hidden.
       const calls = [];

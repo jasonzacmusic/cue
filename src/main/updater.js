@@ -21,6 +21,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const core = require('./update-core');
+const { ensureEntries } = require('./settle');
 
 const { newer, Plain } = core;
 const FEED = 'https://github.com/jasonzacmusic/labs-downloads/releases/download/downloads/cue-update.json';
@@ -90,7 +91,7 @@ function defaultUpdatesDir() {
 //   appsDir     Mac: the folder holding Cue.app (instead of the running bundle)
 //   installDir  Windows/Linux: the install folder (instead of the running one)
 //   platform, arch, execPath, env, isPackaged, updatesDir, publicKey, spawnFn, failAfterAside
-function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, spawnFn, failAfterAside } = {}) {
+function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, spawnFn, failAfterAside, homedir = os.homedir() } = {}) {
   const autoOn = () => (auto ? auto() !== false : true);
   const PLATFORM = platform || process.platform;
   const MAC = PLATFORM === 'darwin';
@@ -376,8 +377,16 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, pla
       app.exit(0);
       return state;
     }
+    let launcher = where.exe;
+    // Use the same launcher as the apps menu. It selects the sandbox mode
+    // before the new Chromium process starts, including on current Ubuntu.
+    const launchEnv = env || process.env;
+    if (live === core.perUserHome('linux', launchEnv, homedir)) {
+      try { launcher = ensureEntries({ platform: 'linux', home: live, env: launchEnv, homedir }).launcher; }
+      catch (e) { say(e); push({ state: 'error', error: SAY.install }); return state; }
+    }
     if (!linuxSwap(where)) { push({ state: 'error', error: SAY.install }); return state; }
-    app.relaunch({ execPath: path.join(live, 'Cue'), args: process.argv.slice(1) });
+    app.relaunch({ execPath: launcher, args: process.argv.slice(1) });
     app.exit(0);
     return state;
   }
