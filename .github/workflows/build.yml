@@ -206,7 +206,11 @@ jobs:
         run: |
           VERSION="${TAG#v}"
           VERSION="${VERSION%%+*}"
-          node scripts/feed-write.js "$VERSION" dist
+          NOTES=""
+          if [ "$(git cat-file -t "refs/tags/$TAG" 2>/dev/null || true)" = tag ]; then
+            NOTES="$(git for-each-ref --format='%(contents)' "refs/tags/$TAG")"
+          fi
+          node scripts/feed-write.js "$VERSION" dist "$NOTES"
           # Fixed names, so the Labs page can link releases/latest/download/<name> for ever.
           cp "dist/Cue-${VERSION}-win-x64.zip" dist/Cue-win-x64.zip
           cp "dist/Cue-${VERSION}-linux-x64.tar.gz" dist/Cue-linux-x64.tar.gz
@@ -221,5 +225,8 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" dist/* --title "Cue ${TAG#v}" --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+            NOTES="$(jq -r .notes dist/cue-feed.json)"
+            NOTE_FLAGS=(--generate-notes)
+            if [ -n "$NOTES" ]; then NOTE_FLAGS=(--notes "$NOTES"); fi
+            gh release create "$TAG" dist/* --title "Cue ${TAG#v}" "${NOTE_FLAGS[@]}" --verify-tag --repo "$GITHUB_REPOSITORY"
           fi
