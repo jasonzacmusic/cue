@@ -372,9 +372,21 @@ const settle = async (u) => {
       // The dummy "Cue": a process that lives for two seconds.
       const dummy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 2000)'], { stdio: 'ignore' });
       const started = Date.now();
-      core.startWindowsSwap({ script, waitPid: dummy.pid, live, staged, result, version: '1.1.0', failAfterAside: fail, timeoutSec: 30 });
-      for (let i = 0; i < 240 && !fs.existsSync(result); i += 1) await sleep(250);
-      return { live, staged, result: core.readResult(result), waited: Date.now() - started };
+      let exited = false;
+      let launchError = '';
+      let output = '';
+      const spawnObserved = (cmd, args, opts) => {
+        const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+        for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { output += chunk; });
+        child.on('error', (error) => { launchError = error.message; exited = true; });
+        child.on('close', () => { exited = true; });
+        return child;
+      };
+      core.startWindowsSwap({ script, waitPid: dummy.pid, live, staged, result, version: '1.1.0', failAfterAside: fail, timeoutSec: 30, spawnFn: spawnObserved });
+      for (let i = 0; i < 240 && !exited && !fs.existsSync(result); i += 1) await sleep(250);
+      const report = core.readResult(result);
+      if (!report) console.log('[cue-update-cross] Windows swap produced no result:', launchError || output.trim() || '(no PowerShell output)');
+      return { live, staged, result: report, waited: Date.now() - started };
     };
     const a = await runSwap();
     check('Windows script: it waited for the dummy Cue to exit', a.waited >= 1800, a.waited);
