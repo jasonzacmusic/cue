@@ -91,6 +91,7 @@ jobs:
       # surviving the process that started it). It fails while
       # FEED_PUBLIC_KEY is still the placeholder, on purpose.
       - name: Update tests (signed feed, swap and roll-back)
+        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
         env:
           CUE_UPDATE_TMP: ${{ runner.temp }}
         run: node test/update-cross.js
