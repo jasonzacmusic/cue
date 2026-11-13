@@ -2,7 +2,9 @@
 // menu and the list in Settings all read this, so the three can never say different things.
 //
 // "Mod" is Command on a Mac and Ctrl on Windows and Linux; "Ctrl" is Ctrl everywhere. The first
-// key in a row is the one shown; the rest are aliases that keep older keys working.
+// key in a row is the one shown; the rest are aliases that keep older keys working. `mac` and
+// `pc` are extra aliases that only work on that kind of computer. "Ctrl+Mod" means Control AND
+// Command held together (a Mac only).
 //
 // Picked against the main menu (main.js buildMenu). Cmd+Shift+P is Pop Out Tab, Cmd+Shift+M the
 // Music Bar and Cmd+Shift+F Grab Video Frame there, so Vanish uses the nearest free ones:
@@ -19,7 +21,8 @@ const VANISH_KEYS = [
   { id: 'play', label: 'Play or pause', keys: ['Mod+Shift+K'] },
   { id: 'mute', label: 'Mute or unmute this tab', keys: ['Mod+Shift+A'] },
   { id: 'find', label: 'Find on this page', keys: ['Mod+F'] },
-  { id: 'full', label: 'Full screen on or off', keys: ['Mod+Alt+F'] },
+  // Plus each system's own full-screen key: Ctrl+Cmd+F on a Mac, F11 on Windows and Linux.
+  { id: 'full', label: 'Full screen on or off', keys: ['Mod+Alt+F'], mac: ['Ctrl+Mod+F'], pc: ['F11'] },
   { id: 'leave', label: 'Leave full screen', keys: ['Escape'] },
   { id: 'forget', label: 'Close Vanish and forget everything', keys: ['Mod+Shift+W'] },
   { id: 'address', label: 'Type an address', keys: ['Mod+L'] },
@@ -41,9 +44,11 @@ const CODES = { BracketLeft: '[', BracketRight: ']', Equal: '=', Minus: '-', Tab
 function parse(spec) {
   const parts = spec.split('+');
   const key = parts.pop().toLowerCase();
-  return { mod: parts.includes('Mod') || parts.includes('Ctrl'), shift: parts.includes('Shift'), alt: parts.includes('Alt'), key: NAMES[key] || key };
+  return { mod: parts.includes('Mod') || parts.includes('Ctrl'), both: parts.includes('Mod') && parts.includes('Ctrl'), shift: parts.includes('Shift'), alt: parts.includes('Alt'), key: NAMES[key] || key };
 }
-const PARSED = VANISH_KEYS.flatMap((row) => row.keys.map((spec) => ({ row, spec, ...parse(spec) })));
+const allKeys = (row, mac) => [...row.keys, ...((mac ? row.mac : row.pc) || [])];
+const PARSED = {};
+const parsed = (mac) => PARSED[mac] || (PARSED[mac] = VANISH_KEYS.flatMap((row) => allKeys(row, mac).map((spec) => ({ row, spec, ...parse(spec) }))));
 
 // The key an input event means, whatever Shift or Option did to the character. Option+F on a Mac
 // arrives as "ƒ" and Shift+] as "}", so the physical key is used when one of those is held.
@@ -60,11 +65,13 @@ function keyOf(input) {
 }
 
 // Ctrl and Command both count as the modifier, as they always have in Vanish (Ctrl+T works on a Mac).
-function match(input) {
+// Holding both at once is its own key ("Ctrl+Mod"), so Ctrl+Cmd+F is full screen and not Find.
+function match(input, mac = process.platform === 'darwin') {
   if (!input || input.type !== 'keyDown') return null;
-  const mod = !!(input.meta || input.control); const shift = !!input.shift; const alt = !!input.alt;
+  const mod = !!(input.meta || input.control); const both = !!(input.meta && input.control);
+  const shift = !!input.shift; const alt = !!input.alt;
   const key = keyOf(input);
-  const hit = PARSED.find((p) => p.key === key && p.mod === mod && p.shift === shift && p.alt === alt);
+  const hit = parsed(mac).find((p) => p.key === key && p.mod === mod && (p.both ? both : true) && p.shift === shift && p.alt === alt && (both && mac ? p.both : true));
   return hit ? { id: hit.row.id, spec: hit.spec, n: hit.row.id === 'goto' ? Number(hit.key) : undefined } : null;
 }
 
@@ -82,4 +89,4 @@ function display(spec, mac = process.platform === 'darwin') {
 // The list Settings and the menu show: one line per job, the first key only.
 function shown(mac) { return VANISH_KEYS.map((r) => ({ id: r.id, label: r.label, keys: display(r.show || r.keys[0], mac) })); }
 
-module.exports = { VANISH_KEYS, match, display, shown };
+module.exports = { VANISH_KEYS, match, display, shown, allKeys };

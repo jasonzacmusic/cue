@@ -29,7 +29,7 @@ class Store {
     clearTimeout(this.timer);
     const tmp = this.file + '.tmp';
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 }); // tabs and settings are nobody else's to read
     fs.renameSync(tmp, this.file);
   }
 }

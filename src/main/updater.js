@@ -93,7 +93,7 @@ function defaultUpdatesDir() {
 //   appsDir     Mac: the folder holding Cue.app (instead of the running bundle)
 //   installDir  Windows/Linux: the install folder (instead of the running one)
 //   platform, arch, execPath, env, isPackaged, updatesDir, publicKey, launchFn, failAfterAside
-function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, launchFn, failAfterAside, homedir = os.homedir() } = {}) {
+function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, feedUrl, platform, arch, execPath, env, isPackaged, updatesDir, installDir, publicKey, launchFn, failAfterAside, homedir = os.homedir() } = {}) {
   const autoOn = () => (auto ? auto() !== false : true);
   const PLATFORM = platform || process.platform;
   const MAC = PLATFORM === 'darwin';
@@ -358,6 +358,13 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, pla
     return true;
   }
 
+  // app.exit skips the browser's own goodbye, so the tabs and any sign-in made a moment ago are
+  // written to disk first. A few seconds at most; a slow disk never holds the update back.
+  async function settleFirst() {
+    if (!beforeExit) return;
+    try { await Promise.race([Promise.resolve().then(beforeExit), new Promise((r) => setTimeout(r, 4000))]); } catch (e) { say(e); }
+  }
+
   // The only step that closes Cue, and only ever because you clicked it.
   async function install() {
     if (state.state !== 'ready' || !staged) return state;
@@ -370,12 +377,14 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, pla
     if (MAC) {
       if (!stillOurs()) { push({ state: 'idle', error: '' }); return state; }
       if (!swapMac(live)) { push({ state: 'error', error: SAY.install }); return state; }
+      await settleFirst();
       app.relaunch({ execPath: path.join(live, 'Contents', 'MacOS', 'Cue') });
       app.exit(0);
       return state;
     }
     if (PLATFORM === 'win32') {
       if (!winSwap(where, true)) { push({ state: 'error', error: SAY.install }); return state; }
+      await settleFirst();
       app.exit(0);
       return state;
     }
@@ -388,6 +397,7 @@ function createUpdater({ onState, canInterrupt, log, auto, appsDir, feedUrl, pla
       catch (e) { say(e); push({ state: 'error', error: SAY.install }); return state; }
     }
     if (!linuxSwap(where)) { push({ state: 'error', error: SAY.install }); return state; }
+    await settleFirst();
     app.relaunch({ execPath: launcher, args: process.argv.slice(1) });
     app.exit(0);
     return state;

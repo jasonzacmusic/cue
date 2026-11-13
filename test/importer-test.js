@@ -333,8 +333,23 @@ try {
       eq('getKey service names', svc, { chrome: 'Chrome Safe Storage', brave: 'Brave Safe Storage', edge: 'Microsoft Edge Safe Storage', arc: 'Arc Safe Storage' });
       eq('getKey mac denied -> null', await imp.getKey({ id: 'helium' }, { platform: 'darwin', exec: (f, a, o, cb) => cb(new Error('denied')) }), null);
       eq('getKey mac unknown browser -> null', await imp.getKey({ id: 'netscape' }, { platform: 'darwin', exec: fake }), null);
-      const lk = await imp.getKey({ id: 'chrome' }, { platform: 'linux' });
-      check('getKey linux = PBKDF2 peanuts, 1 round', lk.equals(crypto.pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1')));
+      const PEANUTS = crypto.pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1');
+      const noKeyring = (f, a, o, cb) => cb(new Error('secret-tool: not found'));
+      const lk = await imp.getKey({ id: 'chrome' }, { platform: 'linux', exec: noKeyring });
+      check('getKey linux with no keyring = PBKDF2 peanuts, 1 round', Buffer.isBuffer(lk) && lk.equals(PEANUTS));
+      const asked = [];
+      const ring = (f, a, o, cb) => { asked.push([f, ...a, o.timeout]); a[2] === 'chromium' ? cb(null, 'ring-secret\n') : cb(new Error('no such item')); };
+      const rk = await imp.getKey({ id: 'chrome' }, { platform: 'linux', exec: ring });
+      eq('getKey linux asks secret-tool for chrome, then chromium, 3 s each', asked, [['secret-tool', 'lookup', 'application', 'chrome', 3000], ['secret-tool', 'lookup', 'application', 'chromium', 3000]]);
+      const RING = crypto.pbkdf2Sync('ring-secret', 'saltysalt', 1, 16, 'sha1');
+      check('getKey linux with a keyring: v10 stays peanuts, v11 is the keyring password', rk && rk.v10.equals(PEANUTS) && rk.v11.equals(RING));
+      eq('linux keys: a v11 value decrypts with the keyring key', imp.decryptValue(encrypt(Buffer.from('ring'), RING, 'v11'), rk), 'ring');
+      eq('linux keys: a v10 value still decrypts with peanuts', imp.decryptValue(encrypt(Buffer.from('nuts'), PEANUTS, 'v10'), rk), 'nuts');
+      eq('linux keys: control - a v11 value made with peanuts does not decrypt as the keyring\'s', imp.decryptValue(encrypt(Buffer.from('nuts'), PEANUTS, 'v11'), rk) === 'nuts', false);
+      const bk = []; await imp.getKey({ id: 'brave' }, { platform: 'linux', exec: (f, a, o, cb) => { bk.push(a[2]); cb(null, ''); } });
+      eq('getKey linux brave asks for "brave"; an empty answer is no keyring', bk, ['brave']);
+      const ek = await imp.getKey({ id: 'edge' }, { platform: 'linux', exec: () => { throw new Error('must not run'); } });
+      check('getKey linux edge: no keyring name known, peanuts only', Buffer.isBuffer(ek) && ek.equals(PEANUTS));
       eq('getKey windows -> null', await imp.getKey({ id: 'chrome' }, { platform: 'win32' }), null);
       eq('getKey safari -> null', await imp.getKey({ id: 'safari' }, { platform: 'darwin', exec: fake }), null);
 

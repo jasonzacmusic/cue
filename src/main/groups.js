@@ -21,7 +21,7 @@ const GROUPS = [
   },
   {
     id: 'social', name: 'Social',
-    hosts: ['instagram.com', 'facebook.com', 'threads.net', 'linkedin.com', 'x.com', 'twitter.com', 'pinterest.com', 'whatsapp.com', 'patreon.com'],
+    hosts: ['instagram.com', 'facebook.com', 'threads.net', 'threads.com', 'linkedin.com', 'x.com', 'twitter.com', 'pinterest.com', 'whatsapp.com', 'patreon.com'],
   },
   { id: 'code', name: 'Code', hosts: ['github.com', 'gitlab.com', 'npmjs.com', 'stackoverflow.com'] },
   {

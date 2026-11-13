@@ -384,11 +384,38 @@ const settle = async (u) => {
       const launcher = path.join(homedir, '.local', 'bin', 'cue');
       check('settle: a .desktop entry pointing at the launcher', fs.existsSync(desktop) && fs.readFileSync(desktop, 'utf8').includes(`Exec="${launcher}"`));
       check('settle: an executable launcher that only turns the sandbox off where the system forbids it',
-        (fs.statSync(launcher).mode & 0o111) && /apparmor_restrict_unprivileged_userns/.test(fs.readFileSync(launcher, 'utf8')) && fs.readFileSync(launcher, 'utf8').includes(`CUE_HOME="${home}"`));
+        (fs.statSync(launcher).mode & 0o111) && /apparmor_restrict_unprivileged_userns/.test(fs.readFileSync(launcher, 'utf8')) && fs.readFileSync(launcher, 'utf8').includes(`CUE_HOME='${home.replace(/'/g, "'\\''")}'`));
       check('settle: Linux relaunches through the launcher', r.relaunch.execPath === launcher);
     }
     const again = await settleMod.settle({ app: fakeApp, shell: fakeShell, platform: P, execPath: path.join(home, EXE), env, homedir });
     check('settle: from its home it does nothing more (idempotent)', !again.relaunch && fs.existsSync(path.join(home, EXE)));
+  }
+
+  // ------------------------------------------------------------- Linux launcher and menu entry: awkward home folders
+  {
+    const odd = "/home/Jo Ann's $HOME";
+    const text = settleMod.linuxLauncher(odd);
+    check('launcher: a home with a space, a \' and a $ is single-quoted and escaped', text.includes(`CUE_HOME='/home/Jo Ann'\\''s $HOME'`), text.split('\n').find((l) => l.startsWith('CUE_HOME')));
+    check('launcher: switching the sandbox off also says so to Cue', /NOSANDBOX="--no-sandbox"\n[^]*CUE_LINUX_UNSANDBOXED=1\n\s*export CUE_LINUX_UNSANDBOXED\nfi/.test(text));
+    check('launcher: control - the sandbox test itself is unchanged', /apparmor_restrict_unprivileged_userns 2>\/dev\/null\)" = "1" \]/.test(text) && /exec "\$CUE_HOME\/Cue" \$NOSANDBOX "\$@"/.test(text));
+    if (!WIN) {
+      // Run the real launcher against a stand-in Cue in such a folder: the shell must find it.
+      const base = fresh('launcher odd');
+      const home = path.join(base, "Jo Ann's $HOME");
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, 'Cue'), '#!/bin/sh\necho "ran:$1:${CUE_LINUX_UNSANDBOXED:-on}"\n', { mode: 0o755 });
+      const script = path.join(base, 'cue');
+      fs.writeFileSync(script, settleMod.linuxLauncher(home), { mode: 0o755 });
+      let out = '';
+      try { out = execFileSync('/bin/sh', [script, 'hello'], { encoding: 'utf8', env: { PATH: process.env.PATH } }).trim(); } catch (e) { out = String(e.message); }
+      // Where the system forbids the sandbox, the stand-in sees --no-sandbox first and the flag set.
+      check('launcher: really starts Cue from a home with a space, a \' and a $', out === 'ran:hello:on' || out === 'ran:--no-sandbox:1', out);
+    }
+    const entry = settleMod.desktopEntry("/home/Jo Ann's $HOME/a\\b\"c`d%e/.local/bin/cue", "/home/Jo Ann's $HOME/a\\b/icon.png");
+    check('menu entry: Exec is quoted with " ` $ \\ escaped, backslashes doubled and % doubled',
+      entry.includes('Exec="/home/Jo Ann\'s ' + '\\\\$HOME/a' + '\\\\\\\\b' + '\\\\"c' + '\\\\`d%%e/.local/bin/cue" %U'), entry.split('\n').find((l) => l.startsWith('Exec')));
+    check('menu entry: Icon is a plain string with its backslash doubled', entry.includes('Icon=/home/Jo Ann\'s $HOME/a' + '\\\\' + 'b/icon.png'), entry.split('\n').find((l) => l.startsWith('Icon')));
+    check('menu entry: control - an ordinary path is written as before', settleMod.desktopEntry('/home/u/.local/bin/cue', '/home/u/i.png').includes('Exec="/home/u/.local/bin/cue" %U\nIcon=/home/u/i.png\n'));
   }
 
   // ------------------------------------------------------------- Windows: the real swap script

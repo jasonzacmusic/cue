@@ -39,43 +39,74 @@ const mimeOf = (file) => MIME[path.extname(file).toLowerCase()] || 'application/
 // Photos and videos go to WhatsApp as media; everything else as a document.
 const isMedia = (file) => /^(image|video)\//.test(mimeOf(file)) && !/svg/.test(mimeOf(file));
 const human = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
-const within = (p, dir) => { const rel = path.relative(dir, p); return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel)); };
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 
-// The rule, in one place: a page gets a file only from the computer user's own home, from /tmp,
-// or from a mounted volume the path names. Never the computer's own settings, keys or keychains,
-// and never Cue's own data folder (that is where its sign-ins and passwords live).
+// The rule, in one place: a page gets a file only from the computer user's own home, from the
+// temp folder, or from a plugged-in drive the path names. Never the computer's own settings, keys
+// or keychains, and never Cue's own data folder (that is where its sign-ins and passwords live).
 // `exempt`: folders inside a protected one that are still fine (Downloads, when a test puts it there).
-function vetFiles(list, { protectedDirs = [], exempt = [], home = os.homedir() } = {}) {
+// `platform`, `env`, `home` and `tmp` can be given, so the Windows and Linux rules are tested on a Mac.
+function pathRules({ protectedDirs = [], exempt = [], home = os.homedir(), platform = process.platform, env = process.env, tmp } = {}) {
+  const P = platform === 'win32' ? path.win32 : path.posix;
+  const host = P === path;
+  const real = (p) => (host ? realOr(p) : p);
+  const inside = (p, dir) => { const rel = P.relative(dir, p); return rel === '' || (!!rel && !rel.startsWith('..') && !P.isAbsolute(rel)); };
+  const homes = [...new Set([home, real(home)])];
+  const temps = platform === 'win32'
+    ? [tmp || (host ? os.tmpdir() : env.TEMP || env.TMP || P.join(home, 'AppData', 'Local', 'Temp'))].filter(Boolean).flatMap((d) => [d, real(d)])
+    : ['/tmp', '/private/tmp', ...(tmp ? [tmp] : [])];
+  const settings = 'it holds this computer\'s own settings, passwords and app data';
+  const system = [
+    ...homes.flatMap((h) => ['Library', 'AppData', 'snap', '.config', '.local'].map((d) => [P.join(h, d), settings])),
+    ...[env.APPDATA, env.LOCALAPPDATA].filter(Boolean).map((d) => [d, settings]),
+    ...homes.flatMap((h) => ['.ssh', '.gnupg', '.aws'].map((d) => [P.join(h, d), 'it holds this computer\'s private keys'])),
+    ...(platform === 'win32'
+      ? ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData', env.SystemRoot, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData]
+        .filter(Boolean).map((d) => [d, 'it is part of Windows or an installed program'])
+      : []),
+  ];
+  const cueData = protectedDirs.filter(Boolean).flatMap((d) => [d, real(d)]);
+  const spared = exempt.filter(Boolean).flatMap((d) => [d, real(d)]);
+  const why = (p) => {
+    if (/(^|[\\/])Keychains([\\/]|$)|\.keychain(-db)?$/i.test(p)) return 'it is a keychain';
+    // The Windows temp folder lives inside AppData\Local, and stays allowed.
+    const hit = system.find(([d]) => inside(p, d) && !temps.some((t) => inside(p, t)));
+    if (hit) return hit[1];
+    if (cueData.some((d) => inside(p, d)) && !spared.some((d) => inside(p, d))) return 'it is Cue\'s own data folder, where its sign-ins and passwords are kept';
+    return '';
+  };
+  const allowedRoot = (p) => homes.some((h) => inside(p, h))
+    || temps.some((d) => inside(p, d))
+    || (platform === 'darwin' && /^\/Volumes\/[^/]+\/./.test(p))
+    || (platform === 'linux' && (/^\/(media|mnt)\/[^/]+\/./.test(p) || /^\/run\/media\/[^/]+\/[^/]+\/./.test(p)))
+    // Another drive (D: to Z:) is fine; C: is Windows' own, apart from the home and temp folders.
+    || (platform === 'win32' && /^[D-Z]:\\[^\\]/i.test(p));
+  const where = platform === 'win32' ? 'your home folder, the temp folder or another drive (D: to Z:)'
+    : platform === 'linux' ? 'your home folder, /tmp or a plugged-in drive under /media, /mnt or /run/media'
+      : 'your home folder, /tmp or a mounted drive under /Volumes';
+  return { P, why, allowedRoot, where };
+}
+
+// One path against the rules, by name only (nothing on disk is looked at): the reason it is
+// refused, or '' when it may go to a page. For tests of the other systems' rules.
+function pathRefusal(p, opts) {
+  const r = pathRules(opts);
+  return r.why(p) || (r.allowedRoot(p) ? '' : `outside ${r.where}`);
+}
+
+function vetFiles(list, opts = {}) {
+  const home = opts.home || os.homedir();
+  const { P, why, allowedRoot, where } = pathRules({ ...opts, home });
   if (typeof list === 'string') list = [list];
   if (!Array.isArray(list) || !list.length) throw new Error('Say which files: "files" is a list of full paths on this computer, such as ["/Users/you/Downloads/Invoice.pdf"]. Nothing was attached.');
   if (list.length > MAX_FILES) throw new Error(`That is ${list.length} files; Cue attaches at most ${MAX_FILES} in one call. Nothing was attached.`);
-  const homes = [...new Set([home, realOr(home)])];
-  const system = [
-    ...homes.map((h) => [path.join(h, 'Library'), 'it holds this computer\'s own settings, passwords and app data']),
-    ...homes.flatMap((h) => ['.ssh', '.gnupg', '.aws'].map((d) => [path.join(h, d), 'it holds this computer\'s private keys'])),
-  ];
-  const cueData = protectedDirs.filter(Boolean).flatMap((d) => [d, realOr(d)]);
-  const spared = exempt.filter(Boolean).flatMap((d) => [d, realOr(d)]);
-  const why = (p) => {
-    if (/(^|[\\/])Keychains([\\/]|$)|\.keychain(-db)?$/i.test(p)) return 'it is a keychain';
-    const hit = system.find(([d]) => within(p, d));
-    if (hit) return hit[1];
-    if (cueData.some((d) => within(p, d)) && !spared.some((d) => within(p, d))) return 'it is Cue\'s own data folder, where its sign-ins and passwords are kept';
-    return '';
-  };
-  const allowedRoot = (p) => homes.some((h) => within(p, h))
-    || ['/tmp', '/private/tmp'].some((d) => within(p, d))
-    || (process.platform === 'darwin' && /^\/Volumes\/[^/]+\/./.test(p))
-    || (process.platform === 'linux' && /^\/(media|mnt)\/[^/]+\/./.test(p))
-    || (process.platform === 'win32' && within(p, os.tmpdir()));
   const seen = new Set();
   return list.map((raw) => {
     if (typeof raw !== 'string' || !raw.trim()) throw new Error('Every entry in "files" must be a full path, as text. Nothing was attached.');
     let p = raw.trim();
-    if (p === '~' || p.startsWith('~/')) p = path.join(home, p.slice(1));
-    if (!path.isAbsolute(p)) throw new Error(`“${raw}” is not a full path. Give the whole path, starting with / (or ~/). Nothing was attached.`);
-    p = path.resolve(p);
+    if (p === '~' || p.startsWith('~/') || (P === path.win32 && p.startsWith('~\\'))) p = P.join(home, p.slice(1));
+    if (!P.isAbsolute(p)) throw new Error(`“${raw}” is not a full path. Give the whole path, starting with / (or ~/). Nothing was attached.`);
+    p = P.resolve(p);
     // Refused by name first, so a guarded file is never even looked at.
     let bad = why(p);
     if (bad) throw new Error(`Cue will not give a web page anything from ${p}: ${bad}. Nothing was attached.`);
@@ -83,7 +114,7 @@ function vetFiles(list, { protectedDirs = [], exempt = [], home = os.homedir() }
     try { real = fs.realpathSync(p); } catch { throw new Error(`There is no file at ${p}. Nothing was attached.`); }
     bad = why(real);
     if (bad) throw new Error(`Cue will not give a web page ${p}: it leads to ${real}, and ${bad}. Nothing was attached.`);
-    if (!allowedRoot(real)) throw new Error(`Cue only attaches files from your home folder, /tmp or a mounted drive under /Volumes. ${p} is outside them. Nothing was attached.`);
+    if (!allowedRoot(real)) throw new Error(`Cue only attaches files from ${where}. ${p} is outside them. Nothing was attached.`);
     let st;
     try { st = fs.statSync(real); } catch { throw new Error(`Cue could not look at ${p}. Nothing was attached.`); }
     if (st.isDirectory()) throw new Error(`${p} is a folder. Attach the files inside it one by one (or zip it first). Nothing was attached.`);
@@ -438,4 +469,4 @@ function sayAttached(r, files) {
   return { text: lines.join('\n'), confirmed };
 }
 
-module.exports = { vetFiles, trackFrames, makeAttach, sayAttached, accepts, isMedia, mimeOf, human, MAX_FILES };
+module.exports = { vetFiles, pathRefusal, trackFrames, makeAttach, sayAttached, accepts, isMedia, mimeOf, human, MAX_FILES };

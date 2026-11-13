@@ -5,6 +5,7 @@
 // history, bookmarks or search suggestions. main.js always reaches the library through
 // lib.in(folder); the bare methods on Library work on "personal", the folder every older Cue
 // filed everything under, so code that predates folders still reads what it always read.
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
@@ -14,6 +15,7 @@ const LEGACY = 'personal';
 class Library {
   constructor(dir) {
     this.db = new DatabaseSync(path.join(dir, 'cue-library.db'));
+    try { fs.chmodSync(path.join(dir, 'cue-library.db'), 0o600); } catch {} // history is for this login only
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS history (folder TEXT NOT NULL DEFAULT 'personal', url TEXT, title TEXT, visits INTEGER DEFAULT 1, last INTEGER, host TEXT, PRIMARY KEY (folder, url));

@@ -50,8 +50,11 @@ packager({
     // running Cue as a plain script host. Flipping them rewrites castLabs' engine
     // file, and castLabs will only put their Widevine signature on an engine they
     // recognise byte for byte - without that signature Netflix refuses to play.
-    // On a Mac the two cannot both be had, and Jason chose Netflix (5 Nov 2026).
-    // Windows and Linux keep every fuse; nothing there needs the castLabs signature.
+    // On a Mac the two cannot both be had, and Jason chose Netflix (5 Nov 2026), so the
+    // normal Mac build ships with NO fuses flipped. They are flipped here only when
+    // CUE_NO_VMP is set (a Mac build that gives up Netflix), or if this script is ever
+    // run on a computer that is not a Mac. The Windows and Linux builds flip their own
+    // fuses in build-win.js and build-linux.js, without the two asar ones.
     if (process.platform !== 'darwin' || process.env.CUE_NO_VMP) {
       await flipFuses(path.resolve(buildPath, '..', '..', '..'), {
         version: FuseVersion.V1,

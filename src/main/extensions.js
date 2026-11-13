@@ -10,7 +10,7 @@ const path = require('path');
 // Worst first, because only the first three are shown.
 const CAN = {
   debugger: 'take complete control of any page',
-  nativeMessaging: 'talk to other software on your Mac',
+  nativeMessaging: 'talk to other software on your computer',
   proxy: 'send everything you load through a server of its own',
   cookies: 'read the cookies that keep you signed in',
   identity: 'sign in as you',

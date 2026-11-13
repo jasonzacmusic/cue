@@ -28,6 +28,10 @@ const same = (a, b, platform) => {
   return platform === 'win32' ? n(a).toLowerCase() === n(b).toLowerCase() : n(a) === n(b);
 };
 
+// The home folder goes into the shell script inside single quotes, where nothing is special
+// except the single quote itself, which is closed, escaped and reopened: ' becomes '\''.
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
 // Chromium's sandbox needs unprivileged user namespaces. Ubuntu 23.10 and later
 // (AppArmor `apparmor_restrict_unprivileged_userns=1`) refuse them to any app
 // without its own AppArmor profile, and a copy in a home folder cannot install
@@ -39,24 +43,33 @@ function linuxLauncher(home) {
 # Chromium's sandbox needs unprivileged user namespaces. Where the system
 # refuses them (Ubuntu 23.10+ AppArmor restriction, or the sysctls below set to
 # 0), Cue starts with --no-sandbox; everywhere else the sandbox stays on.
-CUE_HOME="${home}"
+CUE_HOME=${shQuote(home)}
 NOSANDBOX=""
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ] \\
   || [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" = "0" ] \\
   || [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)" = "0" ]; then
   NOSANDBOX="--no-sandbox"
+  # Cue reads this and tells the person the sandbox is off on this computer.
+  CUE_LINUX_UNSANDBOXED=1
+  export CUE_LINUX_UNSANDBOXED
 fi
 exec "$CUE_HOME/Cue" $NOSANDBOX "$@"
 `;
 }
 
+// A .desktop file has two layers of escaping (freedesktop Desktop Entry spec, "The Exec key").
+// First a quoted argument: inside "...", the characters " ` $ and \ each take a backslash.
+// Then the whole value is a string, where every backslash is written twice. A % is doubled
+// too, since %U and friends are Exec's own codes. Icon= is a plain string: only that second layer.
+const deskString = (s) => String(s).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/\r/g, '\\r').replace(/^ /, '\\s');
+const execArg = (s) => deskString(`"${String(s).replace(/["`$\\]/g, (c) => `\\${c}`)}"`).replace(/%/g, '%%');
 function desktopEntry(launcher, icon) {
   return `[Desktop Entry]
 Type=Application
 Name=Cue
 Comment=The Nathaniel School of Music browser
-Exec="${launcher}" %U
-Icon=${icon}
+Exec=${execArg(launcher)} %U
+Icon=${deskString(icon)}
 Terminal=false
 Categories=Network;WebBrowser;
 StartupWMClass=Cue

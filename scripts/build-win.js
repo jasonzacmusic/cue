@@ -2,6 +2,7 @@
 // Meant to run in CI (see .github/workflows/build.yml); packager downloads the Windows Electron itself.
 // Usage: node scripts/build-win.js            -> build/Cue-win32-x64/Cue.exe
 const { packager } = require('@electron/packager');
+const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
@@ -35,5 +36,20 @@ packager({
     InternalName: 'Cue',
     OriginalFilename: 'Cue.exe',
   },
-}).then((paths) => console.log('built', paths.join(', ')))
+}).then(async (paths) => {
+  // The fuses stop another program running Cue as a plain script host (and borrowing what the
+  // computer lets Cue do), and keep its cookies encrypted on disk. Asar integrity and
+  // "only load from asar" stay off: these builds embed no integrity hash, so with them on
+  // Cue could refuse to start. The Mac build has no fuses at all; see build-mac.js.
+  for (const dir of paths) {
+    await flipFuses(path.join(dir, 'Cue.exe'), {
+      version: FuseVersion.V1,
+      [FuseV1Options.RunAsNode]: false,
+      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+      [FuseV1Options.EnableNodeCliInspectArguments]: false,
+      [FuseV1Options.EnableCookieEncryption]: true,
+    });
+  }
+  console.log('built', paths.join(', '));
+})
   .catch((e) => { console.error(e); process.exit(1); });

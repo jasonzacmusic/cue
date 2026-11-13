@@ -263,11 +263,11 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     wc.setWindowOpenHandler(({ url: u, disposition }) => {
       if (refuseOpen(u, wc.getURL())) return { action: 'deny' };
       const where = whereToOpen(u, disposition, wc.getURL());
-      if (where === 'popup') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, webPreferences: { session: session() } } };
+      if (where === 'popup') return { action: 'allow', overrideBrowserWindowOptions: popupOptions() };
       if (where === 'here') wc.loadURL(guardUrl(u)).catch(() => {}); else add(u, { from: t, background: disposition === 'background-tab' });
       return { action: 'deny' };
     });
-    wc.on('did-create-window', (popup) => popup.setContentProtection(pref('vanishHideFromCapture') !== false));
+    wc.on('did-create-window', wirePopup);
     wc.on('found-in-page', (_e, r) => { if (ui && !ui.webContents.isDestroyed() && activeId === t.id) ui.webContents.send('vanish:find-result', { active: r.activeMatchOrdinal, total: r.matches }); });
     // Cue's own pages (Library, Bills, Boards) hold his history and his money; none of them opens
     // in here. The one exception is the dangerous-site warning, which Cue itself puts up.
@@ -278,6 +278,28 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (behind) { layout(); state(); } else activate(t.id);
     if (!url) focusBar();
     return t;
+  }
+
+  // A Vanish "Sign in with..." window: the same session, the same guards, and it goes when the
+  // Vanish window goes, before the wipe, so no signed-in window outlives Vanish.
+  const popups = new Set();
+  function popupOptions() {
+    return { width: 520, height: 680, webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true } };
+  }
+  function wirePopup(popup) {
+    popups.add(popup);
+    popup.on('closed', () => popups.delete(popup));
+    popup.setContentProtection(pref('vanishHideFromCapture') !== false);
+    const pw = popup.webContents;
+    protect(pw, { identity: 'vanish' });
+    pw.on('will-navigate', (e, u) => { if (/^cue:/i.test(u)) e.preventDefault(); });
+    pw.setWindowOpenHandler(({ url: u, disposition }) => {
+      if (refuseOpen(u, pw.getURL())) return { action: 'deny' };
+      if (whereToOpen(u, disposition, pw.getURL()) === 'popup') return { action: 'allow', overrideBrowserWindowOptions: popupOptions() };
+      add(u, { background: false });
+      return { action: 'deny' };
+    });
+    pw.on('did-create-window', wirePopup);
   }
 
   function activate(id) {
@@ -337,6 +359,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     win.on('closed', () => {
       win = null; ui = null; activeId = null; full = false; winFull = false; finding = '';
       tabs.splice(0).forEach((t) => { try { t.view.webContents.close(); } catch {} });
+      for (const p of [...popups]) { try { p.destroy(); } catch {} }
+      popups.clear();
       wipe();
       if (onClosed) onClosed();
     });
@@ -392,7 +416,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   }
 
   const owns = (wc) => !!wc && (tabs.some((t) => t.view.webContents === wc) || (!!ui && ui.webContents === wc));
-  return { add, closeTab, command, run, say, owns, applyPrefs, forget, toggleFull, pictureInPicture, wipe, zoom, wiping: () => wiping, tabs, activate, step, move, window: () => win, ui: () => ui, isFull: () => full, isWinFull: () => winFull, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
+  return { add, closeTab, command, run, say, owns, applyPrefs, forget, toggleFull, pictureInPicture, wipe, zoom, wiping: () => wiping, tabs, activate, step, move, window: () => win, ui: () => ui, hasPopups: () => popups.size > 0, isFull: () => full, isWinFull: () => winFull, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 
 module.exports = { createVanish };

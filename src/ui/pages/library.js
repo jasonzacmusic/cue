@@ -90,12 +90,15 @@
     node.append(document.createTextNode(s.slice(0, i)), Object.assign(document.createElement('mark'), { textContent: s.slice(i, i + q.length) }), document.createTextNode(s.slice(i + q.length)));
     return node;
   }
-  async function open(url) { try { await call('open', { url }); } catch (e) { toast('Could not open that page.'); } }
+  // Cmd-click (Ctrl-click off a Mac) or a middle click opens it in a new tab behind this one.
+  const behind = (e) => !!e && (e.button === 1 || e.metaKey || e.ctrlKey);
+  async function open(url, e) { try { await call('open', behind(e) ? { url, background: true } : { url }); } catch (err) { toast('Could not open that page.'); } }
 
   function row(item, q, metaNodes) {
     const li = el('li', 'row'); li.appendChild(el('div', 'ic', letter(item)));
     const tx = el('div', 'tx'); const a = el('a'); a.href = item.url; a.title = item.url;
-    hl(a, item.title || shortUrl(item.url), q); a.addEventListener('click', (e) => { e.preventDefault(); open(item.url); });
+    hl(a, item.title || shortUrl(item.url), q); a.addEventListener('click', (e) => { e.preventDefault(); open(item.url, e); });
+    a.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); open(item.url, e); } });
     const u = el('span', 'u'); hl(u, shortUrl(item.url), q);
     tx.append(a, u); li.appendChild(tx);
     const meta = el('div', 'meta'); metaNodes.forEach((n) => meta.appendChild(n)); li.appendChild(meta);
@@ -109,7 +112,7 @@
 
   function renderBookmarks(q, out) {
     const list = data.bookmarks.filter((b) => !q || norm(b.title + ' ' + b.url + ' ' + b.folder).includes(q));
-    if (!list.length) { out.appendChild(q ? empty('No bookmarks match', 'Try fewer letters.') : empty('No bookmarks yet', 'Press Cmd+D on any page to save it here.')); return list.length; }
+    if (!list.length) { out.appendChild(q ? empty('No bookmarks match', 'Try fewer letters.') : empty('No bookmarks yet', `Press ${/Mac/i.test(navigator.platform || '') ? 'Cmd' : 'Ctrl'}+D on any page to save it here.`)); return list.length; }
     const folders = new Map();
     for (const b of list) { const f = b.folder || 'Not in a folder'; if (!folders.has(f)) folders.set(f, []); folders.get(f).push(b); }
     for (const [f, items] of folders) out.appendChild(group(f, items.map((b) => row(b, q, []))));

@@ -456,13 +456,15 @@ function sessionFor(identity) {
     const t = byWC(d.webContents); if (t) logTab(t, 'failed-request', `${d.error} ${d.url}`);
   });
 
+  // 'window-management' (the layout of every screen on this computer) is no longer handed to any
+  // page that asks: it reads like a fingerprint, and Chrome asks first too. Allowed by hand only.
   // 'storage-access' is a box on a page asking to reach its own cookies while it
   // sits inside another site. Saying no to it breaks the invisible checks that
   // guard sign-in forms: Netflix's sign-in simply fails with "Something's not
   // quite right", and card payments and single sign-on go the same way. Chrome
   // allows it. Cue stops the actual tracking earlier, in the blocker, so what
   // still gets this far is a login box, a payment box or a guard like that.
-  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management', 'storage-access', 'top-level-storage-access']);
+  const QUIET_OK = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'storage-access', 'top-level-storage-access']);
   ses.setPermissionCheckHandler((wc, permission, origin) => {
     if (QUIET_OK.has(permission)) return true;
     if (permission === 'midi' || permission === 'midiSysex') return midiOk(identity, safeOrigin(origin));
@@ -471,7 +473,7 @@ function sessionFor(identity) {
   });
 
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
-    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'window-management', 'storage-access', 'top-level-storage-access'];
+    const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'storage-access', 'top-level-storage-access'];
     if (always.includes(permission)) return cb(true);
     if (permission === 'notifications') return cb(!live && identity !== 'vanish');
     if (permission === 'openExternal') {
@@ -604,7 +606,11 @@ const KINDS = {
   Documents: ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.md', '.musicxml', '.mscz'],
   Archives: ['.zip', '.rar', '.7z', '.tar', '.gz'],
 };
-const RUNS_ITSELF = /\.(command|terminal|tool|workflow|action|jar|scpt|sh)$/i; // Finder runs these on a double-click
+// Files that run as a program on a double-click, on this kind of computer.
+const RUNS_ITSELF = {
+  darwin: /\.(command|terminal|tool|workflow|action|jar|scpt|sh)$/i,
+  win32: /\.(exe|msi|msp|bat|cmd|com|ps1|vbs|vbe|js|jse|wsf|scr|hta|reg|cpl|lnk|jar)$/i,
+}[process.platform] || /\.(sh|run|appimage|desktop|jar)$/i;
 // macOS only lets Gatekeeper check a file that is marked as downloaded. Chrome and
 // Safari write that mark; without it an installer from the web would open with no
 // check at all, so Cue writes it on every finished download.
@@ -659,7 +665,8 @@ function tidyInstallers() {
 // Serves Cue's own pages, such as cue://boards. Only files in the pages folder can be reached.
 // Vanish gets only the dangerous-site warning, which Cue itself puts up there; Library, Bills and
 // Boards hold his history and his money, and none of it is served into a Vanish tab.
-const VANISH_PAGES = new Set(['danger.html', 'danger.js', 'pages.css']);
+const VANISH_PAGES = new Set(['danger.html', 'danger.js', 'offline.html', 'offline.js', 'pages.css']);
+const PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'";
 function servePages(ses, vanishOnly) {
   if (ses.protocol.isProtocolHandled('cue')) return;
   ses.protocol.handle('cue', (req) => {
@@ -671,7 +678,13 @@ function servePages(ses, vanishOnly) {
     if (vanishOnly && !VANISH_PAGES.has(rel)) return new Response('Not in Vanish', { status: 403 });
     const file = path.normalize(path.join(PAGES, rel));
     if (!file.startsWith(PAGES + path.sep) || !fs.existsSync(file)) return new Response('Not found', { status: 404 });
-    return net.fetch(pathToFileURL(file).href);
+    // Each page runs only its own script file: nothing written into the page, no other site's code.
+    return net.fetch(pathToFileURL(file).href).then((r) => {
+      if (!/\.html$/i.test(file)) return r;
+      const headers = new Headers(r.headers);
+      headers.set('Content-Security-Policy', PAGE_CSP);
+      return new Response(r.body, { status: r.status, headers });
+    });
   });
 }
 
@@ -849,6 +862,7 @@ function lockFolder(id) {
   fitSplit(sp);
   if (peek && peek.identity === id) closePeek();
   if (aiView && aiIdentity === id) toggleAI();
+  closePopupsOf(id);
   if (pendingCred && pendingCred.identity === id) pendingCred = null;
   if (openFolder() === id) {
     const other = userFolders().find((f) => f.id !== id && !isLocked(f.id));
@@ -1034,6 +1048,7 @@ async function removeFolder({ id, confirmed } = {}) {
   for (const sp of Object.values(store.data.spaceSplit || {})) { sp.ids = (sp.ids || []).filter((x) => !gone(x)); fitSplit(sp); }
   if (peek && peek.identity === id) closePeek();
   if (aiView && aiIdentity === id) toggleAI();
+  closePopupsOf(id);
   if (pendingCred && pendingCred.identity === id) pendingCred = null;
   // No more sharing with it.
   settings().sharedPairs = pairs().filter(([a, b]) => a !== id && b !== id);
@@ -1174,7 +1189,7 @@ const SITE_NAMES = [
   [/^(www|m)?\.?youtube\.com$/i, 'YouTube'],
   [/(^|\.)instagram\.com$/i, 'Instagram'],
   [/(^|\.)facebook\.com$/i, 'Facebook'],
-  [/(^|\.)threads\.net$/i, 'Threads'],
+  [/(^|\.)threads\.(net|com)$/i, 'Threads'],
   [/(^|\.)linkedin\.com$/i, 'LinkedIn'],
   [/(^|\.)pinterest\.[a-z.]+$/i, 'Pinterest'],
   [/(^|\.)github\.com$/i, 'GitHub'],
@@ -1353,9 +1368,9 @@ const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com'
 // The same, for Meta. Instagram, Facebook and Threads share one sign-in, so they
 // come over together or not at all: carrying Instagram alone leaves Facebook
 // holding a half-session, which is what Meta's own checks are looking for.
-const META_LOGIN_HOST = /(^|\.)(instagram\.com|facebook\.com|threads\.net|cdninstagram\.com|fbcdn\.net)$/i;
+const META_LOGIN_HOST = /(^|\.)(instagram\.com|facebook\.com|threads\.(net|com)|cdninstagram\.com|fbcdn\.net)$/i;
 const META_ORIGINS = ['https://www.instagram.com', 'https://instagram.com',
-  'https://www.facebook.com', 'https://facebook.com', 'https://www.threads.net'];
+  'https://www.facebook.com', 'https://facebook.com', 'https://www.threads.net', 'https://www.threads.com'];
 
 const cookieUrl = (c) => `${c.secure ? 'https' : 'http'}://${String(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
 
@@ -1376,7 +1391,7 @@ function canCarryFromChrome() {
 }
 
 // The cookies that mean "signed in" on each site, as opposed to a visit.
-const SESSION_COOKIES = { 'instagram.com': ['sessionid'], 'facebook.com': ['c_user', 'xs'], 'threads.net': ['sessionid'] };
+const SESSION_COOKIES = { 'instagram.com': ['sessionid'], 'facebook.com': ['c_user', 'xs'], 'threads.net': ['sessionid'], 'threads.com': ['sessionid'] };
 const signedInBy = (cookies) => cookies.some((c) => {
   const site = Object.keys(SESSION_COOKIES).find((s) => String(c.domain || '').replace(/^\./, '').endsWith(s));
   return site ? SESSION_COOKIES[site].includes(c.name) : /^(sessionid|c_user|SID|__Secure-1PSID|session|auth)/i.test(c.name);
@@ -1473,6 +1488,7 @@ async function carryAllFromChrome(identity) {
 // "Enter your password" under a Chrome, Firefox or Safari identity alike, so Google has no quarrel
 // with Cue's engine. Signing in always starts from an empty jar.
 async function clearGoogleState(identity) {
+  if (isLocked(identity)) throw new Error(`${folderName(identity)} is locked. Type its passcode first.`);
   const ses = sessionFor(identity);
   const host = (c) => String(c.domain || '').replace(/^\./, '');
   let cleared = 0;
@@ -1499,6 +1515,7 @@ async function googleSignIn(identity, { otherAccount = false } = {}) {
 async function signInAgain(t, sender, otherAccount) {
   const identity = t ? t.identity : (sender && popupIdentity.get(sender));
   if (!identity) return { error: 'Close this page and start the sign-in again from the site.' };
+  if (isLocked(identity)) return { error: `${folderName(identity)} is locked. Type its passcode first.` };
   // A press of the button is the person asking, so it is not held to the ten-minute rule.
   signinGate.forget(identity);
   if (t) { const { cleared } = await googleSignIn(identity, { otherAccount }); return { signin: true, cleared }; }
@@ -1599,6 +1616,11 @@ function guardUrl(url, ok = dangerOk) {
   return bad ? `cue://danger?kind=${bad}&site=${encodeURIComponent(url)}` : url;
 }
 
+function offlineSite(u) {
+  if (!/^cue:\/\/offline/i.test(String(u || ''))) return '';
+  try { const site = new URL(u).searchParams.get('site') || ''; return /^https?:\/\//i.test(site) ? site : ''; } catch { return ''; }
+}
+
 // The same guards for every tab, Vanish included. Vanish passes no note, so nothing is written down.
 function protectPage(wc, t, note) {
   const inVanish = t.identity === 'vanish';
@@ -1611,6 +1633,9 @@ function protectPage(wc, t, note) {
   try { wc.setWebRTCIPHandlingPolicy(settings().hideRealIP === false ? 'default' : 'default_public_interface_only'); } catch {}
   // ---- known-dangerous sites, and trying the secure address first
   const guard = (e, url, isMain) => {
+    // A web page may not send itself (or a frame) to one of Cue's own pages or a file on this
+    // computer. Cue still opens those itself; this only stops a page from doing it.
+    if (isMain ? refuseOpen(url, wc.getURL()) : /^(cue|file):/i.test(String(url)) && !/^cue:/i.test(wc.getURL())) { e.preventDefault(); if (note) note(`page tried to open ${String(url).slice(0, 80)}`); return; }
     if (!isMain) return;
     const warn = guardUrl(url, inVanish ? vanishDangerOk : dangerOk);
     if (warn !== url) {
@@ -1629,13 +1654,21 @@ function protectPage(wc, t, note) {
   wc.on('will-navigate', (e, url) => guard(e, url, true));
   wc.on('will-frame-navigate', (e) => guard(e, e.url, e.isMainFrame));
   wc.on('will-redirect', (e, url) => guard(e, url, true));
-  wc.on('did-fail-load', (_e, code, _desc, url, isMain) => {
-    if (!isMain || !t.httpsFrom) return;
-    const back = t.httpsFrom; t.httpsFrom = null;
-    if (!NO_SECURE_DOOR.has(Number(code)) || !/^https:/.test(url)) return;
-    try { noHttps.add(new URL(back).hostname); } catch {}
-    if (note) sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
-    wc.loadURL(back).catch(() => {});
+  wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
+    if (!isMain) return;
+    if (t.httpsFrom) {
+      const back = t.httpsFrom; t.httpsFrom = null;
+      if (NO_SECURE_DOOR.has(Number(code)) && /^https:/.test(url)) {
+        try { noHttps.add(new URL(back).hostname); } catch {}
+        if (note) sendEvent('toast', `${hostName(back)} has no secure address. Cue opened the plain one.`);
+        wc.loadURL(back).catch(() => {});
+        return;
+      }
+    }
+    // Anything else that never arrived gets a page that says why, never a blank or stale tab.
+    // -3 is a page being replaced by another, which is not a failure.
+    if (Number(code) === -3 || !/^https?:/i.test(String(url || ''))) return;
+    wc.loadURL(`cue://offline?code=${Number(code)}&why=${encodeURIComponent(desc || '')}&site=${encodeURIComponent(url)}`).catch(() => {});
   });
   wc.on('did-finish-load', () => { t.httpsFrom = null; });
 }
@@ -1727,9 +1760,17 @@ function popupFor(identity, agent) {
     },
   };
 }
+// Every sign-in window that is open, so locking or removing a folder can close its own.
+const openPopups = new Set();
+function closePopupsOf(id) {
+  for (const p of [...openPopups]) if (p.getIdentity() === id) { openPopups.delete(p); try { p.win.destroy(); } catch {} }
+}
 function wirePopup(win, getIdentity, agent) {
   const wc = win && win.webContents;
   if (!wc || wc.isDestroyed()) return;
+  const entry = { win, getIdentity };
+  openPopups.add(entry);
+  win.on('closed', () => openPopups.delete(entry));
   popupIdentity.set(wc, getIdentity());
   protectPage(wc, {}, null);
   watchGoogleRefusal(wc, getIdentity);
@@ -1757,7 +1798,9 @@ function wireTab(t) {
   watchGoogleRefusal(wc, () => t.identity);
   wc.on('did-navigate', (_e, u) => sayProtected(u));
   const nav = () => {
-    t.url = wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
+    // On the "couldn't reach" page the tab still belongs to the site, so it is the site that is
+    // shown, saved, and opened again next time.
+    t.url = offlineSite(wc.getURL()) || wc.getURL(); t.canBack = wc.navigationHistory.canGoBack(); t.canFwd = wc.navigationHistory.canGoForward();
     pushState(); persist();
   };
   // History is written when the page has settled, not the moment it is asked for,
@@ -2454,7 +2497,7 @@ function quietMomentRefusal() {
   return quietRefusal({
     ready: !!(updater && updater.ready()), auto: settings().autoUpdate !== false, idle, idleState,
     onAir: !!(live || programId || recTabId),
-    busy: tabs.some((t) => t.holdAwake || t.playing || t.audible || t.dirty),
+    busy: tabs.some((t) => t.holdAwake || t.playing || t.audible || t.dirty) || openPopups.size > 0, // a sign-in window is someone mid-sign-in
     downloading: downloads.some((d) => d.state === 'progressing'),
     vanish: !!(vanish && vanish.window()),
     temp: !tempHours() && tabs.some((t) => t.temp),
@@ -3033,7 +3076,7 @@ ipcMain.on('cue:cred-offer', (e, c) => {
   sendEvent('save-password', { origin, username: c.username });
 });
 ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
-  if (!e.senderFrame.url.startsWith('cue://') || !internal[cmd]) throw new Error('Not allowed');
+  if (!e.senderFrame || e.senderFrame !== e.sender.mainFrame || !e.senderFrame.url.startsWith('cue://') || !Object.hasOwn(internal, cmd)) throw new Error('Not allowed');
   const from = byWC(e.sender);
   // A cue:// page acts on the folder of the tab it is in. One that is in no tab of Cue's (a Vanish
   // window) reads no folder's library at all.
@@ -3192,7 +3235,7 @@ function uiCommandRaw(cmd, a = {}) {
       break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
-    case 'reload': if (wc) wc.reload(); break;
+    case 'reload': if (wc) { const site = offlineSite(wc.getURL()); if (site) wc.loadURL(site).catch(() => {}); else wc.reload(); } break;
     case 'stop': if (wc) wc.stop(); break;
     case 'mute': if (t) setMuted(t, !t.muted); break;
     case 'volume': if (t) setVolume(t, a.value); break;
@@ -3332,9 +3375,11 @@ function uiCommandRaw(cmd, a = {}) {
     default: break;
   }
 }
-ipcMain.on('ui:cmd', (_e, cmd, a = {}) => uiCommand(cmd, a));
+// Only Cue's own sidebar (or the menu, which sends no page) may give these orders.
+const fromUi = (e) => !(e && e.sender) || (uiView && e.sender === uiView.webContents);
+ipcMain.on('ui:cmd', (e, cmd, a = {}) => { if (fromUi(e)) uiCommand(cmd, a); });
 
-ipcMain.handle('ui:invoke', (_e, cmd, a = {}) => uiInvoke(cmd, a));
+ipcMain.handle('ui:invoke', (e, cmd, a = {}) => { if (!fromUi(e)) throw new Error('Not allowed'); return uiInvoke(cmd, a); });
 async function uiInvoke(cmd, a = {}) {
   if (cmd === 'obs-scenes') return obs.scenes();
   if (cmd === 'suggest') { const r = suggestions(a.q); warmUp(r); return r; }
@@ -3346,7 +3391,7 @@ async function uiInvoke(cmd, a = {}) {
   if (cmd === 'folders') return { rows: folderRows(), lockMinutes: Number(settings().lockMinutes ?? 15) };
   if (cmd === 'folder-unlock') {
     const r = tryUnlock(a.id, a.code);
-    if (r.ok) setFolder(a.id);
+    if (r.ok) { setFolder(a.id); openWaitingLinks(a.id); }
     return r;
   }
   if (cmd === 'folder-passcode') return setPasscode(a);
@@ -3626,6 +3671,19 @@ function newerVersion(a, b) {
 }
 
 // ---------------------------------------------------------------- peek
+// Peek and the AI panel are pages like any tab: the same guards, and a "Continue with Google"
+// in either of them gets a real sign-in window in the right folder, not a tab that never reports back.
+function wireSidePage(wc, getIdentity) {
+  protectPage(wc, { identity: getIdentity() }, null);
+  watchGoogleRefusal(wc, getIdentity);
+  wc.setWindowOpenHandler(({ url: u, disposition }) => {
+    if (refuseOpen(u, wc.getURL())) return { action: 'deny' };
+    if (whereToOpen(u, disposition, wc.getURL()) === 'popup') return popupFor(getIdentity(), false);
+    openTab({ url: u, identity: getIdentity() });
+    return { action: 'deny' };
+  });
+  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, false));
+}
 function openPeek(url, from) {
   // A page can ask for a Peek by alt-clicking a link of its own making, so only
   // ordinary web links come through here: never a file on this Mac, never one
@@ -3639,7 +3697,7 @@ function openPeek(url, from) {
   wc.on('page-title-updated', (_e, title) => { if (peek && peek.view === view) { peek.title = title; pushState(); } });
   wc.on('did-navigate', (_e, u) => { if (peek && peek.view === view) { peek.url = u; pushState(); } });
   wc.on('before-input-event', (e, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); closePeek(); } });
-  wc.setWindowOpenHandler(({ url: u }) => { openTab({ url: u, identity: from.identity }); return { action: 'deny' }; });
+  wireSidePage(wc, () => from.identity);
   mainWin.contentView.addChildView(view);
   wc.loadURL(url).catch(() => {});
   layout(); pushState();
@@ -3680,7 +3738,7 @@ function openAI(which, url) {
     aiIdentity = id;
     aiView = new WebContentsView({ webPreferences: { session: sessionFor(id), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
     aiView.setBackgroundColor('#FFFFFF');
-    aiView.webContents.setWindowOpenHandler(({ url: u }) => { openTab({ url: u, identity: id }); return { action: 'deny' }; });
+    wireSidePage(aiView.webContents, () => id);
     mainWin.contentView.addChildView(aiView);
   }
   aiView.webContents.loadURL(url || AI_HOME[store.data.aiWhich]).catch(() => {});
@@ -3827,8 +3885,13 @@ const inPage = (fn, empty) => (a = {}, from, sender) => {
   return f ? fn(a, f, from, sender) : empty;
 };
 
+// Settings names the folder; one of Cue's own pages may only ever act on the folder of its own tab.
+function askedFolder(a, from, sender) {
+  if (sender) { if (!from || !isFolder(from.identity)) throw new Error('Not allowed'); return from.identity; }
+  return isFolder(a.identity) ? a.identity : openFolder();
+}
 const internal = {
-  open: inPage(({ url }, f) => { if (/^https?:/.test(url)) openTab({ url, identity: f }); }),
+  open: inPage(({ url, background }, f, from) => { if (/^https?:/.test(url)) openTab({ url, identity: f, background: !!background, after: background ? from : undefined }); }),
   'boards.list': inPage((_a, f) => lib.in(f).boardList(), []),
   'boards.create': inPage(({ name }, f) => lib.in(f).boardCreate(name), null),
   'boards.rename': inPage(({ id, name }, f) => lib.in(f).boardRename(id, name)),
@@ -3846,7 +3909,7 @@ const internal = {
     checkBills();
   }),
   'bills.delete': inPage(({ id }, f) => { store.data.bills = store.data.bills.filter((b) => !(b.id === id && billFolder(b) === f)); store.save(); pushState(); }),
-  'bills.setRate': ({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); },
+  'bills.setRate': inPage(({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); }),
   'alerts.list': inPage((_a, f) => {
     const mine = alertsOf(f);
     mine.forEach((a) => { a.seen = true; }); store.save(); pushState();
@@ -3881,7 +3944,14 @@ const internal = {
     if (!host) return false;
     // A Vanish tab has no entry in Cue's tab list, so it must never fall through to the active tab,
     // and its "open it anyway" is forgotten with the Vanish window.
+    // Only from the warning page itself, about the site it is warning about.
+    if (sender) {
+      let shown = '';
+      try { const u = new URL(sender.getURL()); if (u.protocol === 'cue:' && u.hostname === 'danger') shown = u.searchParams.get('site') || ''; } catch {}
+      if (!shown || shield.hostOf(shown) !== host) return false;
+    }
     if (!from && sender && vanish && vanish.tabs.some((x) => x.view.webContents === sender)) { vanishDangerOk.add(host); sender.loadURL(site).catch(() => {}); return true; }
+    if (!from && sender) return false;
     dangerOk.add(host);
     const t = from || byId(activeId);
     if (t && t.view) t.view.webContents.loadURL(site).catch(() => {});
@@ -3899,7 +3969,7 @@ const internal = {
   // opens Google's own form again. In a pop-up it signs in again right there.
   'signin.from-chrome': (a, t, sender) => signInAgain(t, sender, false),
   'signin.other-account': (a, t, sender) => signInAgain(t, sender, true),
-  'signin.google': (a) => googleSignIn(isFolder(a.identity) ? a.identity : openFolder()).then(({ cleared }) => ({ signin: true, cleared })),
+  'signin.google': (a, from, sender) => googleSignIn(askedFolder(a, from, sender)).then(({ cleared }) => ({ signin: true, cleared })),
   'signin.close': (_a, t, sender) => {
     if (t) { closeTab(t.id); return; }
     if (sender && popupIdentity.has(sender)) { const w = require('electron').BrowserWindow.fromWebContents(sender); if (w) w.close(); }
@@ -3907,8 +3977,8 @@ const internal = {
   // Meta's sign-ins, into one folder, from the folder's own row in Settings.
   // Instagram and Facebook accept a carried jar; Google does not - see
   // carryAllFromChrome for what copying Google's cookies actually did.
-  'signin.carry-all': async (a) => {
-    const who = isFolder(a.identity) ? a.identity : openFolder();
+  'signin.carry-all': async (a, from, sender) => {
+    const who = askedFolder(a, from, sender);
     if (isLocked(who)) return [{ name: 'Instagram and Facebook', error: `${folderName(who)} is locked.` }];
     const name = folderName(who);
     if (!canCarryFromChrome()) { sendEvent('toast', 'There is no Chrome on this computer to bring a sign-in from.'); return []; }
@@ -4147,7 +4217,10 @@ async function runTool(name, t) {
 
 // ---------------------------------------------------------------- AI port
 function agentSetupText() {
-  const bridge = path.join(app.isPackaged ? process.resourcesPath : path.join(ROOT, '..'), app.isPackaged ? 'app/bin/cue-mcp.js' : 'bin/cue-mcp.js');
+  // In the installed app the bridge sits outside the archive, in app.asar.unpacked, so node can run it.
+  const bridge = !app.isPackaged ? path.join(ROOT, '..', 'bin', 'cue-mcp.js')
+    : [path.join(process.resourcesPath, 'app.asar.unpacked', 'bin', 'cue-mcp.js'), path.join(process.resourcesPath, 'app', 'bin', 'cue-mcp.js')].find((f) => fs.existsSync(f))
+      || path.join(process.resourcesPath, 'app.asar.unpacked', 'bin', 'cue-mcp.js');
   return `Cue AI port: http://127.0.0.1:${AGENT_PORT}\nToken file: ${agentTokenFile()}\nMCP bridge: node "${bridge}"`;
 }
 function agentTokenFile() { return path.join(app.getPath('userData'), 'agent-port.json'); }
@@ -4165,7 +4238,7 @@ function logAgent(entry) {
       sendEvent('toast', `${e.agent} used “${(t.title || t.url || 'a tab').slice(0, 40)}” — a tab you did not hand it.`);
     }
   }
-  fs.appendFile(path.join(app.getPath('userData'), 'agent-log.jsonl'), JSON.stringify(e) + '\n', () => {});
+  fs.appendFile(path.join(app.getPath('userData'), 'agent-log.jsonl'), JSON.stringify(e) + '\n', { mode: 0o600 }, () => {});
   pushState();
 }
 
@@ -4426,7 +4499,7 @@ const agentApi = {
   // showing in Cue's window. A pedal press is therefore just "show slot N".
   // Jason's own tabs are the slots: a background tab an agent opened must
   // never become what a class is looking at. A locked folder has no slots.
-  slots: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent)
+  slots: () => sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent && !isLocked(t.identity))
     .map((t) => ({ id: t.id, title: t.private ? 'Private' : t.title, url: isStart(t.url) || t.private ? '' : t.url, showing: t.id === activeId })),
   show: (id) => activate(Number(id)),
   take: () => take(),
@@ -4566,6 +4639,14 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Move Tab Up', accelerator: 'Alt+CmdOrCtrl+Up', click: mainOnly(() => moveTab({ id: activeId, dir: -1 })) },
         { label: 'Move Tab Down', accelerator: 'Alt+CmdOrCtrl+Down', click: mainOnly(() => moveTab({ id: activeId, dir: 1 })) },
+        // Windows and Linux have no app menu, so Settings, updates and Quit live here.
+        ...(MAC ? [] : [
+          { type: 'separator' },
+          { label: 'Settings…', accelerator: 'Ctrl+,', click: mainOnly(() => sendEvent('open-settings')) },
+          { label: 'Check for Updates…', click: () => checkForUpdates() },
+          { type: 'separator' },
+          { label: 'Quit Cue', accelerator: 'Ctrl+Q', click: () => app.quit() },
+        ]),
       ],
     },
     { role: 'editMenu' },
@@ -4578,6 +4659,7 @@ function buildMenu() {
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: cmd('zoom', { dir: -1 }) },
         { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: cmd('zoom', { reset: true }) },
         { type: 'separator' },
+        ...(MAC ? [] : [{ role: 'togglefullscreen' }, { type: 'separator' }]), // the Mac adds its own Full Screen item
         { label: 'One Tab', accelerator: 'CmdOrCtrl+Alt+1', click: cmd('split', { mode: 'single' }) },
         { label: 'Side by Side', accelerator: 'CmdOrCtrl+Alt+2', click: cmd('split', { mode: 'cols2' }) },
         { label: 'Top and Bottom', accelerator: 'CmdOrCtrl+Alt+3', click: cmd('split', { mode: 'rows2' }) },
@@ -4623,7 +4705,7 @@ function buildMenu() {
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: mainOnly(() => cycle(-1)) },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
-        { label: 'Mini Player (keeps playing while you work)', accelerator: 'Control+Cmd+M', click: cmd('mini') },
+        { label: 'Mini Player (keeps playing while you work)', accelerator: MAC ? 'Control+Cmd+M' : 'Ctrl+Alt+M', click: cmd('mini') },
         { label: 'Picture in Picture', accelerator: 'CmdOrCtrl+Alt+P', click: () => { if (vanish.focused()) { vanish.pictureInPicture(); return; } const t = byId(activeId); if (t && t.view) t.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}); } },
         ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: mainOnly(() => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); }) })),
       ],
@@ -4737,15 +4819,29 @@ function logProblem(kind, e) {
   try {
     const f = path.join(app.getPath('userData'), 'problems.log');
     if (fs.existsSync(f) && fs.statSync(f).size > 1048576) fs.rmSync(f);
-    fs.appendFileSync(f, line);
+    fs.appendFileSync(f, line, { mode: 0o600 });
   } catch {}
 }
 process.on('uncaughtException', (e) => logProblem('uncaught', e));
 process.on('unhandledRejection', (e) => logProblem('rejected', e));
 app.on('child-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') logProblem('process', `${d.type} ${d.reason}`); });
 
+// A window saved on a screen that is no longer plugged in comes back on one that is.
+function onScreen(saved) {
+  const b = saved || { width: 1440, height: 900 };
+  if (b.x === undefined || b.y === undefined) return b;
+  try {
+    const { screen } = require('electron');
+    const seen = screen.getAllDisplays().some(({ workArea: w }) =>
+      Math.min(b.x + b.width, w.x + w.width) - Math.max(b.x, w.x) >= 120 && Math.min(b.y + b.height, w.y + w.height) - Math.max(b.y, w.y) >= 80);
+    if (seen) return b;
+    const w = screen.getPrimaryDisplay().workArea;
+    const width = Math.min(b.width, w.width); const height = Math.min(b.height, w.height);
+    return { x: w.x + Math.round((w.width - width) / 2), y: w.y + Math.round((w.height - height) / 2), width, height };
+  } catch { return { width: b.width, height: b.height }; }
+}
 function createMain() {
-  const b = store.data.bounds || { width: 1440, height: 900 };
+  const b = onScreen(store.data.bounds);
   mainWin = new BaseWindow({
     ...b, minWidth: 760, minHeight: 480, title: 'Cue', backgroundColor: '#E3E6E9',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 16, y: 18 },
@@ -4774,7 +4870,7 @@ function createMain() {
   });
   mainWin.on('resize', () => { layout(); if (!mainWin.isFullScreen() && !mainWin.isSimpleFullScreen()) { store.data.bounds = mainWin.getBounds(); store.save(); } });
   mainWin.on('enter-full-screen', () => { const t = byId(activeId); if (t && t.fullscreen) settleAfterFullScreen(t, true); });
-  mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
+  mainWin.on('move', () => { if (!mainWin.isFullScreen() && !mainWin.isSimpleFullScreen()) { store.data.bounds = mainWin.getBounds(); store.save(); } });
   // Leaving full screen by the green button, Escape or a Mac swipe tells the WINDOW
   // but never told the PAGE, so the video stayed in its full-screen layout inside a
   // normal window - controls off the bottom, the picture the wrong shape. The Vanish
@@ -4851,10 +4947,22 @@ app.on('second-instance', (_e, argv) => {
   const url = argv.find((x) => /^https?:\/\//.test(x)); if (url) openFromApp(url);
 });
 let pendingUrls = [];
-// A link clicked in another app (Mail, Slack, a PDF). Settings can start these in "Just for now".
-function openFromApp(url) { return openTab({ url, temp: settings().linksJustForNow === true }); }
+// A link or file sent to Cue from another app (Mail, Slack, a PDF). Settings can start links in "Just for now". If the folder it would open in is locked, it waits
+// for the passcode and opens the moment the folder is unlocked, rather than being lost.
+let lockedPending = [];
+function openFromApp(url, { file = false } = {}) {
+  if (!file && !/^https?:\/\//i.test(String(url || ''))) return null;
+  const item = { url, temp: !file && settings().linksJustForNow === true };
+  const who = folderForNewTab();
+  if (isLocked(who)) { lockedPending.push(item); if (mainWin) askUnlock(who); return null; }
+  try { return openTab(item); } catch (e) { logProblem('open-link', e); return null; }
+}
+function openWaitingLinks(id) {
+  if (!lockedPending.length || isLocked(id) || folderForNewTab() !== id) return;
+  for (const item of lockedPending.splice(0)) { try { openTab({ ...item, identity: id }); } catch (e) { logProblem('open-link', e); } }
+}
 app.on('open-url', (e, url) => { e.preventDefault(); if (mainWin) openFromApp(url); else pendingUrls.push(url); });
-app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL(file).href; if (mainWin) openTab({ url }); else pendingUrls.push(url); });
+app.on('open-file', (e, file) => { e.preventDefault(); const url = pathToFileURL(file).href; if (mainWin) openFromApp(url, { file: true }); else pendingUrls.push(url); });
 
 // Protected video (Netflix, Prime Video, JioHotstar, Disney+, Spotify) needs
 // Widevine, which stock Electron does not ship. Cue is built on castLabs'
@@ -5114,6 +5222,7 @@ function runMigrations() {
 }
 
 app.whenReady().then(async () => {
+  if (!gotLock) return; // a second copy only hands its link to the first and goes
   // Windows and Linux: the first run from an unzipped folder copies Cue to its
   // own per-user home and opens it again from there (src/main/settle.js).
   const settled = await settle({ app, shell, log: (e) => console.error('settle', (e && e.message) || e) });
@@ -5223,7 +5332,7 @@ app.whenReady().then(async () => {
     onClosed: () => { vanishDangerOk.clear(); VANISH_NO_HTTPS.clear(); vanishLocationTold.clear(); },
     logo: (u) => pick(siteLogos(), String(hostOf(u) || '').toLowerCase()),
   });
-  ipcMain.on('vanish:cmd', (_e, c, a) => vanish.command(c, a));
+  ipcMain.on('vanish:cmd', (e, c, a) => { const ui = vanish.ui(); if (!ui || e.sender !== ui.webContents) return; vanish.command(c, a); });
   vault = new Vault(app.getPath('userData'));
   vault.autoForOwnSites();
   store.data.settings.obs = { host: '127.0.0.1', port: 4455, password: '', ...(store.data.settings.obs || {}) };
@@ -5240,13 +5349,23 @@ app.whenReady().then(async () => {
   buildMenu();
   createMain();
   // One Gmail, one WhatsApp, one YouTube per folder, every launch, without him
-  // having to ask for it. mergeDupes never closes a pinned tab.
-  setTimeout(() => { try { if (mergeDupes()) { layout(); pushState(); persist(); } } catch (e) { logProblem('tidy', e); } }, 8000);
+  // having to ask for it. mergeDupes never closes a pinned tab. Only on the owner's install: anyone
+  // else keeps every tab they left open, and can tidy copies from Settings when they want.
+  // Some Linux systems (recent Ubuntu) stop Chromium's sandbox, and Cue then runs without it.
+  // Say so once, plainly, rather than run with less protection than it looks like.
+  if (process.platform === 'linux' && !process.env.CUE_TEST && (process.env.CUE_LINUX_UNSANDBOXED === '1' || app.commandLine.hasSwitch('no-sandbox')) && !store.data.toldNoSandbox) {
+    setTimeout(() => {
+      store.data.toldNoSandbox = true; store.save();
+      dialog.showMessageBox(mainWin, { type: 'warning', buttons: ['OK'], message: 'This computer is running Cue with less protection.', detail: 'Your Linux system blocks the sandbox that keeps each website shut in its own box, so Cue started without it. Pages still work, but a harmful page has an easier way out. To fix it, allow Cue in AppArmor (search "AppArmor unprivileged user namespaces" for your Linux version), then open Cue again.' }).catch(() => {});
+    }, 4000);
+  }
+  if (settings().preset === 'nsm') setTimeout(() => { try { if (mergeDupes()) { layout(); pushState(); persist(); } } catch (e) { logProblem('tidy', e); } }, 8000);
   setTimeout(() => { try { archiveOldTabs(); } catch (e) { logProblem('tidy', e); } }, 20000);
   checkBills(); tidyInstallers(); loadRepos(); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
   setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch
   const launchLink = process.argv.slice(1).find((x) => /^https?:\/\//.test(x)); if (launchLink) pendingUrls.push(launchLink);
-  pendingUrls.forEach((url) => openFromApp(url)); pendingUrls = [];
+  try { pendingUrls.forEach((url) => openFromApp(url, { file: /^file:/i.test(url) })); } catch (e) { logProblem('launch-url', e); }
+  pendingUrls = [];
   setupBlocker();
   startThumbs();
   // His switch, as he left it. When it is off the port still answers, so that an
@@ -5266,6 +5385,9 @@ app.whenReady().then(async () => {
       return '';
     },
     auto: () => settings().autoUpdate,
+    // Tabs and every folder's cookies on disk before the swap closes Cue, so a sign-in made a
+    // moment ago is still there when it opens again.
+    beforeExit: async () => { saveNow(); await Promise.all([...sessionsReady].map((ses) => ses.cookies.flushStore().catch(() => {}))); },
     log: logAgent,
   });
   updater.start();

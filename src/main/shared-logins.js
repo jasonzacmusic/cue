@@ -1,10 +1,14 @@
 // Sharing sign-ins between two folders, ONLY when the person has said so for that pair
 // (settings().sharedPairs). A site signed in inside one is copied into the other and back, so a
 // site with one account never has to be signed into twice. Sites where people keep TWO accounts are
-// the exception and stay apart on purpose - Gmail, Instagram, YouTube and WhatsApp in each folder
-// are that folder's own. Nothing is shared by default: every folder is private until two of them
+// the exception and stay apart on purpose - Gmail, Instagram, YouTube, WhatsApp and the AI sites
+// (Claude, ChatGPT, Grok...) in each folder are that folder's own. Nothing is shared by default: every folder is private until two of them
 // are paired. The AI agent and Vanish logins never take part.
-const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.net|facebook\.com|whatsapp\.com)$/i;
+// AI sites belong here too (13-Nov-2026): people sign in to them with the folder's own Google
+// account, so Claude, ChatGPT or Grok in Personal and in School are two different accounts. Sharing
+// them made a sign-in in one folder replace the other's, and School's own Claude pages then said
+// "Sign in to view this page" for ever.
+const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.(net|com)|facebook\.com|whatsapp\.com|claude\.(ai|com)|anthropic\.com|claudeusercontent\.com|chatgpt\.com|openai\.com|sora\.com|grok\.com|x\.ai|perplexity\.ai|poe\.com|mistral\.ai|deepseek\.com|meta\.ai|character\.ai|copilot\.microsoft\.com|huggingface\.co|midjourney\.com)$/i;
 
 const hostOf = (c) => c.domain.replace(/^\./, '');
 const keyOf = (c) => [c.domain, c.path, c.name, c.value].join('|');

@@ -43,7 +43,24 @@ $('#opensettings').innerHTML = ICONS.settings;
 // second line telling you what the thing does.
 const tipBox = el('div', 'tip'); tipBox.hidden = true; document.body.append(tipBox);
 let tipTimer = null;
+// Off a Mac, the Mac's key symbols in a hint are written as words: ⌥⌘T is Ctrl+Alt+T,
+// ⇧⌘L is Ctrl+Shift+L. Command is Ctrl there, as it is in the menus (CmdOrCtrl).
+const IS_MAC = window.cue.platform === 'darwin';
+const KEY_WORDS = { '↩': 'Enter', '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right' };
+function keysFor(text) {
+  if (IS_MAC || !text) return text;
+  return String(text).replace(/([⌃⌥⇧⌘]+)([^\s⌃⌥⇧⌘·),]*)/g, (_, mods, key) => {
+    const words = [];
+    if (/[⌃⌘]/.test(mods)) words.push('Ctrl');
+    if (mods.includes('⌥')) words.push('Alt');
+    if (mods.includes('⇧')) words.push('Shift');
+    return [...words, KEY_WORDS[key] || key].filter(Boolean).join('+');
+  });
+}
+// The buttons index.html gives a title to say their keys the Mac's way; fix them up once, here.
+if (!IS_MAC) document.querySelectorAll('[title]').forEach((n) => { n.title = keysFor(n.title); });
 function tip(node, text, sub) {
+  text = keysFor(text); sub = keysFor(sub);
   node.removeAttribute('title');
   node.dataset.tip = text || '';
   if (sub) node.dataset.tipsub = sub; else delete node.dataset.tipsub;
@@ -95,16 +112,15 @@ function shortName(t) {
   return head.length > 46 ? `${head.slice(0, 45).trimEnd()}…` : head;
 }
 
-// Where to look for a site's logo: the one the page gave us, then the usual
-// address, then Google's icon service.
+// Where to look for a site's logo: the one the page gave us, then the places sites
+// usually keep one, on the site itself. Never a third party: asking Google's icon
+// service told Google every site the person opened.
 function iconSources(t) {
   const tries = [t.favicon];
   if (/^https?:/.test(t.url || '') && t.identity !== 'vanish') {
     try {
       const u = new URL(t.url);
-      const usual = `${u.origin}/favicon.ico`;
-      const service = `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`;
-      tries.push(...(/\.google\.com$/.test(u.hostname) ? [service, usual] : [usual, service]));
+      tries.push(`${u.origin}/favicon.ico`, `${u.origin}/apple-touch-icon.png`, `${u.origin}/favicon.png`);
     } catch {}
   }
   // Last, a logo Cue ships, for the sites whose own icon never arrives: several NSM apps answer
@@ -227,7 +243,7 @@ function applySide(width = S.sideWidth) {
   document.body.classList.toggle('rail', width < RAIL_AT);
   document.body.classList.toggle('sidehidden', hidden);
   document.body.classList.toggle('peeking', !!S.sideReveal);
-  $('#sidehide').title = hidden ? 'Keep the sidebar open (⌘\\)' : 'Hide the sidebar (⌘\\)';
+  $('#sidehide').title = keysFor(hidden ? 'Keep the sidebar open (⌘\\)' : 'Hide the sidebar (⌘\\)');
 }
 
 // A drag is a button held down, from the press to the release, and nothing else.
@@ -1199,8 +1215,8 @@ function renderDownloads() {
       open.onclick = (e) => { e.stopPropagation(); send('download-run', { id: d.id }); };
       acts.append(open);
       const show2 = el('button', 'dl-btn quiet', '􀈕');
-      show2.textContent = 'Finder';
-      tip(show2, 'Show it in Finder');
+      show2.textContent = IS_MAC ? 'Finder' : 'Folder';
+      tip(show2, IS_MAC ? 'Show it in Finder' : 'Show in folder');
       show2.onclick = (e) => { e.stopPropagation(); send('download-open', { id: d.id }); };
       acts.append(show2);
     } else if (!bad) acts.append(el('span', 'dl-pct', d.total ? `${pct}%` : ''));
@@ -1299,7 +1315,8 @@ omni.addEventListener('keydown', (e) => {
     e.preventDefault();
     const q = omni.value.trim();
     if (!$('#suggest').hidden && sugItems[sugSel]) sugItems[sugSel].run();
-    else if (q) send('navigate', { text: q, newTab: e.metaKey });
+    // A new tab: Cmd+Enter on a Mac, Alt+Enter or Ctrl+Enter elsewhere (as in Chrome and Edge).
+    else if (q) send('navigate', { text: q, newTab: IS_MAC ? e.metaKey : (e.altKey || e.ctrlKey) });
     endEdit();
   }
 });
@@ -1976,7 +1993,7 @@ function settingsRooms() {
         toggles(p, ...Object.entries(S.kits).map(([k, v]) => toggle(`kit.${k}`, s.kits[k], v.name, v.what)));
         toggles(p,
           toggle('showDownloads', s.showDownloads !== false, 'Downloads tray in the sidebar', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
-          toggle('sideHidden', s.sideHidden, 'Sidebar hidden until you reach for it', 'The whole sidebar slides away (⌘\\). Move the pointer to the left edge and it comes back.'));
+          toggle('sideHidden', s.sideHidden, 'Sidebar hidden until you reach for it', keysFor('The whole sidebar slides away (⌘\\).') + ' Move the pointer to the left edge and it comes back.'));
       } },
 
     { id: 'shield', name: 'Shield', line: 'Ads, trackers and dangerous sites are stopped before they load.',
@@ -2127,6 +2144,30 @@ function settingsRooms() {
           toggle('autoUpdate', s.autoUpdate !== false, 'Update Cue by itself', 'A new version is fetched quietly and put in place when you close Cue, or when the computer has been left alone for 20 minutes, and Cue opens again on the same tabs. Never while something is on air, recording, playing or downloading.'),
           toggle('tidyInstallers', s.tidyInstallers, 'Move opened installers to the Trash after a day'));
         if (S.update && S.update.blocked === 'readonly') p.append(el('div', 'hint', 'Cue cannot update itself here because its folder is read-only. Get the new version from its download page.'));
+        // The update bar's own "Try again" check. With "Update Cue by itself" on the bar stays
+        // hidden, so the answer is read back from the updater's state and written here.
+        const upLine = el('span', 'btnline'); const upBtn = el('button', 'btn', 'Check for updates'); upBtn.type = 'button';
+        const upText = el('span', 'hint', '');
+        upBtn.onclick = () => {
+          send('update-check'); upText.textContent = 'Checking…'; upBtn.disabled = true;
+          const started = Date.now(); let seenChecking = false;
+          const look = setInterval(() => {
+            const u = S.update || {};
+            if (u.state === 'checking') { seenChecking = true; return; }
+            if (!seenChecking && Date.now() - started < 3000) return;
+            if (!upText.isConnected || Date.now() - started > 30000) { clearInterval(look); upBtn.disabled = false; return; }
+            clearInterval(look); upBtn.disabled = false;
+            upText.textContent = u.blocked === 'readonly' ? 'Cue cannot update itself here.'
+              : u.state === 'error' ? 'Cue could not check for updates. Try again in a while.'
+                : u.state === 'available' ? `Cue ${u.latest || 'a new version'} is ready to fetch: see the bar at the top.`
+                  : (u.state === 'ready' || u.state === 'downloading') ? `Cue ${u.latest || 'a new version'} is on its way. It goes in the next time you close Cue.`
+                    : 'You have the newest Cue.';
+          }, 300);
+        };
+        upLine.append(upBtn);
+        const upRow = settingRow('Look for a new version now', upLine, '');
+        const upLab = upRow.querySelector('.slab'); if (upLab) upLab.append(upText); else upRow.append(upText);
+        p.append(upRow);
         const used = el('span', 'btnline'); const usedText = el('span', 'hint', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache'); clearBtn.type = 'button';
         clearBtn.onclick = () => { send('clear-cache'); usedText.textContent = 'Cleared. Sign-ins are kept.'; };
         used.append(clearBtn);

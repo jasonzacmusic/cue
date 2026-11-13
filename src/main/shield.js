@@ -49,9 +49,10 @@ const NEVER_TOUCH = [
   // your request" forever. The $domain= on each rule is what keeps this honest:
   // Meta watching you from someone else's page is still blocked, which is the
   // tracking that matters.
-  '@@||instagram.com^$domain=instagram.com|threads.net',
-  '@@||facebook.com^$domain=facebook.com|instagram.com|threads.net',
-  '@@||threads.net^$domain=threads.net|instagram.com',
+  '@@||instagram.com^$domain=instagram.com|threads.net|threads.com',
+  '@@||facebook.com^$domain=facebook.com|instagram.com|threads.net|threads.com',
+  '@@||threads.net^$domain=threads.net|threads.com|instagram.com',
+  '@@||threads.com^$domain=threads.com|threads.net|instagram.com',
   '@@||whatsapp.com^$domain=whatsapp.com',
   '@@||cdninstagram.com^', '@@||fbcdn.net^',
   // Google's sign-in, on Google's own pages only - the same honesty as Meta above. Measured on

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cue couldn't reach this site</title>
+<link rel="stylesheet" href="pages.css">
+<style>
+  body { display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  .wrap { max-width: 540px; padding: 40px 28px; text-align: left; }
+  .mark { width: 46px; height: 46px; border-radius: 14px; background: var(--field); border: 1px solid var(--line); display: grid; place-items: center; margin-bottom: 22px; }
+  .mark svg { width: 24px; height: 24px; fill: var(--ink); }
+  .cert .mark { background: var(--onair); border-color: var(--onair); }
+  .cert .mark svg { fill: #fff; }
+  h1 { font: italic 500 29px/1.2 ui-serif, Georgia, serif; margin: 0 0 14px; letter-spacing: -0.01em; }
+  p { font-size: 15px; line-height: 1.55; margin: 0 0 14px; max-width: 46ch; }
+  .site { font: 500 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; padding: 10px 12px; border-radius: 10px; background: var(--field); border: 1px solid var(--line); margin: 0 0 20px; }
+  .site:empty { display: none; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 26px; }
+</style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <div class="mark" aria-hidden="true">
+      <svg id="ic-net" viewBox="0 0 24 24"><path d="M12 4C7.3 4 3.1 5.9 0 9l2 2c2.6-2.6 6.1-4 10-4s7.4 1.4 10 4l2-2c-3.1-3.1-7.3-5-12-5zm0 6c-3 0-5.7 1.2-7.7 3.2l2 2C7.8 13.7 9.8 13 12 13s4.2.7 5.7 2.2l2-2C17.7 11.2 15 10 12 10zm0 6c-1.4 0-2.6.6-3.5 1.5L12 21l3.5-3.5c-.9-.9-2.1-1.5-3.5-1.5z"/></svg>
+      <svg id="ic-cert" viewBox="0 0 24 24" hidden><path d="M12 1 3 5v6c0 5 3.8 9.7 9 11 5.2-1.3 9-6 9-11V5l-9-4zm-1 6h2v7h-2V7zm0 9h2v2h-2v-2z"/></svg>
+    </div>
+    <h1 id="head">Cue couldn't reach this site</h1>
+    <p id="why">Something stopped the page on its way here.</p>
+    <div class="site" id="site"></div>
+    <p id="advice"></p>
+    <div class="row">
+      <button class="btn primary" id="again" hidden>Try again</button>
+      <button class="btn" id="back" hidden>Go back</button>
+    </div>
+  </div>
+<script src="offline.js"></script>
+</body>
+</html>

@@ -111,8 +111,9 @@ async function startAgentPort({ port, tokenFile, api }) {
     },
     type: async (a) => {
       const t = api.get(a.id); const wc = await needAwake(t, true);
-      if (a.ref || a.selector || a.text) {
-        const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: a.label }), true);
+      const label = a.label ?? a.text; // the field's label, under either name
+      if (a.ref || a.selector || label) {
+        const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: label }), true);
         if (!p) throw new Error('Could not find that field.');
         wc.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 });
         wc.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 });

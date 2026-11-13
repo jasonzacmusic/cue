@@ -86,13 +86,17 @@
     pic.title = site ? 'Open the page this came from' : 'No source address saved';
     const im = el('img'); im.alt = it.title || 'Saved picture'; im.loading = 'lazy'; im.src = it.thumb || it.img || '';
     pic.appendChild(im);
-    if (site) pic.addEventListener('click', () => open(it.source)); else pic.style.cursor = 'default';
+    if (site) {
+      pic.addEventListener('click', (e) => open(it.source, e));
+      pic.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); open(it.source, e); } });
+    } else pic.style.cursor = 'default';
     const meta = el('div', 'meta');
     if (it.title) meta.appendChild(el('div', 'ttl', it.title));
     const row = el('div', 'row');
     if (site) {
       const a = el('a', 'src', site); a.href = it.source; a.title = it.source;
-      a.addEventListener('click', (e) => { e.preventDefault(); open(it.source); });
+      a.addEventListener('click', (e) => { e.preventDefault(); open(it.source, e); });
+      a.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); open(it.source, e); } });
       row.appendChild(a);
     } else row.appendChild(el('span', 'nosrc', 'Source unknown'));
     const rm = el('button', 'btn small quiet', 'Remove'); rm.type = 'button'; rm.title = 'Take this picture off the board';
@@ -161,7 +165,9 @@
 
   function render() { renderList(); renderMain(); }
 
-  async function open(url) { try { await call('open', { url }); } catch (e) { toast('Could not open that page.'); } }
+  // Cmd-click (Ctrl-click off a Mac) or a middle click opens it in a new tab behind this one.
+  const behind = (e) => !!e && (e.button === 1 || e.metaKey || e.ctrlKey);
+  async function open(url, e) { try { await call('open', behind(e) ? { url, background: true } : { url }); } catch (err) { toast('Could not open that page.'); } }
 
   $('newBtn').addEventListener('click', () => {
     const f = $('newForm'); f.hidden = !f.hidden;

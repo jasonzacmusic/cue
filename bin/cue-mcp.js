@@ -100,7 +100,7 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.7.1' },
+      serverInfo: { name: 'cue', version: '0.7.2' },
       instructions: 'Cue is the user\'s browser and the user works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Each person in Cue has a private folder. Use cue_identities to see the folders you may work in (locked folders and folders not opened to AI agents are never listed), then cue_open with identity set to one of those names or ids to work inside that folder\'s sign-ins without asking anyone to log in. Work only in tabs you open, in the background, so you never steal the window the person is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose folder every time, by its name or id from cue_identities. To put files from this computer on a page, never click a file box (that opens a dialog nobody can answer): use cue_attach, or files on cue_whatsapp and cue_gmail; cue_download saves a file from a page and gives you its path.',
     });
   }

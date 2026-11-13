@@ -292,6 +292,8 @@ module.exports = async function run(c) {
   check('vanish: a page sending you to cue:// is refused', linked === vurl, linked);
   check('vanish: Cue\'s pages are not served in Vanish (control: the danger warning still is)', lib403 === 403 && danger200 === 200, { lib403, danger200 });
   // "Open it anyway" from a Vanish tab is remembered in Vanish only, and forgotten with it.
+  // it is only honoured from the warning page itself, so the tab is on the warning first (Cue loads it, as it does for real)
+  await vs.view.webContents.loadURL('cue://danger?site=' + encodeURIComponent('https://risky.example.test/')).catch(() => {}); await sleep(300);
   await c.internal['shield.proceed']({ site: 'https://risky.example.test/' }, null, vs.view.webContents); await sleep(300);
   const remembered = c.vanishMemory().dangerOk.includes('risky.example.test');
 
@@ -338,7 +340,14 @@ module.exports = async function run(c) {
   const hintKeys = (txt) => txt.split(' · ').map((x) => x.split(' ')[0]);
   const macKeys = vanishKeys.shown(true).map((k) => k.keys); const pcKeys = vanishKeys.shown(false).map((k) => k.keys);
   check('start page: its four shortcuts are the table\'s, on a Mac and elsewhere', hintKeys(hint('mac')).length === 4 && hintKeys(hint('mac')).every((k) => macKeys.includes(k)) && hintKeys(hint('pc')).every((k) => pcKeys.includes(k)), [hintKeys(hint('mac')), hintKeys(hint('pc'))]);
-  check('table: every key is spoken for once (no two jobs share a key)', (() => { const all = vanishKeys.VANISH_KEYS.flatMap((r) => r.keys); return new Set(all).size === all.length; })());
+  check('table: every key is spoken for once (no two jobs share a key)', [true, false].every((mac) => { const all = vanishKeys.VANISH_KEYS.flatMap((r) => vanishKeys.allKeys(r, mac)); return new Set(all).size === all.length; }));
+  {
+    const kd = (o) => ({ type: 'keyDown', ...o }); const id = (o, mac) => (vanishKeys.match(kd(o), mac) || {}).id;
+    check('vanish key: full screen also answers F11 off a Mac and Ctrl+Cmd+F on a Mac, and only there',
+      id({ key: 'F11', code: 'F11' }, false) === 'full' && id({ key: 'f', code: 'KeyF', meta: true, control: true }, true) === 'full'
+      && !id({ key: 'F11', code: 'F11' }, true) && id({ key: 'f', code: 'KeyF', meta: true }, true) === 'find' && id({ key: 'f', code: 'KeyF', control: true }, false) === 'find');
+    check('vanish key: the shown full-screen key is still the first one', vanishKeys.shown(true).find((k) => k.id === 'full').keys === '⌥⌘F' && vanishKeys.shown(false).find((k) => k.id === 'full').keys === 'Ctrl+Alt+F');
+  }
 
   // ---- control: a failing check must be visible
   fs.writeFileSync(path.join(OUT, 'vanish-settings.json'), JSON.stringify(results, null, 2));

@@ -25,6 +25,18 @@ Read this before anything below; several older sections describe the two-folder 
 - **Full screen owns the screen.** The AI panel and Peek were stacked above a full-screen video and took the mouse over part of it (pointer hidden, controls never back until Escape). In full screen they are hidden and the tab is raised; after the Mac's animation the view is nudged one pixel so it listens over the whole screen. Proved on the real screen with `test/fullscreen-real.js` (`CUE_REAL_SCREEN=1` skips the hidden-window stand-ins; by hand only, nobody teaching).
 - **Google's sign-in steps repaint.** Moving between steps sometimes changed the address but left the old step on screen. If the step in the address changes and no visible word does within 3 s, the page reloads once per step (`skipGooglePasskey` in `src/preload/tab.js`). Passkeys themselves still cannot work (see Honest limits): use "Try another way".
 
+## Pre-launch audit fixes (13-Nov-2026)
+Gemini 4 Carbon audited Cue before launch; `test/audit.js` proves the fixes in the real app.
+- **A web page can never open Cue's own pages or a local file**, in a tab, Peek, the AI panel or a pop-up (`protectPage` refuses it; Cue itself still loads `cue://` with `loadURL`). Extension pages lost their old exemption. Every `cue://` HTML page carries a strict CSP (`PAGE_CSP`): no inline scripts, ever, in `src/ui/pages`.
+- **A page that never arrives shows `cue://offline`** (certificate errors say there is no way past); the tab keeps the site's address (`offlineSite`), so Reload and a restart go back to the site.
+- **Links sent to Cue while the folder in front is locked wait** (`lockedPending`) and open after the passcode. Nothing at launch may throw past `pendingUrls`.
+- **Sign-in pop-ups are tracked** (`openPopups`) and close when their folder locks or is removed; Vanish's close before the wipe.
+- **Orders check who sent them**: `ui:cmd`/`ui:invoke` only from the sidebar (or the menu, which sends none), `vanish:cmd` only from Vanish's bar, `cue:internal` only from a `cue://` main frame, acting on that page's own folder; "open it anyway" only from the warning page about that site.
+- Kept on purpose: `storage-access` is still allowed (Netflix and card sign-ins break without it), notifications still need no prompt, the teaching rig tools (`slots`, `show`, `take`, `front`, `volume`) ignore "AI paused" because the Stream Deck pedal uses them. Electron's relauncher waits for the old process, so there is no single-instance race on update.
+
+## AI sites keep one account per folder (0.7.2, 13-Nov-2026)
+Personal and School share sign-ins, and that used to include Claude, ChatGPT and Grok. People sign in to those with the folder's own Google account, so a sign-in in one folder overwrote the other's: School's Claude became jasonzac@gmail.com and School's own artifacts said "Sign in to view this page". AI sites are now in `TWO_ACCOUNTS` (`shared-logins.js`) beside Google and Meta; `test/audit.js` proves it with two real paired sessions. A folder still holding the other's copied session needs one sign-out and sign-in there, once.
+
 ## How to work
 - Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
 - Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.

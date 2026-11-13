@@ -21,6 +21,9 @@ const KEY_SERVICES = {
   arc: 'Arc Safe Storage',
 };
 
+// The `application` name each browser files its password under in the Linux keyring.
+const LINUX_KEYRING_APPS = { chrome: ['chrome', 'chromium'], brave: ['brave'] };
+
 // Roots per platform. Each entry is a list of candidates; the first that exists wins.
 function candidateRoots(platform, home, env) {
   const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
@@ -210,6 +213,7 @@ function deriveKey(secret, platform = process.platform) {
   return crypto.pbkdf2Sync(secret, 'saltysalt', rounds, 16, 'sha1');
 }
 
+// `key` is one key, or on Linux { v10, v11 }: v10 values use 'peanuts', v11 the keyring's password.
 function decryptToBuffer(buf, key) {
   try {
     if (!buf || !key) return null;
@@ -217,7 +221,9 @@ function decryptToBuffer(buf, key) {
     if (b.length < 3 + 16) return null;
     const tag = b.subarray(0, 3).toString('latin1');
     if (tag !== 'v10' && tag !== 'v11') return null;
-    const d = crypto.createDecipheriv('aes-128-cbc', key, Buffer.alloc(16, 0x20));
+    const k = Buffer.isBuffer(key) ? key : key[tag];
+    if (!k) return null;
+    const d = crypto.createDecipheriv('aes-128-cbc', k, Buffer.alloc(16, 0x20));
     return Buffer.concat([d.update(b.subarray(3)), d.final()]);
   } catch { return null; }
 }
@@ -239,7 +245,26 @@ function getKey(browser, opts = {}) {
       const platform = opts.platform || process.platform;
       if (platform === 'win32') return resolve(null);
       if (isSafari(browser)) return resolve(null);
-      if (platform === 'linux') return resolve(deriveKey('peanuts', 'linux'));
+      if (platform === 'linux') {
+        // v10 values are always 'peanuts'. v11 values use a password the browser keeps in the
+        // desktop keyring; secret-tool asks for it (3 s at most). No keyring, no v11: that's all.
+        const peanuts = deriveKey('peanuts', 'linux');
+        const apps = (browser && LINUX_KEYRING_APPS[browser.id]) || [];
+        const run = opts.exec || execFile;
+        const next = (i) => {
+          if (i >= apps.length) return resolve(peanuts);
+          try {
+            run('secret-tool', ['lookup', 'application', apps[i]], { timeout: 3000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+              try {
+                const secret = err ? '' : String(stdout || '').replace(/\r?\n$/, '');
+                if (!secret) return next(i + 1);
+                resolve({ v10: peanuts, v11: deriveKey(secret, 'linux') });
+              } catch { next(i + 1); }
+            });
+          } catch { next(i + 1); }
+        };
+        return next(0);
+      }
       if (platform !== 'darwin') return resolve(null);
       const service = browser && KEY_SERVICES[browser.id];
       if (!service) return resolve(null);
