@@ -20,6 +20,11 @@ Read this before anything below; several older sections describe the two-folder 
 - **Updates on every system** (`updater.js`, `update-core.js`, `settle.js`, `win-swap.ps1`). Mac reads the old labs-downloads feed as before. Windows and Linux read `releases/latest/download/cue-feed.json` on this repo, written and Ed25519-signed by CI with the secret `CUE_FEED_KEY` (public key in `update-core.js`; a backup of the private key is in the print-room Mac's login keychain, item "Cue update feed signing key"). Never change that key: older Windows/Linux copies would stop updating. The tag's release must not be a prerelease.
 - Run tests with their own `CUE_AGENT_PORT` so they never fight the installed Cue for 8813.
 
+## 0.7.1 (13-Nov-2026)
+- **Updates go in while Cue stays open**, at a quiet moment: 20 idle minutes, or the screen locked 10, and nothing on air, recording, playing, downloading, half-typed, in Vanish or "Just for now". `quietRefusal` in `update-core.js` decides (tested in `test/update-cross.js`), main.js asks every 5 minutes, and the tabs are written down (`saveNow`) before the swap because `app.exit` skips before-quit. Other Macs get Cue the first time from iCloud `Claude Handoffs/Updates/2026-11-13 Cue on every computer/install-cue.sh`.
+- **Full screen owns the screen.** The AI panel and Peek were stacked above a full-screen video and took the mouse over part of it (pointer hidden, controls never back until Escape). In full screen they are hidden and the tab is raised; after the Mac's animation the view is nudged one pixel so it listens over the whole screen. Proved on the real screen with `test/fullscreen-real.js` (`CUE_REAL_SCREEN=1` skips the hidden-window stand-ins; by hand only, nobody teaching).
+- **Google's sign-in steps repaint.** Moving between steps sometimes changed the address but left the old step on screen. If the step in the address changes and no visible word does within 3 s, the page reloads once per step (`skipGooglePasskey` in `src/preload/tab.js`). Passkeys themselves still cannot work (see Honest limits): use "Try another way".
+
 ## How to work
 - Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
 - Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.

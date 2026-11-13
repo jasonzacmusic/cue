@@ -319,7 +319,23 @@ function readResult(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
 }
 
+// A ready update also goes in while Cue is open, but only at a quiet moment: nobody has
+// touched the computer for twenty minutes (idleState 'idle' at a 20-minute threshold), or the
+// screen has been locked for at least ten. '' means now is fine; anything else is the reason not.
+function quietRefusal({ ready, auto, idle = 0, idleState = 'active', onAir, busy, downloading, vanish, temp } = {}) {
+  if (!ready) return 'nothing waiting';
+  if (!auto) return 'updates are by hand';
+  if (!(idleState === 'idle' || (idleState === 'locked' && idle >= 600))) return 'someone is here';
+  if (onAir) return 'on air';
+  if (busy) return 'a page is busy';
+  if (downloading) return 'downloading';
+  if (vanish) return 'vanish';
+  if (temp) return 'just for now';
+  return '';
+}
+
 module.exports = {
+  quietRefusal,
   PLACEHOLDER_KEY, FEED_PUBLIC_KEY, Plain,
   newer, canonical, signFeed, verifyFeed, publicKeyFrom, platformKey, pickEntry,
   perUserHome, canWrite, installTarget,

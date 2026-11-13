@@ -196,6 +196,15 @@ module.exports = async function run(c) {
   nPlay.view.webContents.focus();
   nPlay.view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); nPlay.view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' }); await sleep(2500);
   check('full screen: Escape leaves it on a normal tab too', nIn && !c.win().isFullScreen() && nPlay.view.getBounds().x > 0, { nIn, still: c.win().isFullScreen() });
+  // The AI panel used to stay stacked over a full-screen video and take the mouse from it.
+  c.toggleAI(); await sleep(600);
+  await nPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1500);
+  const kids = c.win().contentView.children;
+  const aiHidden = c.getAI() && !c.getAI().getVisible();
+  check('full screen: the AI panel steps out of the way and the video is on top', c.win().isFullScreen() && aiHidden && kids[kids.length - 1] === nPlay.view, { aiHidden, top: kids.indexOf(nPlay.view), n: kids.length });
+  nPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
+  check('full screen: the AI panel comes back after', !c.win().isFullScreen() && c.getAI() && c.getAI().getVisible());
+  c.toggleAI(); await sleep(300);
   c.closeTab(nPlay.id); await sleep(200);
   const { whereToOpen } = require('../src/main/signin');
   const FRONT = 'https://workspace.google.com/intl/en-US/gmail/';

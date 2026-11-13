@@ -147,6 +147,18 @@ const settle = async (u) => {
     check('the built-in key is a real Ed25519 public key', (() => { try { return core.publicKeyFrom(core.FEED_PUBLIC_KEY).asymmetricKeyType === 'ed25519'; } catch { return false; } })());
   }
 
+  // ------------------------------------------------------------- the quiet moment
+  {
+    const ok = { ready: true, auto: true, idle: 1500, idleState: 'idle' };
+    check('quiet moment: twenty idle minutes with nothing going on installs', core.quietRefusal(ok) === '');
+    check('quiet moment: a locked screen for ten minutes installs', core.quietRefusal({ ...ok, idleState: 'locked', idle: 700 }) === '');
+    check('quiet moment: not while someone is at the computer', core.quietRefusal({ ...ok, idleState: 'active', idle: 30 }) !== '');
+    check('quiet moment: not a moment after locking the screen', core.quietRefusal({ ...ok, idleState: 'locked', idle: 60 }) !== '');
+    for (const k of ['onAir', 'busy', 'downloading', 'vanish', 'temp']) check(`quiet moment: not with ${k}`, core.quietRefusal({ ...ok, [k]: true }) !== '');
+    check('quiet moment: nothing waiting, nothing to do', core.quietRefusal({ ...ok, ready: false }) !== '');
+    check('quiet moment: "Update Cue by itself" off is respected', core.quietRefusal({ ...ok, auto: false }) !== '');
+  }
+
   // ------------------------------------------------------------- versions
   check('newer: 0.2.10 beats 0.2.9', core.newer('0.2.10', '0.2.9'));
   check('newer: same is not newer', !core.newer('0.7.0', '0.7.0'));

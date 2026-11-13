@@ -2124,7 +2124,7 @@ function settingsRooms() {
     { id: 'disk', name: 'Storage and updates', line: 'Cue updates itself when you close it, and tidies its own space.',
       build: (p) => {
         toggles(p,
-          toggle('autoUpdate', s.autoUpdate !== false, 'Update Cue by itself', 'A new version is fetched quietly and put in place when you close Cue, so the next time you open it, it is the new one. Nothing is ever installed while Cue is open.'),
+          toggle('autoUpdate', s.autoUpdate !== false, 'Update Cue by itself', 'A new version is fetched quietly and put in place when you close Cue, or when the computer has been left alone for 20 minutes, and Cue opens again on the same tabs. Never while something is on air, recording, playing or downloading.'),
           toggle('tidyInstallers', s.tidyInstallers, 'Move opened installers to the Trash after a day'));
         if (S.update && S.update.blocked === 'readonly') p.append(el('div', 'hint', 'Cue cannot update itself here because its folder is read-only. Get the new version from its download page.'));
         const used = el('span', 'btnline'); const usedText = el('span', 'hint', 'Measuring…'); const clearBtn = el('button', 'btn', 'Clear cache'); clearBtn.type = 'button';

@@ -398,7 +398,22 @@ function skipGooglePasskey() {
     if (since && /Complete sign-in using your passkey|Use your passkey to confirm/i.test(document.body.innerText || '')
         && Date.now() - since > 2000 && n('gpk-a') < 2) { bump('gpk-a'); location.reload(); }
   };
-  setInterval(tick, 500);
+  // Every other step too: password, "Choose how you want to sign in", the code from a
+  // text, the phone prompt. Seen 13-Nov-2026: "Try another way" moved the address to
+  // /challenge/selection while the password step stayed on screen, unchanged, for good.
+  // When the step in the address changes and not one visible word on the page does
+  // within three seconds, the new step was never drawn: one reload draws it.
+  const stepOf = () => location.pathname.replace(/^\/v\d+/, '');
+  const words = () => (document.body ? document.body.innerText : '');
+  let step = stepOf(); let wordsAt = words(); let movedAt = 0;
+  const stuck = () => {
+    const now = stepOf();
+    if (now !== step) { if (!movedAt) movedAt = Date.now(); step = now; return; }
+    if (!movedAt) { wordsAt = words(); return; }
+    if (words() !== wordsAt) { movedAt = 0; wordsAt = words(); return; }
+    if (Date.now() - movedAt > 3000 && n(`gst-${now}`) < 1 && !onPasskey()) { bump(`gst-${now}`); location.reload(); }
+  };
+  setInterval(() => { tick(); stuck(); }, 500);
   if (document.readyState !== 'loading') tick();
   else document.addEventListener('DOMContentLoaded', tick, { once: true });
 }
