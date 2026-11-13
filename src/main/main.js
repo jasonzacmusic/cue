@@ -1,6 +1,6 @@
 // Cue — the browser for people who make things.
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
-if (process.env.CUE_TEST) require('../../test/hidden-windows');
+if (process.env.CUE_TEST && !process.env.CUE_REAL_SCREEN) require('../../test/hidden-windows');
 const {
   app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents, screen, powerMonitor,
 } = require('electron');
@@ -14,6 +14,7 @@ const { groupFor, groupList } = require('./groups');
 const { OBS } = require('./obs');
 const { startAgentPort } = require('./agent-port');
 const { createUpdater, SAY: UPDATE_SAY } = require('./updater');
+const { quietRefusal } = require('./update-core');
 const { settle, settledMessage } = require('./settle');
 const { Library } = require('./db');
 const { Vault } = require('./vault');
@@ -1806,7 +1807,7 @@ function wireTab(t) {
     pushState();
   });
   wc.on('media-paused', () => { t.playing = false; t.videoAt = Date.now(); pushState(); });
-  wc.on('enter-html-full-screen', () => { t.fullscreen = true; const w = hostWindow(t); if (w) w.setFullScreen(true); layout(); });
+  wc.on('enter-html-full-screen', () => { t.fullscreen = true; const w = hostWindow(t); if (w) w.setFullScreen(true); layout(); settleAfterFullScreen(t, true); });
   wc.on('leave-html-full-screen', () => { t.fullscreen = false; const w = hostWindow(t); if (w) w.setFullScreen(false); layout(); settleAfterFullScreen(t); });
   wc.on('found-in-page', (_e, r) => sendEvent('find-result', { active: r.activeMatchOrdinal, total: r.matches }));
   wc.on('focus', () => {
@@ -2218,6 +2219,7 @@ function splitGutters(rects, mode) {
 
 let panes = [];
 let gutters = [];
+let wasFull = false;
 // A page that has gone - crashed, or closed from under us - leaves a view
 // object on the tab that throws "Object has been destroyed" the moment anything
 // touches it. One dead view used to take down the whole layout pass, and with
@@ -2252,12 +2254,21 @@ function layout() {
     else if (t.awake) { t.view.setBounds(offStage()); t.view.setVisible(true); }
     else { t.view.setVisible(false); t.view.setBounds(rects[0] || contentRect()); }
   }
-  if (aiView) aiView.setBounds({ x: w - aiWidth(), y: TOOLBAR + AI_HEAD, width: aiWidth(), height: Math.max(0, h - TOOLBAR - AI_HEAD) });
+  if (aiView) { aiView.setBounds({ x: w - aiWidth(), y: TOOLBAR + AI_HEAD, width: aiWidth(), height: Math.max(0, h - TOOLBAR - AI_HEAD) }); aiView.setVisible(!full); }
   if (peek) {
     const r = contentRect(); const pw = Math.round(r.width * 0.5);
     peek.view.setBounds({ x: r.x + r.width - pw - 8, y: r.y + 8, width: pw, height: r.height - 16 });
-    if (!overlay) mainWin.contentView.addChildView(peek.view);
+    peek.view.setVisible(!full);
+    if (!overlay && !full) mainWin.contentView.addChildView(peek.view);
   }
+  // A video in full screen owns the whole screen. The AI panel, Peek and the sidebar's view were
+  // still stacked above it (seen 13-Nov-2026): they took the mouse over a third of the picture,
+  // so the controls never came back and the pointer stayed hidden until Escape. The playing tab
+  // goes to the top while it is full screen, and the sidebar's view back on top when it leaves
+  // with a panel or a revealed sidebar showing.
+  if (full && active.view) mainWin.contentView.addChildView(active.view);
+  else if (wasFull && (overlay || sideReveal)) mainWin.contentView.addChildView(uiView);
+  wasFull = !!full;
   if (stageWin && !stageWin.isDestroyed()) {
     const [sw, sh] = stageWin.getContentSize();
     // One tab fills the stage; two or three share it in equal columns, which is
@@ -2429,10 +2440,34 @@ async function obsAimAtStage() {
 // hidden the way the video asked. Lay it out again once the animation has
 // finished, hand the keyboard back, and move the mouse a hair so the pointer
 // comes back without him having to click.
-function settleAfterFullScreen(t) {
+// The Mac's full-screen animation resizes the window for about half a second after Cue has
+// placed the page, and the page's view can keep listening for the mouse over the rectangle it had
+// before. A one-pixel nudge once the animation is over makes it measure itself again.
+// An update reopens Cue with app.exit, which skips before-quit: write the tabs down first.
+function saveNow() { try { persist(); store.flush(); } catch {} }
+
+// Why now is NOT a good moment to put an update in place and reopen. '' means it is.
+function quietMomentRefusal() {
+  if (process.env.CUE_TEST) return 'test';
+  let idle = 0; let idleState = 'active';
+  try { idle = powerMonitor.getSystemIdleTime(); idleState = powerMonitor.getSystemIdleState(20 * 60); } catch { return 'cannot tell'; }
+  return quietRefusal({
+    ready: !!(updater && updater.ready()), auto: settings().autoUpdate !== false, idle, idleState,
+    onAir: !!(live || programId || recTabId),
+    busy: tabs.some((t) => t.holdAwake || t.playing || t.audible || t.dirty),
+    downloading: downloads.some((d) => d.state === 'progressing'),
+    vanish: !!(vanish && vanish.window()),
+    temp: !tempHours() && tabs.some((t) => t.temp),
+  });
+}
+
+function settleAfterFullScreen(t, entering = false) {
   const again = () => {
     if (!t || !t.view || t.view.webContents.isDestroyed()) return;
     layout();
+    if (entering && t.fullscreen) {
+      try { const b = t.view.getBounds(); t.view.setBounds({ ...b, width: Math.max(1, b.width - 1) }); t.view.setBounds(b); } catch {}
+    }
     try { t.view.webContents.focus(); } catch {}
     try {
       const b = t.view.getBounds();
@@ -2443,6 +2478,7 @@ function settleAfterFullScreen(t) {
   };
   setTimeout(again, 120);
   setTimeout(again, 600);   // the Mac's full-screen animation is about half a second
+  if (entering) setTimeout(again, 1200);
 }
 
 function moveView(t, toWin, host) {
@@ -3289,7 +3325,7 @@ function uiCommandRaw(cmd, a = {}) {
     case 'set-scene': if (t) { t.obsScene = a.scene || ''; pushState(); persist(); } break;
     case 'update-check': if (updater) updater.check({ quiet: false }); break;
     case 'update-get': if (updater) updater.download(); break;
-    case 'update-install': if (updater) updater.install(); break;
+    case 'update-install': if (updater) { saveNow(); updater.install(); } break;
     case 'update-notes': if (updater) updater.openPage(); break;
     case 'update-dismiss': if (updater) updater.dismiss(); break;
     case 'agent-copy': clipboard.writeText(agentSetupText()); sendEvent('toast', 'AI setup copied.'); break;
@@ -4736,7 +4772,8 @@ function createMain() {
     if (store.data.welcome === 'pending' && !process.env.CUE_TEST && !process.env.CUE_SMOKE && !isLocked(openFolder())) sendEvent('welcome', welcomeData());
     if (process.env.CUE_SMOKE) { console.log('CUE_SMOKE_OK'); app.quit(); }
   });
-  mainWin.on('resize', () => { layout(); store.data.bounds = mainWin.getBounds(); store.save(); });
+  mainWin.on('resize', () => { layout(); if (!mainWin.isFullScreen() && !mainWin.isSimpleFullScreen()) { store.data.bounds = mainWin.getBounds(); store.save(); } });
+  mainWin.on('enter-full-screen', () => { const t = byId(activeId); if (t && t.fullscreen) settleAfterFullScreen(t, true); });
   mainWin.on('move', () => { store.data.bounds = mainWin.getBounds(); store.save(); });
   // Leaving full screen by the green button, Escape or a Mac swipe tells the WINDOW
   // but never told the PAGE, so the video stayed in its full-screen layout inside a
@@ -5232,6 +5269,19 @@ app.whenReady().then(async () => {
     log: logAgent,
   });
   updater.start();
+  // He rarely closes Cue, so "when you close it" could mean never: 0.7.0 sat waiting on the Mac
+  // mini for a day. A ready update also goes in at a quiet moment - nobody has touched the
+  // computer for twenty minutes, or the screen has been locked for ten - and Cue reopens on the
+  // same tabs. Never while anything could be lost or interrupted: a tab on air or recording,
+  // the camera in use, sound playing, a download running, a half-filled form, a Vanish window,
+  // or "Just for now" tabs that are meant to go only when he closes Cue himself.
+  setInterval(() => {
+    const why = quietMomentRefusal();
+    if (why) return;
+    logAgent({ tool: 'update', note: `installing ${updater.state().latest} at a quiet moment` });
+    saveNow();
+    updater.install().catch((e) => logAgent({ tool: 'update', error: String(e && e.message) }));
+  }, 5 * 60 * 1000).unref();
   // The new version goes in as Cue closes, when there is no window to disturb
   // and nothing to lose. Open Cue again and it is simply the new one.
   app.on('will-quit', () => {

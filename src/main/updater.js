@@ -4,9 +4,11 @@
 // the background, and puts it in place when you close Cue. You never click
 // anything and you never wait: the next time you open Cue, it is the new one.
 //
-// The one thing it will not do is interrupt. Nothing is installed while Cue is
-// open, so a class, a recording or a tab on air can never be ended by a browser
-// deciding it is time. If the swap cannot be done at quit, the old version
+// The one thing it will not do is interrupt. While Cue is open an update only
+// goes in at a quiet moment (quietRefusal in update-core.js: twenty idle minutes
+// or a locked screen, nothing on air, playing, recording or downloading), so a
+// class, a recording or a tab on air can never be ended by a browser deciding
+// it is time. If the swap cannot be done at quit, the old version
 // simply opens again and the next quit tries once more, from the copy already
 // waiting in <userData>/updates - nothing is fetched twice.
 //
