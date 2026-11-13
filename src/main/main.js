@@ -4775,7 +4775,10 @@ function cycle(d) {
 
 // ---------------------------------------------------------------- sleep
 // A call, a tab being recorded and a half-typed form are all lost if the tab goes to sleep.
-function mustStayAwake(t) { return t.holdAwake || t.dirty || t.id === recTabId; }
+// Cue's own pages (Boards, Library...) are small and are where your work is laid out, so they never
+// sleep: waking one reloaded it, and Boards went blank while its pictures came back.
+const OWN_PAGE_AWAKE = /^cue:\/\/(boards|library|bills|thumbcheck)/i;
+function mustStayAwake(t) { return t.holdAwake || t.dirty || t.id === recTabId || OWN_PAGE_AWAKE.test(String(t.url || '')); }
 setInterval(() => {
   const mins = settings && store ? settings().sleepMinutes : 30;
   const cutoff = Date.now() - mins * 60000;
@@ -5419,7 +5422,7 @@ app.whenReady().then(async () => {
   wireSharing();
   sharedLogins = { syncNow: () => syncShared() };
   if (sharing.size) setTimeout(() => syncShared().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, mustStayAwake, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
     // people's folders (test/people.js)
     addFolder, removeFolder, renameFolder, lockFolder, tryUnlock, setPasscode, lockSweep, isLocked, folderRows, userFolders, setShared, reopenClosed,
     lastState: () => lastState, sendState, closedStack, downloads, invoke: uiInvoke, internalAs: (cmd, a, from) => internal[cmd](a, from),

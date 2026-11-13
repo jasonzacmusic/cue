@@ -35,13 +35,13 @@ h2 { margin: 6px 0 0; font-size: 11px; letter-spacing: .08em; text-transform: up
     <input id="q" name="q" placeholder="Type an address, or search Google" autocomplete="off">
   </form>
   <div class="engines" id="engines">
-    <button data-u="https://www.google.com/search?q=">Google</button>
-    <button data-u="https://www.google.com/search?udm=2&amp;q=">Images</button>
-    <button data-u="https://www.youtube.com/results?search_query=">YouTube</button>
-    <button data-u="https://www.pinterest.com/search/pins/?q=">Pinterest</button>
-    <button data-u="https://github.com/search?type=repositories&amp;q=">GitHub</button>
-    <button data-u="https://claude.ai/new?q=">Ask Claude</button>
-    <button data-u="https://chatgpt.com/?q=">Ask ChatGPT</button>
+    <button data-u="https://www.google.com/search?q=" data-home="https://www.google.com/">Google</button>
+    <button data-u="https://www.google.com/search?udm=2&amp;q=" data-home="https://images.google.com/">Images</button>
+    <button data-u="https://www.youtube.com/results?search_query=" data-home="https://www.youtube.com/">YouTube</button>
+    <button data-u="https://www.pinterest.com/search/pins/?q=" data-home="https://www.pinterest.com/">Pinterest</button>
+    <button data-u="https://github.com/search?type=repositories&amp;q=" data-home="https://github.com/">GitHub</button>
+    <button data-u="https://claude.ai/new?q=" data-home="https://claude.ai/new">Ask Claude</button>
+    <button data-u="https://chatgpt.com/?q=" data-home="https://chatgpt.com/">Ask ChatGPT</button>
   </div>
   <h2>Make</h2>
   <div class="tiles">
@@ -78,7 +78,8 @@ document.getElementById('f').addEventListener('submit', (e) => {
   if (to) location.href = to; else q.focus();
 });
 document.querySelectorAll('#engines button').forEach((b) => {
-  b.addEventListener('click', () => { const v = q.value.trim(); if (v) location.href = b.dataset.u + encodeURIComponent(v); else q.focus(); });
+  // Nothing typed: the button opens that site itself, which is what a person clicking "YouTube" means.
+  b.addEventListener('click', () => { const v = q.value.trim(); location.href = v ? b.dataset.u + encodeURIComponent(v) : b.dataset.home; });
 });
 </script>
 </body>

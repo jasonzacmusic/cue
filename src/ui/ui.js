@@ -1245,6 +1245,7 @@ function size(n) {
 }
 
 // ---------------------------------------------------------------- omnibox + suggestions
+const ENGINE_HOME = { google: 'https://www.google.com/', images: 'https://images.google.com/', youtube: 'https://www.youtube.com/', pinterest: 'https://www.pinterest.com/', github: 'https://github.com/', claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
 const ENGINE_NAMES = { google: 'Google', images: 'Images', youtube: 'YouTube', pinterest: 'Pinterest', github: 'GitHub', claude: 'Claude', chatgpt: 'ChatGPT' };
 let sugItems = []; let sugSel = 0;
 
@@ -1321,7 +1322,14 @@ omni.addEventListener('keydown', (e) => {
   }
 });
 document.querySelectorAll('#engines button').forEach((b) => {
-  b.onmousedown = (e) => { e.preventDefault(); const q = omni.value.trim(); if (q) { send('navigate', { text: q, engine: b.dataset.engine }); endEdit(); } };
+  // With nothing typed (or the box still showing the page's own address) the button opens that site.
+  b.onmousedown = (e) => {
+    e.preventDefault();
+    const q = omni.value.trim();
+    const typed = q && !(omni.selectionStart === 0 && omni.selectionEnd === omni.value.length && /^[a-z][\w+.-]*:\/\//i.test(q));
+    send('navigate', typed ? { text: q, engine: b.dataset.engine } : { text: ENGINE_HOME[b.dataset.engine] || 'https://www.google.com/' });
+    endEdit();
+  };
 });
 
 // Drop an image on the bar to find where it came from.
@@ -1860,22 +1868,45 @@ function settingsRooms() {
               (on) => act('folder.agents', { id: f.id, on }, told)));
             card.append(grid);
 
-            // ---- the passcode
+            // ---- the passcode: a switch, off unless the person turns it on. On asks for the new
+            // passcode; off asks for the current one. Nothing changes until the passcode is typed.
+            const lockBox = el('div', 'lockbox');
             const lockRow = el('span', 'btnline');
-            const cur = el('input'); cur.type = 'password'; cur.placeholder = 'Current passcode'; cur.autocomplete = 'off'; cur.className = 'short';
-            const nw = el('input'); nw.type = 'password'; nw.placeholder = f.hasLock ? 'New passcode' : '4 or more'; nw.autocomplete = 'new-password'; nw.className = 'short';
-            const setB = el('button', 'btn', f.hasLock ? 'Change' : 'Set passcode'); setB.type = 'button';
-            setB.onclick = async () => { const r = await act('folder-passcode', { id: f.id, current: cur.value, code: nw.value }, told); if (r && r.ok) { await draw(); } };
-            if (f.hasLock) lockRow.append(cur);
-            lockRow.append(nw, setB);
-            if (f.hasLock) {
-              const off = el('button', 'btn', 'Remove passcode'); off.type = 'button';
-              off.onclick = async () => { const r = await act('folder-passcode', { id: f.id, current: cur.value, code: '' }, told); if (r && r.ok) await draw(); };
-              const now = el('button', 'btn', 'Lock now'); now.type = 'button';
-              now.onclick = async () => { await act('folder.lock-now', { id: f.id }, told); draw(); };
-              lockRow.append(off, now);
-            }
-            card.append(settingRow(f.hasLock ? 'Passcode (set)' : 'Passcode', lockRow, 'Stops someone clicking into a folder that is not theirs. It is not a safe: people who share one computer login could still dig through the computer’s own files.'));
+            const showLock = (mode) => {
+              lockRow.textContent = '';
+              if (!mode) { lockRow.style.display = 'none'; return; }
+              lockRow.style.display = '';
+              const pw = el('input'); pw.type = 'password'; pw.autocomplete = mode === 'off' ? 'off' : 'new-password'; pw.className = 'short';
+              pw.placeholder = mode === 'off' ? 'Current passcode' : mode === 'change' ? 'Current passcode' : 'New passcode';
+              pw.setAttribute('aria-label', pw.placeholder);
+              const nw = el('input'); nw.type = 'password'; nw.autocomplete = 'new-password'; nw.className = 'short'; nw.placeholder = 'New passcode'; nw.setAttribute('aria-label', 'New passcode');
+              const go = el('button', 'btn', mode === 'off' ? 'Turn off' : mode === 'change' ? 'Change' : 'Turn on'); go.type = 'button';
+              const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button';
+              cancel.onclick = () => { sw.checked = !!f.hasLock; showLock(f.hasLock ? 'set' : null); told(''); };
+              go.onclick = async () => {
+                const args = mode === 'on' ? { id: f.id, current: '', code: pw.value } : mode === 'off' ? { id: f.id, current: pw.value, code: '' } : { id: f.id, current: pw.value, code: nw.value };
+                const r = await act('folder-passcode', args, told);
+                if (r && r.ok) await draw();
+              };
+              pw.onkeydown = (e) => { if (e.key === 'Enter' && mode !== 'change') go.click(); };
+              nw.onkeydown = (e) => { if (e.key === 'Enter') go.click(); };
+              if (mode === 'set') {
+                const ch = el('button', 'btn', 'Change passcode'); ch.type = 'button'; ch.onclick = () => showLock('change');
+                const now = el('button', 'btn', 'Lock now'); now.type = 'button';
+                now.onclick = async () => { await act('folder.lock-now', { id: f.id }, told); draw(); };
+                lockRow.append(ch, now);
+                return;
+              }
+              lockRow.append(pw); if (mode === 'change') lockRow.append(nw);
+              lockRow.append(go, cancel);
+              setTimeout(() => pw.focus(), 0);
+            };
+            const swRow = toggle('', !!f.hasLock, 'Ask for a passcode to open this folder', 'Off unless you turn it on. Stops someone clicking into a folder that is not theirs. It is not a safe: people who share one computer login could still dig through the computer’s own files.',
+              (on) => showLock(on ? (f.hasLock ? 'set' : 'on') : (f.hasLock ? 'off' : null)));
+            const sw = swRow.querySelector('input');
+            lockBox.append(swRow, lockRow);
+            showLock(f.hasLock ? 'set' : null);
+            card.append(lockBox);
 
             // ---- sharing sign-ins: only shown for a pair that is on, or when asked for
             for (const other of f.shared || []) {

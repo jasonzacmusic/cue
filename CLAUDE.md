@@ -37,6 +37,11 @@ Gemini 4 Carbon audited Cue before launch; `test/audit.js` proves the fixes in t
 ## AI sites keep one account per folder (0.7.2, 13-Nov-2026)
 Personal and School share sign-ins, and that used to include Claude, ChatGPT and Grok. People sign in to those with the folder's own Google account, so a sign-in in one folder overwrote the other's: School's Claude became jasonzac@gmail.com and School's own artifacts said "Sign in to view this page". AI sites are now in `TWO_ACCOUNTS` (`shared-logins.js`) beside Google and Meta; `test/audit.js` proves it with two real paired sessions. A folder still holding the other's copied session needs one sign-out and sign-in there, once.
 
+## 0.7.3 (13-Nov-2026)
+- **Link buttons** (start page and address bar): with nothing typed, or with the page's own address still selected in the box, each opens its site; typed words are still searched. Before, they did nothing, or searched the page's address.
+- **Folder passcode is a switch** in Settings > Folders and accounts, "Ask for a passcode to open this folder", off by default. On asks for a new one, off asks for the current one.
+- **Boards never sleeps** (`OWN_PAGE_AWAKE` in `mustStayAwake`; Library, Bills and Thumbnail check too) and keeps each picture's card, so coming back or switching boards does not reload pictures. `test/ui-fixes.js`.
+
 ## How to work
 - Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
 - Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.

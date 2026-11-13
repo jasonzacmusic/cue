@@ -58,13 +58,20 @@
   }
   const current = () => boards.find((b) => b.id === selected) || null;
 
-  async function load(preferId) {
-    try { boards = (await call('boards.list')) || []; } catch (e) { boards = []; toast('Could not load your boards.'); }
+  let lastSeen = '';
+  async function load(preferId, quiet) {
+    let fresh;
+    try { fresh = (await call('boards.list')) || []; } catch (e) { if (quiet) return; fresh = []; toast('Could not load your boards.'); }
+    const seen = JSON.stringify(fresh);
+    if (quiet && seen === lastSeen) return; // nothing new: leave the page exactly as it is
+    lastSeen = seen; boards = fresh;
     if (preferId && boards.some((b) => b.id === preferId)) selected = preferId;
     else if (!boards.some((b) => b.id === selected)) selected = boards.length ? boards[0].id : null;
     render();
   }
 
+  const thumbs = new Map();
+  function thumbFor(src) { let im = thumbs.get(src); if (!im) { im = el('img'); im.alt = ''; im.src = src; thumbs.set(src, im); } return im; }
   function renderList() {
     const ul = $('blist'); ul.textContent = '';
     for (const b of boards) {
@@ -72,19 +79,28 @@
       btn.setAttribute('aria-current', b.id === selected ? 'true' : 'false');
       const st = el('span', 'stack');
       const first = (b.items || [])[0];
-      if (first && first.thumb) { const im = el('img'); im.alt = ''; im.src = first.thumb; st.appendChild(im); } else st.textContent = '▢';
+      if (first && first.thumb) { st.appendChild(thumbFor(first.thumb)); } else st.textContent = '▢';
       btn.append(st, el('span', 'nm', b.name), el('span', 'ct', String((b.items || []).length)));
       btn.addEventListener('click', () => { selected = b.id; renaming = false; confirmDelete = false; render(); });
       li.appendChild(btn); ul.appendChild(li);
     }
   }
 
+  // Each picture's card is made once and kept, keyed by board and picture, so switching boards or
+  // coming back never makes its image load (and flash) again.
+  const cards = new Map();
+  function cardFor(board, it) {
+    const k = board.id + '|' + it.id + '|' + (it.thumb || it.img || '') + '|' + (it.title || '') + '|' + (it.source || '');
+    let c = cards.get(k);
+    if (!c) { c = renderCard(board, it); cards.set(k, c); }
+    return c;
+  }
   function renderCard(board, it) {
     const card = el('article', 'card');
     const pic = el('button', 'pic'); pic.type = 'button';
     const site = siteName(it.source);
     pic.title = site ? 'Open the page this came from' : 'No source address saved';
-    const im = el('img'); im.alt = it.title || 'Saved picture'; im.loading = 'lazy'; im.src = it.thumb || it.img || '';
+    const im = el('img'); im.alt = it.title || 'Saved picture'; im.decoding = 'async'; im.src = it.thumb || it.img || '';
     pic.appendChild(im);
     if (site) {
       pic.addEventListener('click', (e) => open(it.source, e));
@@ -159,7 +175,7 @@
       m.appendChild(e); return;
     }
     const grid = el('div', 'grid');
-    for (const it of items.slice().reverse()) grid.appendChild(renderCard(b, it));
+    for (const it of items.slice().reverse()) grid.appendChild(cardFor(b, it));
     m.appendChild(grid);
   }
 
@@ -189,4 +205,6 @@
 
   if (SAMPLE) $('sampleNote').hidden = false;
   load();
+  // Coming back to Boards picks up pictures added from other tabs, without redrawing what is there.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !renaming) load(null, true); });
 })();
