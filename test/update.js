@@ -185,8 +185,8 @@ function fakeApp(dir, version) {
 
   // ------------------------------- 5. it refuses to put an older Cue over a newer
   fakeApp(path.join(apps, 'Cue.app'), '99.9.9');
-  const refused = up.installOnQuit();
-  check('a NEWER Cue already installed is left alone', refused === false && versionAt(path.join(apps, 'Cue.app')) === '99.9.9',
+  await up.install();
+  check('a NEWER Cue already installed is left alone', versionAt(path.join(apps, 'Cue.app')) === '99.9.9',
     { returned: refused, stillThere: versionAt(path.join(apps, 'Cue.app')) });
   check('and it says why in the log', log.some((e) => /left alone/.test(e.error || '')), log.filter((e) => /left alone/.test(e.error || '')).map((e) => e.error));
 
@@ -197,9 +197,9 @@ function fakeApp(dir, version) {
   check('the download is ready again for the swap', st.state === 'ready', { state: st.state, error: st.error });
   fs.rmSync(path.join(apps, 'Cue.app'), { recursive: true, force: true });
   fakeApp(path.join(apps, 'Cue.app'), '0.0.1');
-  const swapped = up2.installOnQuit();
+  await up2.install();
   const after = versionAt(path.join(apps, 'Cue.app'));
-  check('at quit the new version is put in place', swapped === true && after === dmgVersion, { returned: swapped, nowInstalled: after, expected: dmgVersion });
+  check('after confirmation the new version is put in place', after === dmgVersion, { nowInstalled: after, expected: dmgVersion });
   check('the replaced copy is kept in the Trash, not deleted',
     fs.readdirSync(trash).some((n) => /^Cue-0\.0\.1-test-replaced-/.test(n)));
 
@@ -210,7 +210,7 @@ function fakeApp(dir, version) {
   await bad.check({ quiet: false });
   st = await ready(bad);
   check('a download that does not match its checksum is thrown away', st.state === 'error' && /checksum/.test(st.error || ''), { state: st.state, error: st.error });
-  check('and nothing is put in place after a bad download', bad.installOnQuit() === false);
+  check('and nothing is put in place after a bad download', (await bad.install()).state === 'error');
 
   // ----------------------------------- 6. a waiting copy does not get stuck on old
   const older = process.env.CUE_OLDER_DMG;
@@ -237,8 +237,8 @@ function fakeApp(dir, version) {
 
     fs.rmSync(path.join(apps, 'Cue.app'), { recursive: true, force: true });
     fakeApp(path.join(apps, 'Cue.app'), first);
-    const landed = long.installOnQuit();
-    check('at quit the newest version lands, not the first one fetched', landed === true && versionAt(path.join(apps, 'Cue.app')) === dmgVersion, versionAt(path.join(apps, 'Cue.app')));
+    await long.install();
+    check('after confirmation the newest version lands, not the first one fetched', versionAt(path.join(apps, 'Cue.app')) === dmgVersion, versionAt(path.join(apps, 'Cue.app')));
   } else {
     console.log('[cue-update] SKIP a waiting copy being replaced: no CUE_OLDER_DMG given');
   }

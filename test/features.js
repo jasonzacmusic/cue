@@ -162,6 +162,10 @@ module.exports = async function run(c) {
   const vPlay = c.openTab({ url: `${base}/note?full`, identity: 'vanish' }); await loaded(vPlay); await sleep(300);
   vPlay.view.webContents.focus();
   await vPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1800);
+  const checkCursor = async (tab) => tab.view.webContents.executeJavaScript(`
+    document.body.style.setProperty('cursor', 'none', 'important');
+    getComputedStyle(document.body).cursor !== 'none'`);
+  check('Vanish fullscreen keeps the cursor visible over a player that hides it', await checkCursor(vPlay));
   const vb1 = vPlay.view.getBounds(); const [vfw, vfh] = vw.getContentSize();
   check('vanish: a video fills the whole screen without leaving this desktop', c.vanish.isFull() && vw.isSimpleFullScreen() && !vw.isFullScreen() && vb1.y === 0 && vb1.height === vfh && vb1.width === vfw, [vb1, vfw, vfh]);
   vPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
@@ -188,6 +192,7 @@ module.exports = async function run(c) {
   nPlay.view.webContents.focus();
   await nPlay.view.webContents.executeJavaScript(`document.documentElement.requestFullscreen()`, true).catch(() => {}); await sleep(1800);
   const nb = nPlay.view.getBounds(); const [nw, nh] = c.win().getContentSize();
+  check('Normal fullscreen keeps the cursor visible over a player that hides it', await checkCursor(nPlay));
   check('full screen: a normal tab fills the screen', c.win().isFullScreen() && nb.x === 0 && nb.y === 0 && nb.width === nw && nb.height === nh, [nb, nw, nh]);
   nPlay.view.webContents.executeJavaScript(`document.exitFullscreen()`, true).catch(() => {}); await sleep(2500);
   check('full screen: leaving restores the window', !c.win().isFullScreen() && nPlay.view.getBounds().x > 0, nPlay.view.getBounds());

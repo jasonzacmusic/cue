@@ -8,6 +8,12 @@
   const said = $('said');
   const buttons = [$('bring'), $('other')];
   if (!window.cueInternal) { buttons.forEach((b) => { b.hidden = true; }); $('close').hidden = true; return; }
+  $('chrome').onclick = async () => {
+    try {
+      const result = await window.cueInternal.invoke('signin.open-browser', {});
+      said.textContent = result.error || 'Continue in Google Chrome.';
+    } catch { said.textContent = 'Chrome could not open.'; }
+  };
   $('close').onclick = () => window.cueInternal.invoke('signin.close', {});
   const go = async (cmd) => {
     buttons.forEach((b) => { b.disabled = true; });

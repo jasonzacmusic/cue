@@ -1,0 +1,10 @@
+{
+  "name": "Work and projects",
+  "about": "Keep projects and reference material in their own Spaces.",
+  "spaces": [
+    "Home",
+    "Projects",
+    "Research"
+  ],
+  "startSpace": "Home"
+}

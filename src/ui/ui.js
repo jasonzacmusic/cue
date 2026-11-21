@@ -461,15 +461,9 @@ function renderSpaces() {
 }
 
 function renderUpdate() {
-  // With updating left to itself there is nothing to show: the new version is
-  // fetched in the background and goes in when you close Cue. Only a failure
-  // is worth a line. Switch it off and the old bar comes back, where nothing
-  // happens until you click it. A failure is said once per version, in the
-  // updater's own plain words (never a raw error), and can be put away.
   const u = S.update; const bar = $('#updatebar');
   if (!u || u.state === 'idle' || u.state === 'checking') { bar.hidden = true; return; }
-  if (S.settings.autoUpdate !== false && u.state !== 'error') { bar.hidden = true; return; }
-  bar.hidden = false; bar.innerHTML = '';
+  bar.hidden = false; bar.innerHTML = ''; bar.title = '';
   const say = el('span', 'u-say', '');
   const act = el('div', 'u-act', '');
   if (u.state === 'available') {
@@ -483,6 +477,10 @@ function renderUpdate() {
     say.textContent = `Cue ${u.latest} is ready to install.`;
     const go = el('button', '', 'Install and reopen'); go.onclick = () => send('update-install');
     act.append(go);
+    if (u.notes) {
+      const notes = el('details'); notes.append(el('summary', '', 'What’s new'), el('p', '', u.notes));
+      act.append(notes);
+    }
   } else if (u.state === 'error') {
     say.textContent = u.error || 'Cue could not check for a new version just now. It will try again later.';
     const again = el('button', 'ghost', 'Try again'); again.onclick = () => send('update-check');
@@ -2169,14 +2167,12 @@ function settingsRooms() {
         });
       } },
 
-    { id: 'disk', name: 'Storage and updates', line: 'Cue updates itself when you close it, and tidies its own space.',
+    { id: 'disk', name: 'Storage and updates', line: 'Check for updates and manage stored files.',
       build: (p) => {
         toggles(p,
-          toggle('autoUpdate', s.autoUpdate !== false, 'Update Cue by itself', 'A new version is fetched quietly and put in place when you close Cue, or when the computer has been left alone for 20 minutes, and Cue opens again on the same tabs. Never while something is on air, recording, playing or downloading.'),
+          toggle('autoUpdate', s.autoUpdate !== false, 'Download updates automatically', 'Cue shows the available version. Choose Install and reopen when you are ready.'),
           toggle('tidyInstallers', s.tidyInstallers, 'Move opened installers to the Trash after a day'));
         if (S.update && S.update.blocked === 'readonly') p.append(el('div', 'hint', 'Cue cannot update itself here because its folder is read-only. Get the new version from its download page.'));
-        // The update bar's own "Try again" check. With "Update Cue by itself" on the bar stays
-        // hidden, so the answer is read back from the updater's state and written here.
         const upLine = el('span', 'btnline'); const upBtn = el('button', 'btn', 'Check for updates'); upBtn.type = 'button';
         const upText = el('span', 'hint', '');
         upBtn.onclick = () => {
@@ -2191,7 +2187,7 @@ function settingsRooms() {
             upText.textContent = u.blocked === 'readonly' ? 'Cue cannot update itself here.'
               : u.state === 'error' ? 'Cue could not check for updates. Try again in a while.'
                 : u.state === 'available' ? `Cue ${u.latest || 'a new version'} is ready to fetch: see the bar at the top.`
-                  : (u.state === 'ready' || u.state === 'downloading') ? `Cue ${u.latest || 'a new version'} is on its way. It goes in the next time you close Cue.`
+                  : (u.state === 'ready' || u.state === 'downloading') ? `Cue ${u.latest || 'a new version'} is on its way. Choose Install and reopen when ready.`
                     : 'You have the newest Cue.';
           }, 300);
         };
@@ -2389,7 +2385,7 @@ function welcomeSheet(d) {
       if (x) for (const u of x.pinned || []) if (boxes.has(u)) boxes.get(u).checked = true;
       if (school) school.parentElement.hidden = !(x && x.school);
     };
-    const plain = el('button', 'choice on', 'Plain<small>One Space, nothing pinned you did not pick. You can add more later.</small>'); plain.dataset.id = '';
+    const plain = el('button', 'choice on', 'Everyday browsing<small>One Space, nothing pinned you did not pick. You can add more later.</small>'); plain.dataset.id = '';
     plain.onclick = () => pick('');
     setups.append(plain);
     for (const x of d.setups || []) {

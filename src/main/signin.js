@@ -17,4 +17,32 @@ function whereToOpen(url, disposition, from = '') {
 const NOT_FOR_PAGES = /^(file|data|cue|chrome|devtools|view-source|javascript|filesystem):/i;
 const refuseOpen = (url, from = '') => NOT_FOR_PAGES.test(url) && !/^cue:/i.test(from); // an extension's page included
 
-module.exports = { refuseOpen, whereToOpen };
+// Start a new sign-in at the site. OAuth codes and account hints stay in the originating browser.
+async function openSiteInChrome(address) {
+  const url = new URL(address);
+  if (url.protocol !== 'https:') throw new Error('Choose an HTTPS site.');
+  const site = url.origin + '/';
+  const fs = require('fs');
+  const path = require('path');
+  const { spawn } = require('child_process');
+  let program;
+  let args = [site];
+  if (process.platform === 'darwin') {
+    program = '/usr/bin/open';
+    args = ['-b', 'com.google.Chrome', site];
+  } else if (process.platform === 'win32') {
+    program = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA]
+      .filter(Boolean).map((root) => path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe')).find((p) => fs.existsSync(p));
+  } else {
+    program = ['/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/opt/google/chrome/chrome'].find((p) => fs.existsSync(p));
+  }
+  if (!program) throw new Error('Chrome is unavailable.');
+  await new Promise((resolve, reject) => {
+    const child = spawn(program, args, { detached: true, stdio: 'ignore' });
+    child.once('error', reject);
+    if (process.platform === 'darwin') child.once('exit', (status) => status === 0 ? resolve() : reject(new Error('Chrome could not open.')));
+    else child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
+
+module.exports = { openSiteInChrome, refuseOpen, whereToOpen };

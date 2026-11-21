@@ -254,7 +254,7 @@ const settle = async (u) => {
     check('the error is plain words, never a raw message', !/ENOENT|http \d|Error:/.test(s.error), s.error);
     const u2 = make({ installDir: fresh('inst-sha2'), updatesDir: upd });
     await u2.check(); const s2 = await settle(u2);
-    check('the same version failing again is not said twice', s2.state === 'idle' && !s2.error, s2);
+    check('a failed retry keeps the error visible', s2.state === 'error' && !!s2.error, s2);
     resetHits();
     const u3 = make({ installDir: fresh('inst-sha3'), updatesDir: upd });
     await u3.check(); await settle(u3);
@@ -283,8 +283,8 @@ const settle = async (u) => {
       await failing.check(); await settle(failing);
       const hitsBefore = hits['/archive'];
       check('next launch finds the staged copy instead of downloading again', failing.state().state === 'ready' && hits['/archive'] === hitsBefore, { state: failing.state().state, hits: hits['/archive'] });
-      const did = failing.installOnQuit();
-      check('Linux: a swap that fails half-way returns false', did === false);
+      await failing.install();
+      check('Linux: a swap that fails half-way reports the error', failing.state().state === 'error');
       check('Linux: and the old version is back exactly as it was', markerOf(inst) === 'old 1.0.0', markerOf(inst));
       check('Linux: and the staged copy is kept for the next try', fs.existsSync(path.join(upd, '1.1.0', APPDIR, EXE)));
       check('Linux: and no half-made folder is left beside the install', !fs.existsSync(`${inst}.incoming`) && !fs.existsSync(`${inst}.old`));
@@ -292,8 +292,8 @@ const settle = async (u) => {
       const again = make({ installDir: inst, updatesDir: upd });
       await again.check(); await settle(again);
       check('after the failed swap, still no second download', hits['/archive'] === 1, hits['/archive']);
-      const ok = again.installOnQuit();
-      check('Linux: at quit the staged copy takes the install folder\'s place', ok === true && markerOf(inst) === 'new 1.1.0', markerOf(inst));
+      await again.install();
+      check('Linux: after confirmation the staged copy takes the install folder\'s place', markerOf(inst) === 'new 1.1.0', markerOf(inst));
       check('Linux: the old folder is kept beside it until the next launch', fs.existsSync(`${inst}.old`) && markerOf(`${inst}.old`) === 'old 1.0.0');
       running = '1.1.0';
       const next = make({ installDir: inst, updatesDir: upd });
@@ -319,12 +319,12 @@ const settle = async (u) => {
       const launchFn = (cmd, args, opts) => { calls.push({ cmd, args, opts }); };
       const w = make({ installDir: inst, updatesDir: upd, launchFn });
       await w.check(); await settle(w);
-      const did = w.installOnQuit();
+      await w.install();
       const c = calls[0] || { args: [], opts: {} };
       const launch = Buffer.from(c.args.at(-1) || '', 'base64').toString('utf16le');
       const payload = /-EncodedCommand ([A-Za-z0-9+/=]+)'/.exec(launch)?.[1] || '';
       const command = Buffer.from(payload, 'base64').toString('utf16le');
-      check('Windows: the hidden worker is launched independently', did === true &&
+      check('Windows: the hidden worker is launched independently', calls.length === 1 &&
         c.opts.windowsHide === true && launch.includes('Start-Process') && launch.includes('-WindowStyle Hidden'));
       check('Windows: it is told to wait for this process', command.includes(`-WaitPid '${process.pid}'`));
       check('Windows: the script runs from the update directory, outside the app being replaced',
@@ -354,7 +354,7 @@ const settle = async (u) => {
     const dev = createUpdater({ onState() {}, platform: 'darwin', isPackaged: false, feedUrl: `${BASE_URL}/cue-update.json`, updatesDir: fresh('mac-dev') });
     resetHits();
     await dev.check();
-    check('Mac: npm start never fetches or swaps anything', !hits['/cue-update.json'] && dev.installOnQuit() === false);
+    check('Mac: npm start never fetches or swaps anything', !hits['/cue-update.json'] && dev.state().state === 'idle');
   }
 
   // ------------------------------------------------------------- the first-run settle

@@ -220,7 +220,7 @@ function install(init) {
 
 // YouTube sends its ads from the same addresses as the video, so a filter list can't touch them.
 // This takes them out of the page's own data before the player reads it. Anything that still gets
-// through is muted and run to its end the moment it starts. Studio is left alone.
+// through is run to its end the moment it starts. Studio is left alone.
 function quietYouTube() {
   const AD_KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams'];
   const strip = (o) => {
@@ -242,17 +242,15 @@ function quietYouTube() {
     tp-yt-paper-dialog:has(ytd-enforcement-message-view-model) { display: none !important; }`);
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, hide];
 
-  let silenced = false; let wasMuted = false;
   document.addEventListener('timeupdate', (e) => { // only fires while a video plays, so an idle tab costs nothing
     const v = e.target;
     if (!(v instanceof HTMLVideoElement)) return;
     const player = v.closest('.html5-video-player');
     if (player && player.classList.contains('ad-showing')) {
-      if (!silenced) { silenced = true; wasMuted = v.muted; v.muted = true; }
       if (Number.isFinite(v.duration) && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
       const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
       if (skip) skip.click();
-    } else if (silenced) { silenced = false; v.muted = wasMuted; }
+    }
   }, true);
 }
 
@@ -322,106 +320,8 @@ function wearChrome() {
 }
 
 
-// Passkeys. Electron has no passkey reader - no Touch ID, no phone over Bluetooth -
-// and its WebAuthn call simply never answers, so a site that asks for one
-// ("Verifying it's you..." on Google) sits there spinning for ever. Cue says no
-// straight away instead, which is what every browser without a reader does, and
-// the site offers another way in.
-function noPasskeys() {
-  const refuse = (signal) => new Promise((_ok, no) => {
-    const stop = setTimeout(() => no(new DOMException('This browser has no passkey reader.', 'NotAllowedError')), 350);
-    if (signal) signal.addEventListener('abort', () => { clearTimeout(stop); no(new DOMException('Aborted', 'AbortError')); }, { once: true });
-  });
-  const creds = navigator.credentials;
-  if (creds) {
-    const get = creds.get.bind(creds);
-    const create = creds.create.bind(creds);
-    creds.get = function (options) { return options && options.publicKey ? refuse(options.signal) : get(options); };
-    creds.create = function (options) { return options && options.publicKey ? refuse(options.signal) : create(options); };
-  }
-  const PKC = window.PublicKeyCredential;
-  if (typeof PKC === 'function') {
-    const nope = () => Promise.resolve(false);
-    for (const name of ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable', 'isPasskeyPlatformAuthenticatorAvailable']) {
-      try { PKC[name] = nope; } catch {}
-    }
-    try {
-      PKC.getClientCapabilities = () => Promise.resolve({
-        conditionalCreate: false, conditionalGet: false, hybridTransport: false, passkeyPlatformAuthenticator: false,
-        userVerifyingPlatformAuthenticator: false, relatedOrigins: false,
-        signalAllAcceptedCredentials: false, signalCurrentUserDetails: false, signalUnknownCredential: false,
-      });
-    } catch {}
-  }
-}
-
-
-// Google still sends him to "Use your passkey to confirm it's really you" even
-// after Cue says it has no reader, and that page is a dead end here: Continue
-// leads to a spinner, and the only way on is the small "Try another way" link.
-// So Cue takes that link for him and lands on the list of real choices.
-function skipGooglePasskey() {
-  if (!/^accounts\.google\.[a-z.]+$/i.test(location.hostname)) return;
-  const onPasskey = () => /\/signin\/challenge\/pk(\/|$)/.test(location.pathname);
-  // Counted across page loads, so Cue steps over the passkey a few times and
-  // then leaves it alone rather than bouncing for ever.
-  const n = (k) => { try { return Number(sessionStorage.getItem(k) || 0); } catch { return 0; } };
-  const bump = (k) => { try { sessionStorage.setItem(k, String(n(k) + 1)); } catch {} };
-  const press = (node) => {
-    const r = node.getBoundingClientRect();
-    if (!r.width || !r.height) return false;
-    const base = { bubbles: true, cancelable: true, composed: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
-    for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-      const E = type.startsWith('pointer') ? PointerEvent : MouseEvent;
-      node.dispatchEvent(new E(type, { ...base, buttons: type === 'pointerdown' || type === 'mousedown' ? 1 : 0 }));
-    }
-    return true;
-  };
-  const other = () => [...document.querySelectorAll('button, [role="button"], a')]
-    .find((b) => (b.innerText || '').trim() === 'Try another way' && b.offsetParent !== null);
-
-  let since = 0;
-  const tick = () => {
-    // Google's sign-in swaps views without reloading, and in Cue the new view
-    // sometimes never paints: the address says passkey while the screen still
-    // shows the step before. A reload paints it, and then the one link that
-    // leads anywhere - "Try another way" - is there to take.
-    if (onPasskey()) {
-      if (n('gpk-d') >= 3) return;
-      const link = other();
-      if (link) { bump('gpk-d'); press(link); since = Date.now(); return; }
-      if (!since) since = Date.now();
-      if (Date.now() - since > 2500 && n('gpk-r') < 2) { bump('gpk-r'); location.reload(); }
-      return;
-    }
-    // Off the passkey step but still showing it: paint the page he is actually on.
-    if (since && /Complete sign-in using your passkey|Use your passkey to confirm/i.test(document.body.innerText || '')
-        && Date.now() - since > 2000 && n('gpk-a') < 2) { bump('gpk-a'); location.reload(); }
-  };
-  // Every other step too: password, "Choose how you want to sign in", the code from a
-  // text, the phone prompt. Seen 13-Nov-2026: "Try another way" moved the address to
-  // /challenge/selection while the password step stayed on screen, unchanged, for good.
-  // When the step in the address changes and not one visible word on the page does
-  // within three seconds, the new step was never drawn: one reload draws it.
-  const stepOf = () => location.pathname.replace(/^\/v\d+/, '');
-  const words = () => (document.body ? document.body.innerText : '');
-  let step = stepOf(); let wordsAt = words(); let movedAt = 0;
-  const stuck = () => {
-    const now = stepOf();
-    if (now !== step) { if (!movedAt) movedAt = Date.now(); step = now; return; }
-    if (!movedAt) { wordsAt = words(); return; }
-    if (words() !== wordsAt) { movedAt = 0; wordsAt = words(); return; }
-    if (Date.now() - movedAt > 3000 && n(`gst-${now}`) < 1 && !onPasskey()) { bump(`gst-${now}`); location.reload(); }
-  };
-  setInterval(() => { tick(); stuck(); }, 500);
-  if (document.readyState !== 'loading') tick();
-  else document.addEventListener('DOMContentLoaded', tick, { once: true });
-}
-
 const KEY = `k${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const init = ipcRenderer.sendSync('cue:tab-init') || { volume: 1, originalSound: false, safe: false, hold: false };
-contextBridge.executeInMainWorld({ func: noPasskeys });
-contextBridge.executeInMainWorld({ func: skipGooglePasskey });
 contextBridge.executeInMainWorld({ func: wearChrome });
 contextBridge.executeInMainWorld({ func: install, args: [{ ...init, key: KEY }] });
 if (init.ytAds && /^(www|m|music)\.youtube\.com$/.test(location.hostname)) contextBridge.executeInMainWorld({ func: quietYouTube });

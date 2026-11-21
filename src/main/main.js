@@ -14,7 +14,6 @@ const { groupFor, groupList } = require('./groups');
 const { OBS } = require('./obs');
 const { startAgentPort } = require('./agent-port');
 const { createUpdater, SAY: UPDATE_SAY } = require('./updater');
-const { quietRefusal } = require('./update-core');
 const { settle, settledMessage } = require('./settle');
 const { Library } = require('./db');
 const { Vault } = require('./vault');
@@ -26,7 +25,7 @@ const extensions = require('./extensions');
 const { createVanish } = require('./vanish');
 const vanishKeys = require('./vanish-keys');
 const { PICTURE_IN_PICTURE, MINI_FILL, MINI_UNFILL, protectedSite } = require('./video');
-const { whereToOpen, refuseOpen } = require('./signin');
+const { openSiteInChrome, whereToOpen, refuseOpen } = require('./signin');
 const { shareLogins, hasTwoAccounts } = require('./shared-logins');
 const { createShield } = require('./shield');
 const chromeId = require('./identity');
@@ -1623,6 +1622,9 @@ function offlineSite(u) {
 
 // The same guards for every tab, Vanish included. Vanish passes no note, so nothing is written down.
 function protectPage(wc, t, note) {
+  wc.on('dom-ready', () => {
+    wc.insertCSS(':fullscreen, :fullscreen * { cursor: auto !important } @media (display-mode: fullscreen) { html, html * { cursor: auto !important } }', { cssOrigin: 'user' }).catch(() => {});
+  });
   const inVanish = t.identity === 'vanish';
   const noHttps = inVanish ? VANISH_NO_HTTPS : NO_HTTPS;
   // On a VPN, this is the one thing a browser does that gives your real address
@@ -1704,6 +1706,7 @@ function continueOf(u) {
   return '';
 }
 
+const signInSite = new WeakMap();
 const popupIdentity = new WeakMap(); // a pop-up's webContents -> the folder it belongs to
 
 function watchGoogleRefusal(wc, getIdentity) {
@@ -1734,6 +1737,10 @@ function watchGoogleRefusal(wc, getIdentity) {
   const look = (u) => {
     if (GOOGLE_REFUSED.test(u)) refused('refused', u);
     else if (GOOGLE_MISMATCH.test(u)) refused('mismatch', u);
+    else if (!popupIdentity.has(wc) && /^https:\/\//i.test(u) && !GOOGLE_SIGNIN_HOST.test(u)) {
+      const origin = new URL(u).origin;
+      signInSite.set(wc, origin === 'https://auth.openai.com' ? 'https://chatgpt.com' : origin);
+    }
   };
   wc.on('did-navigate', (_e, u) => look(u));
   // Google's sign-in is one page that rewrites itself, so a refusal can arrive without a page load.
@@ -1765,13 +1772,14 @@ const openPopups = new Set();
 function closePopupsOf(id) {
   for (const p of [...openPopups]) if (p.getIdentity() === id) { openPopups.delete(p); try { p.win.destroy(); } catch {} }
 }
-function wirePopup(win, getIdentity, agent) {
+function wirePopup(win, getIdentity, agent, opener) {
   const wc = win && win.webContents;
   if (!wc || wc.isDestroyed()) return;
   const entry = { win, getIdentity };
   openPopups.add(entry);
   win.on('closed', () => openPopups.delete(entry));
   popupIdentity.set(wc, getIdentity());
+  if (opener) signInSite.set(wc, signInSite.get(opener) || opener.getURL());
   protectPage(wc, {}, null);
   watchGoogleRefusal(wc, getIdentity);
   wc.setWindowOpenHandler(({ url, disposition }) => {
@@ -1780,7 +1788,7 @@ function wirePopup(win, getIdentity, agent) {
     openTab({ url, identity: getIdentity(), agent });
     return { action: 'deny' };
   });
-  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, agent));
+  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, agent, wc));
 }
 
 function wireTab(t) {
@@ -1873,7 +1881,7 @@ function wireTab(t) {
     sniffWhose(t); // keep the folder honest about which account is live in it
   });
   wc.on('did-navigate-in-page', () => teamSignedIn(t)); // the team site signs in without a page load
-  wc.on('did-create-window', (win) => wirePopup(win, () => t.identity, t.agent));
+  wc.on('did-create-window', (win) => wirePopup(win, () => t.identity, t.agent, wc));
   wc.setWindowOpenHandler(({ url, disposition }) => {
     if (recTabId === t.id || refuseOpen(url, wc.getURL())) return { action: 'deny' };
     const where = whereToOpen(url, disposition, wc.getURL());
@@ -2489,21 +2497,6 @@ async function obsAimAtStage() {
 // An update reopens Cue with app.exit, which skips before-quit: write the tabs down first.
 function saveNow() { try { persist(); store.flush(); } catch {} }
 
-// Why now is NOT a good moment to put an update in place and reopen. '' means it is.
-function quietMomentRefusal() {
-  if (process.env.CUE_TEST) return 'test';
-  let idle = 0; let idleState = 'active';
-  try { idle = powerMonitor.getSystemIdleTime(); idleState = powerMonitor.getSystemIdleState(20 * 60); } catch { return 'cannot tell'; }
-  return quietRefusal({
-    ready: !!(updater && updater.ready()), auto: settings().autoUpdate !== false, idle, idleState,
-    onAir: !!(live || programId || recTabId),
-    busy: tabs.some((t) => t.holdAwake || t.playing || t.audible || t.dirty) || openPopups.size > 0, // a sign-in window is someone mid-sign-in
-    downloading: downloads.some((d) => d.state === 'progressing'),
-    vanish: !!(vanish && vanish.window()),
-    temp: !tempHours() && tabs.some((t) => t.temp),
-  });
-}
-
 function settleAfterFullScreen(t, entering = false) {
   const again = () => {
     if (!t || !t.view || t.view.webContents.isDestroyed()) return;
@@ -2834,6 +2827,9 @@ function tabMenuItems(t) {
     { label: t.muted ? 'Unmute' : 'Mute', click: () => setMuted(t, !t.muted) },
     // Opens the tab's volume control in the sidebar, with the keyboard in it.
     { label: `Volume… (${Math.round((t.volume ?? 1) * 100)}%)`, click: () => { try { uiView.webContents.focus(); } catch {} sendEvent('volume-pop', { id: t.id }); } },
+    { label: 'Open site in Google Chrome for sign-in', enabled: /^https:\/\//i.test(t.url), click: () => {
+      openSiteInChrome(t.url).catch(() => sendEvent('toast', 'Google Chrome could not open. Check that it is installed.'));
+    } },
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     // Two different things, named for what they do: one leaves this tab where
     // it is and opens a second copy elsewhere; the other takes this tab with you.
@@ -3682,7 +3678,7 @@ function wireSidePage(wc, getIdentity) {
     openTab({ url: u, identity: getIdentity() });
     return { action: 'deny' };
   });
-  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, false));
+  wc.on('did-create-window', (w) => wirePopup(w, getIdentity, false, wc));
 }
 function openPeek(url, from) {
   // A page can ask for a Peek by alt-clicking a link of its own making, so only
@@ -3967,6 +3963,11 @@ const internal = {
   // The two ways on from cue://signin-blocked. The name 'signin.from-chrome' is the old one and is
   // kept for the page; nothing is carried from Chrome - it clears this folder's Google state and
   // opens Google's own form again. In a pop-up it signs in again right there.
+  'signin.open-browser': async (_a, _t, sender) => {
+    if (!sender || new URL(sender.getURL()).hostname !== 'signin-blocked') return { error: 'Open the sign-in help page first.' };
+    try { await openSiteInChrome(signInSite.get(sender) || 'https://accounts.google.com'); return { ok: true }; }
+    catch { return { error: 'Google Chrome could not open. Check that it is installed.' }; }
+  },
   'signin.from-chrome': (a, t, sender) => signInAgain(t, sender, false),
   'signin.other-account': (a, t, sender) => signInAgain(t, sender, true),
   'signin.google': (a, from, sender) => googleSignIn(askedFolder(a, from, sender)).then(({ cleared }) => ({ signin: true, cleared })),
@@ -5377,13 +5378,35 @@ app.whenReady().then(async () => {
   doorOpen = settings().aiDoor === true;
   // A plain install has no AI door at all until the person switches AI tools on in Settings.
   if (settings().agentPort !== false) openAgentPort();
+  let announced = '';
   updater = createUpdater({
-    onState: () => pushState(),
+    onState: (state) => {
+      pushState();
+      if (state.state !== 'ready' || state.latest === announced || process.env.CUE_TEST) return;
+      announced = state.latest;
+      const { Notification } = require('electron');
+      if (!Notification.isSupported()) return;
+      const notice = new Notification({ title: `Cue ${state.latest} is ready`, body: 'Review the update and choose when to reopen Cue.', silent: true });
+      notice.on('click', async () => {
+        const choice = await dialog.showMessageBox(mainWin, {
+          type: 'info', message: `Update to Cue ${state.latest}?`, detail: state.notes || 'Cue will reopen with the update.',
+          buttons: ['Later', 'Install and reopen'], defaultId: 0, cancelId: 0,
+        });
+        if (choice.response === 1 && updater.state().latest === state.latest) {
+          const result = await updater.install();
+          if (result.error) await dialog.showMessageBox(mainWin, { message: result.error, buttons: ['OK'] });
+        }
+      });
+      notice.show();
+    },
     // A browser must never end a class. While a tab is on air, being recorded,
     // or a page is holding the camera, the update waits and says why.
     canInterrupt: () => {
       if (live || programId) return 'A tab is on air. The update will wait.';
       if (recTabId) return 'A tab is being recorded. The update will wait.';
+      if (tabs.some((t) => t.playing || t.audible) || vanish?.tabs.some((t) => t.playing)) return 'Pause playback before installing the update.';
+      if (downloads.some((d) => d.state === 'progressing')) return 'A download is in progress. Try again when it finishes.';
+      if (openPopups.size || vanish?.window() || tabs.some((t) => t.dirty)) return 'Finish your open form or close the sign-in or Vanish window before updating.';
       if (tabs.some((t) => t.holdAwake)) return 'A page is using your camera or microphone. The update will wait.';
       return '';
     },
@@ -5394,26 +5417,6 @@ app.whenReady().then(async () => {
     log: logAgent,
   });
   updater.start();
-  // He rarely closes Cue, so "when you close it" could mean never: 0.7.0 sat waiting on the Mac
-  // mini for a day. A ready update also goes in at a quiet moment - nobody has touched the
-  // computer for twenty minutes, or the screen has been locked for ten - and Cue reopens on the
-  // same tabs. Never while anything could be lost or interrupted: a tab on air or recording,
-  // the camera in use, sound playing, a download running, a half-filled form, a Vanish window,
-  // or "Just for now" tabs that are meant to go only when he closes Cue himself.
-  setInterval(() => {
-    const why = quietMomentRefusal();
-    if (why) return;
-    logAgent({ tool: 'update', note: `installing ${updater.state().latest} at a quiet moment` });
-    saveNow();
-    updater.install().catch((e) => logAgent({ tool: 'update', error: String(e && e.message) }));
-  }, 5 * 60 * 1000).unref();
-  // The new version goes in as Cue closes, when there is no window to disturb
-  // and nothing to lose. Open Cue again and it is simply the new one.
-  app.on('will-quit', () => {
-    if (!updater || !updater.ready()) return;
-    const v = updater.state().latest;
-    if (updater.installOnQuit()) logAgent({ tool: 'update', note: `installed ${v} on quit` });
-  });
   // Connect to OBS on its own. It used to wait for a button nobody knew was
   // there, so a class would start with Cue and OBS not talking. OBS being shut
   // costs one failed socket and nothing else.

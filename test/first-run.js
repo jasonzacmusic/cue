@@ -112,7 +112,7 @@ async function stranger(c) {
   check('sheet: asks for a name', /What should we call you\?/.test(parts.text), parts.text.slice(0, 200));
   check('sheet: ten-odd everyday sites, none ticked', parts.boxes >= 10 && parts.ticked === 0, parts);
   check('sheet: colour swatches', parts.swatches >= 6, parts.swatches);
-  check('sheet: Plain and the school setup, Plain first', parts.choices[0] === '' && parts.choices.includes('nsm'), parts.choices);
+  check('sheet: Plain and the school setup, Plain first', parts.choices[0] === '' && ['work', 'study', 'leisure', 'nsm'].every((id) => parts.choices.includes(id)), parts.choices);
   check('sheet: says how to add people', /Add more people later with the \+ under your name\. Each person.s sign-ins stay separate\./.test(parts.text));
   check('sheet: can be skipped', /Skip/.test(parts.text));
   await ui(`(() => { const sh = document.querySelector('.sheet.welcome'); const i = sh.querySelector('input[type=text]'); i.value = 'Robin'; i.dispatchEvent(new Event('input')); sh.querySelectorAll('.wswatch')[2].click(); })()`);

@@ -1,0 +1,10 @@
+{
+  "name": "Study and reading",
+  "about": "Organise reading, notes and courses.",
+  "spaces": [
+    "Home",
+    "Reading",
+    "Study"
+  ],
+  "startSpace": "Home"
+}

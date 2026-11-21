@@ -1,0 +1,10 @@
+{
+  "name": "Watch and listen",
+  "about": "Keep video and music apart from everyday tabs.",
+  "spaces": [
+    "Home",
+    "Watch",
+    "Listen"
+  ],
+  "startSpace": "Home"
+}

@@ -1,22 +1,4 @@
-// Keeping Cue up to date, the way the other Nathaniel Labs apps do it.
-//
-// Cue asks a small JSON file what the newest version is, fetches it quietly in
-// the background, and puts it in place when you close Cue. You never click
-// anything and you never wait: the next time you open Cue, it is the new one.
-//
-// The one thing it will not do is interrupt. While Cue is open an update only
-// goes in at a quiet moment (quietRefusal in update-core.js: twenty idle minutes
-// or a locked screen, nothing on air, playing, recording or downloading), so a
-// class, a recording or a tab on air can never be ended by a browser deciding
-// it is time. If the swap cannot be done at quit, the old version
-// simply opens again and the next quit tries once more, from the copy already
-// waiting in <userData>/updates - nothing is fetched twice.
-//
-// Mac reads the hand-written labs-downloads feed and checks every copy with
-// codesign. Windows and Linux read the CI-written, Ed25519-signed feed on the
-// latest GitHub release (see update-core.js), and refuse it unsigned.
-//
-// Switch "Update Cue by itself" off and it goes back to asking.
+// Check for releases, verify the package and wait for Install and reopen.
 const { app, net, shell } = require('electron');
 const fs = require('fs');
 const os = require('os');
@@ -39,7 +21,7 @@ const SAY = {
   readonly: "Cue can't update itself here because this folder is read-only. Get the new version from labs.nathanielschool.com.",
   feed: 'Cue could not check for a new version just now. It will try again later.',
   download: 'Cue could not finish getting the new version. It will try again later.',
-  install: 'Cue could not put the new version in place. It will try again the next time you close it.',
+  install: 'Cue could not put the new version in place. Check for updates to retry.',
 };
 
 const run = core.run;
@@ -125,13 +107,6 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
   const remember = (fn) => { try { const t = told(); fn(t); fs.mkdirSync(UPDATES, { recursive: true }); fs.writeFileSync(TOLD, JSON.stringify(t)); } catch {} };
   const count = (kind, v) => ((told()[kind] || {})[v] || 0);
   const bump = (kind, v) => remember((t) => { t[kind] = t[kind] || {}; t[kind][v] = (t[kind][v] || 0) + 1; });
-  // true the first time a version goes wrong; false after that.
-  function firstTime(v) {
-    if ((told().errors || {})[v]) return false;
-    remember((t) => { t.errors = t.errors || {}; t.errors[v] = true; });
-    return true;
-  }
-
   const inUpdates = (p) => p && path.resolve(p).startsWith(path.resolve(UPDATES) + path.sep);
   const dropCopy = (copy) => { if (copy && inUpdates(path.dirname(copy))) { try { fs.rmSync(path.dirname(copy), { recursive: true, force: true }); } catch {} } };
 
@@ -183,7 +158,7 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
   }
 
   async function check({ quiet = true } = {}) {
-    if (state.state === 'downloading') return state;
+    if (state.state === 'downloading' || state.state === 'checking') return state;
     const where = target();
     // Never fetch what could not be put in place. A read-only folder gets one
     // quiet line in Settings, never a bar.
@@ -216,7 +191,7 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
       // Fetch it now, in the background, so that by the time you close Cue
       // there is nothing left to wait for. A version that failed three times
       // is left alone until a newer one comes out.
-      if (autoOn() && count('downloads', offer.version) < TRIES) download().catch(() => {});
+      if (autoOn() && (!quiet || count('downloads', offer.version) < TRIES)) download().catch(() => {});
     } else {
       push({ state: 'idle', latest: offer.version, notes: '' });
     }
@@ -286,9 +261,7 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
       staged = null;
       bump('downloads', state.latest);
       say(e);
-      // Said once per version, in plain words; after that, silence.
-      const first = firstTime(state.latest);
-      push({ state: first ? 'error' : 'idle', error: first ? (e instanceof Plain ? `${e.message} Cue will try again later.` : SAY.download) : '', percent: 0 });
+      push({ state: 'error', error: e instanceof Plain ? e.message : SAY.download, percent: 0 });
     }
     return state;
   }
@@ -366,7 +339,14 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
   }
 
   // The only step that closes Cue, and only ever because you clicked it.
+  let installing = false;
   async function install() {
+    if (installing) return state;
+    installing = true;
+    try { return await installReady(); } finally { installing = false; }
+  }
+
+  async function installReady() {
     if (state.state !== 'ready' || !staged) return state;
     const reason = canInterrupt && canInterrupt();
     if (reason) { push({ error: reason }); return state; }
@@ -401,25 +381,6 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
     app.relaunch({ execPath: launcher, args: process.argv.slice(1) });
     app.exit(0);
     return state;
-  }
-
-  // Called as Cue is closing. No window is left to interrupt and no page is
-  // left to lose, so this is the one moment the swap is free. If any step
-  // fails the old version is put straight back.
-  function installOnQuit() {
-    if (!staged || !autoOn() || state.state !== 'ready') return false;
-    const where = target();
-    if (where.blocked) return false;
-    const live = where.live;
-    if (!fs.existsSync(live)) return false;            // running from somewhere else; leave it alone
-    if (count('swaps', state.latest) >= TRIES) return false;
-    if (MAC) {
-      if (wouldDowngrade(live) || !stillOurs()) { dropCopy(staged); staged = null; return false; }
-      return swapMac(live);
-    }
-    if (wouldDowngrade(live)) { dropCopy(staged); staged = null; return false; }
-    if (PLATFORM === 'win32') return winSwap(where, false);
-    return linuxSwap(where);
   }
 
   // A copy left behind by a Cue that closed mid-download, or by an older Cue.
@@ -459,7 +420,7 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
   const dismiss = () => { if (state.state === 'error') push({ state: 'idle', error: '' }); };
 
   return {
-    start, check, download, install, installOnQuit, dismiss, clearLeftovers,
+    start, check, download, install, dismiss, clearLeftovers,
     ready: () => state.state === 'ready',
     openPage: () => shell.openExternal('https://labs.nathanielschool.com/products/cue'),
     state: () => state,
