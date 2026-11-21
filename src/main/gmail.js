@@ -159,7 +159,7 @@ function makeGmail({ agentTab, wake, label, who, vetFiles, attachFiles }) {
 
   // Go to an address inside Gmail and wait for it to be the page shown. A change of the part after
   // # is Gmail's own navigation, so it is quick and keeps the inbox loaded.
-  async function go(identity, hash) {
+  async function goOnce(identity, hash) {
     const t = agentTab(identity, BASE() + '#inbox');
     const wc = t.view.webContents;
     let end = Date.now() + 30000;
@@ -186,6 +186,16 @@ function makeGmail({ agentTab, wake, label, who, vetFiles, attachFiles }) {
     // Same page, new place: Gmail answers a change after the # without reloading.
     await js(wc, `if (location.hash !== ${JSON.stringify(hash)}) location.hash = ${JSON.stringify(hash)}; true`).catch(() => {});
     return { t, wc };
+  }
+  // Gmail's compose page can close its own tab as it is left (seen 21-Nov-2026: the first search
+  // after a saved draft answered "Object has been destroyed"). Nothing has been written at this
+  // point, so take a fresh agent tab and go again, once.
+  async function go(identity, hash) {
+    try { return await goOnce(identity, hash); } catch (e) {
+      if (!/destroyed/i.test(String(e && e.message))) throw e;
+      await sleep(400);
+      return goOnce(identity, hash);
+    }
   }
   // Gmail puts the mailbox's address in the page title, which proves which account answered.
   const mailbox = (wc) => ((wc.getTitle() || '').match(/[\w.+-]+@[\w-]+\.[\w.-]+/) || [''])[0];
