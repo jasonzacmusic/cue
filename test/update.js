@@ -149,7 +149,7 @@ function fakeApp(dir, version) {
   let served = DMG;
   const srv = await serve(() => served, () => ({
     app: 'Cue', version: feedVersion, date: '2026-10-31', notes: 'test',
-    sha256: feedSha, size: bytes.length, url: `http://127.0.0.1:${srv.address().port}/Cue.dmg`,
+    sha256: feedSha, size: fs.statSync(served).size, url: `http://127.0.0.1:${srv.address().port}/Cue.dmg`,
   }));
   const feedUrl = `http://127.0.0.1:${srv.address().port}/cue-update.json`;
 

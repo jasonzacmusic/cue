@@ -143,34 +143,51 @@ function downloadTo(request, url, file, { size, sha256, onProgress = () => {} } 
   const part = `${file}.part`;
   return new Promise((resolve, reject) => {
     let out = null;
-    const fail = (e) => {
-      try { if (out) out.destroy(); } catch {}
-      try { fs.rmSync(part, { force: true }); } catch {}
-      reject(e);
+    let failed = false;
+    const fail = (error) => {
+      if (failed) return;
+      failed = true;
+      const finish = () => {
+        try { fs.rmSync(part, { force: true }); } catch {}
+        reject(error);
+      };
+      if (out && !out.closed) {
+        out.once('close', finish);
+        out.destroy();
+      } else finish();
     };
     request(url, (res) => {
+      if (failed) return;
       if (res.statusCode >= 400) { if (res.resume) res.resume(); fail(new Error(`http ${res.statusCode}`)); return; }
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      out = fs.createWriteStream(part);
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        out = fs.createWriteStream(part);
+      } catch (error) { fail(error); return; }
+      out.on('error', fail);
       const hash = crypto.createHash('sha256');
-      let got = 0; let stopped = false; let lastPct = -1;
-      res.on('data', (c) => {
-        if (stopped) return;
-        got += c.length;
-        if (size && got > size) { stopped = true; fail(new Plain('The download was bigger than it should be, so it was thrown away.')); return; }
-        hash.update(c); out.write(c);
-        if (size) { const pct = Math.floor((got / size) * 60); if (pct !== lastPct) { lastPct = pct; onProgress(pct); } }
+      let got = 0;
+      let lastPct = -1;
+      res.on('data', (chunk) => {
+        if (failed) return;
+        got += chunk.length;
+        if (size && got > size) { fail(new Plain('The download was bigger than it should be, so it was thrown away.')); return; }
+        hash.update(chunk);
+        if (!out.write(chunk) && res.pause && res.resume) {
+          res.pause();
+          out.once('drain', () => res.resume());
+        }
+        if (size) { const pct = Math.floor(got / size * 60); if (pct !== lastPct) { lastPct = pct; onProgress(pct); } }
       });
-      res.on('error', (e) => { if (!stopped) { stopped = true; fail(e); } });
+      res.on('error', fail);
       res.on('end', () => {
-        if (stopped) return;
-        stopped = true;
-        out.end(() => {
-          if (size && got !== size) { fail(new Plain('The download was cut short, so it was thrown away.')); return; }
-          if (hash.digest('hex') !== sha256) { fail(new Plain('The download did not match its checksum, so it was thrown away.')); return; }
-          try { fs.renameSync(part, file); } catch (e) { fail(e); return; }
-          resolve(file);
+        if (failed) return;
+        if (size && got !== size) { fail(new Plain('The download was cut short, so it was thrown away.')); return; }
+        if (hash.digest('hex') !== sha256) { fail(new Plain('The download did not match its checksum, so it was thrown away.')); return; }
+        out.once('close', () => {
+          if (failed) return;
+          try { fs.renameSync(part, file); resolve(file); } catch (error) { fail(error); }
         });
+        out.end();
       });
     }, fail);
   });
