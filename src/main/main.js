@@ -4570,21 +4570,32 @@ const aiTabs = () => tabs.filter((t) => t.identity !== 'vanish' && agentsMay(t.i
 
 // ---------------------------------------------------------------- menus
 const MAC = process.platform === 'darwin';
-// The one place you can ask. With "Update Cue by itself" on, the update bar stays hidden,
-// so the answer has to be said out loud here.
 async function checkForUpdates() {
   if (!updater) return;
   const u = await updater.check({ quiet: false });
-  if (u.state === 'available') return; // "Update Cue by itself" is off: the bar is asking already
-  const waiting = u.state === 'ready' || u.state === 'downloading';
-  const said = u.blocked === 'readonly'
-    ? { message: 'Cue cannot update itself here.', detail: UPDATE_SAY.readonly }
-    : u.state === 'error'
-    ? { message: 'Cue could not check for updates.', detail: u.error }
-    : waiting
-      ? { message: `Cue ${u.latest} is on its way.`, detail: 'It goes in the next time you close Cue.' }
-      : { message: 'You have the newest Cue.', detail: `This is version ${app.getVersion()}.` };
-  if (!process.env.CUE_TEST) dialog.showMessageBox(mainWin, { type: 'info', buttons: ['OK'], ...said });
+  if (process.env.CUE_TEST) return;
+  const ready = u.state === 'ready';
+  const available = u.state === 'available';
+  let message = 'You have the newest Cue.';
+  let detail = `This is version ${app.getVersion()}.`;
+  if (u.blocked || u.state === 'error') {
+    message = 'Cue could not update.';
+    detail = u.error || UPDATE_SAY.readonly;
+  } else if (ready || available) {
+    message = `Cue ${u.latest} is available.`;
+    detail = u.notes || 'Choose when to install the update.';
+  } else if (u.state === 'downloading' || u.state === 'checking') {
+    message = u.state === 'checking' ? 'Checking for updates…' : `Downloading Cue ${u.latest}…`;
+    detail = 'Cue will show a notice when the update is ready.';
+  }
+  const buttons = ready || available ? ['Later', ready ? 'Install and reopen' : 'Download update'] : ['OK'];
+  const choice = await dialog.showMessageBox(mainWin, { type: 'info', buttons, message, detail, defaultId: 0, cancelId: 0 });
+  if (choice.response !== 1 || updater.state().latest !== u.latest) return;
+  if (available) await updater.download();
+  if (ready) {
+    const result = await updater.install();
+    if (result.error) await dialog.showMessageBox(mainWin, { message: result.error, buttons: ['OK'] });
+  }
 }
 
 function buildMenu() {

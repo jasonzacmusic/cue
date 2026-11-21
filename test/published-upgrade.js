@@ -11,7 +11,7 @@ const core = require('../src/main/update-core');
 async function waitFor(check, label, timeout = 180000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error('Timed out waiting for ' + label);
@@ -53,28 +53,63 @@ async function main() {
   fs.mkdirSync(profile);
   const marker = 'Upgrade test profile';
   const config = path.join(profile, 'cue.json');
-  fs.writeFileSync(config, JSON.stringify({ welcome: 'done', toldNoSandbox: true, folders: [{ id: 'personal', name: marker }], settings: { autoUpdate: true, agentPort: false, preset: null } }));
+  fs.writeFileSync(config, JSON.stringify({ welcome: 'done', toldNoSandbox: true, folders: [{ id: 'personal', name: marker }], settings: { autoUpdate: false, agentPort: false, preset: null } }));
   const exe = path.join(live, core.exeName(platform));
   const args = platform === 'linux' ? ['--no-sandbox', '--disable-gpu'] : [];
+  args.push('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0');
   const app = spawn(exe, args, { env, stdio: 'ignore' });
   const staged = path.join(profile, 'updates', target);
-  await waitFor(() => fs.existsSync(path.join(staged, 'ok.json')), 'previous Cue to verify and stage ' + target);
+  // Click only the update buttons of the test app's own sidebar in this disposable profile.
+  let shell;
+  await waitFor(async () => {
+    try {
+      const port = Number(fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]);
+      const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      shell = pages.find((p) => p.url.startsWith('file:') && p.url.endsWith('/ui/index.html'));
+      return !!shell;
+    } catch { return false; }
+  }, 'Cue sidebar');
+  const socket = new WebSocket(shell.webSocketDebuggerUrl);
+  await new Promise((ok, no) => { socket.onopen = ok; socket.onerror = no; });
+  app.unref();
+  let seq = 0;
+  async function clickUpdate(label) {
+    const expression = `(() => {
+      const bar = document.querySelector('#updatebar');
+      if (!bar || bar.hidden) return false;
+      const button = [...bar.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(label)});
+      if (!button) return false;
+      button.click(); return true;
+    })()`;
+    const id = ++seq;
+    const response = new Promise((ok) => {
+      const reply = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.id !== id) return;
+        socket.removeEventListener('message', reply);
+        ok(msg.result?.result?.value === true);
+      };
+      socket.addEventListener('message', reply);
+    });
+    socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, userGesture: true } }));
+    return response;
+  }
+  await waitFor(() => clickUpdate('Update'), 'previous Cue to offer the live release');
+  await waitFor(() => fs.existsSync(path.join(staged, 'ok.json')), 'download and signature checks');
   const info = JSON.parse(fs.readFileSync(path.join(staged, 'ok.json')));
   assert.equal(info.version, target);
   const hashApp = (root) => crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'resources', 'app.asar'))).digest('hex');
   const expected = hashApp(path.join(staged, info.dir));
   assert.notEqual(hashApp(live), expected);
-  if (platform === 'win32') {
-    execFileSync('powershell.exe', ['-NoProfile', '-Command', `if (!(Get-Process -Id ${app.pid}).CloseMainWindow()) { exit 1 }`]);
-  } else {
-    execFileSync('xdotool', ['search', '--onlyvisible', '--pid', String(app.pid), 'windowactivate', '--sync', 'key', 'ctrl+q']);
-  }
+  await waitFor(() => clickUpdate('Install and reopen'), 'confirmation button');
+  socket.close();
   await waitFor(() => {
     try { return hashApp(live) === expected; } catch { return false; }
   }, 'verified package to replace old installation');
   await waitFor(() => app.exitCode !== null || app.signalCode, 'old process to exit');
-  const stdout = execFileSync(exe, args, { env: { ...env, CUE_SMOKE: '1' }, encoding: 'utf8', timeout: 90000 });
-  assert.ok(stdout.includes('CUE_SMOKE_OK'));
+  await waitFor(() => {
+    try { return JSON.parse(fs.readFileSync(config)).lastVersion === target; } catch { return false; }
+  }, 'new Cue to reopen the same profile');
   assert.ok(JSON.parse(fs.readFileSync(config)).folders.some((folder) => folder.name === marker));
   console.log(`PASS ${platform}: ${old.version} discovered, verified and installed ${target}; new Cue opened with the original profile.`);
 }

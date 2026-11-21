@@ -535,8 +535,9 @@ module.exports = async function run(c) {
   const et = c.openTab({ url: `${base}/note?ext`, identity: 'personal' }); await loaded(et); await sleep(500);
   check('extensions: a Chrome extension runs on pages', (await et.view.webContents.executeJavaScript('document.documentElement.dataset.cueExt')) === 'yes');
   c.closeTab(et.id);
-  const real = found.flatMap((b) => b.profiles.flatMap((p) => ext.scan(path.join(b.root, p.dir))));
-  check('extensions: finds installed ones to copy', real.length >= 0, { found: real.length, names: real.slice(0, 6).map((x) => x.name) });
+  fs.cpSync(fx, path.join(profile, 'Extensions', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '1.0_0'), { recursive: true });
+  const real = ext.scan(profile);
+  check('extensions: finds installed ones to copy', real.length === 1, { found: real.length, names: real.slice(0, 6).map((x) => x.name) });
 
   const { session: ses } = { session };
   const tryS = ses.fromPartition('persist:extension-trial');

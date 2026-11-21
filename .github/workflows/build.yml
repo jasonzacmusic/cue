@@ -249,8 +249,8 @@ jobs:
         with:
           node-version: 24
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb openbox xdotool
+        run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
-        run: xvfb-run -a sh -c 'openbox >/dev/null 2>&1 & exec node test/published-upgrade.js'
+        run: xvfb-run -a node test/published-upgrade.js
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
