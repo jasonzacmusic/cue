@@ -187,7 +187,7 @@ function fakeApp(dir, version) {
   fakeApp(path.join(apps, 'Cue.app'), '99.9.9');
   await up.install();
   check('a NEWER Cue already installed is left alone', versionAt(path.join(apps, 'Cue.app')) === '99.9.9',
-    { returned: refused, stillThere: versionAt(path.join(apps, 'Cue.app')) });
+    { stillThere: versionAt(path.join(apps, 'Cue.app')) });
   check('and it says why in the log', log.some((e) => /left alone/.test(e.error || '')), log.filter((e) => /left alone/.test(e.error || '')).map((e) => e.error));
 
   // ----------------------------------------------- 4. the swap itself, at quit
