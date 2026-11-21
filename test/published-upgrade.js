@@ -120,6 +120,11 @@ async function main() {
     console.error(fs.readFileSync(logFile, 'utf8').split('\n').slice(-30).join('\n'));
     if (platform === 'linux') {
       console.error(execFileSync('ps', ['-eo', 'pid,comm'], { encoding: 'utf8' }).split('\n').filter((line) => /cue|electron|chrome/i.test(line)).join('\n'));
+      const launcher = path.join(require('os').homedir(), '.local', 'bin', 'cue');
+      const retry = spawn(launcher, [], { env, stdio: 'ignore' });
+      retry.unref();
+      await waitFor(() => JSON.parse(fs.readFileSync(config)).lastVersion === target, 'normal desktop launcher', 30000);
+      console.error('Confirmed the signed update also opens from the apps menu after the previous process has exited.');
     }
     throw error;
   }
