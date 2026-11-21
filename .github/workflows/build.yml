@@ -266,7 +266,19 @@ jobs:
             sleep 1
           done
           kill -INT "$watch_pid" 2>/dev/null || true
-          sed -n '/execve.*--type=relauncher/,$p' "$RUNNER_TEMP/cue-exec.log" | grep -E '= -1 (EPERM|EACCES|ECHILD|EBADF|EPIPE|ENOEXEC)|execve.*zygote|GPU process|sendmsg.*SCM_CREDENTIALS|proc/.*status.*ENOENT|clone3.*EPERM' | head -140 || true
+          python3 - "$RUNNER_TEMP/cue-exec.log" <<'PYTHON'
+          import sys,re
+          last_zygote = {}
+          started=False
+          for line in open(sys.argv[1],errors='replace'):
+              if 'execve(' in line and '--type=relauncher' in line:
+                  started=True
+              if not started: continue
+              pid=line.split(maxsplit=1)[0]
+              if 'execve(' in line and '--type=zygote' in line: last_zygote[pid]=[]
+              if pid in last_zygote: last_zygote[pid]=(last_zygote[pid]+[line.rstrip()])[-35:]
+          for lines in last_zygote.values(): print('\n'.join(lines))
+          PYTHON
           exit "$(cat "$RUNNER_TEMP/cue-result")"
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
