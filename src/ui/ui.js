@@ -1475,7 +1475,7 @@ async function startRecording() {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 60 }, audio: true });
     session.stream = stream;
     if (session.stopped) { teardown(session); return; }
-    const type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find((x) => MediaRecorder.isTypeSupported(x));
+    const type = ['video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4'].find((x) => MediaRecorder.isTypeSupported(x));
     const recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12000000, audioBitsPerSecond: 256000 });
     session.recorder = recorder;
     recorder.ondataavailable = (e) => { if (e.data.size) session.chunks.push(e.data); };

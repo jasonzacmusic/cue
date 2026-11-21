@@ -64,7 +64,7 @@ npm run dist:mac     # signed Cue.app in build/
 ```
 
 Windows and Linux builds come from GitHub Actions and are not code-signed yet. The Linux build may
-need `--no-sandbox`. Limits today: no passkeys, the cache cap is per login rather than per site, and
+need `--no-sandbox`. For Google sign-in with a device passkey, open the site in Google Chrome from its tab menu. Authentication methods depend on the device and account. The cache cap is per login rather than per site, and
 Chrome extensions that rely on Chrome's own toolbar may not work.
 
 ## Licence

@@ -4,6 +4,10 @@ Cue is Nathaniel School of Music's free, open-source browser, built on Electron 
 Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
 `AGENTS.md` points here so Codex reads the same file.
 
+## 0.7.5 — playback, sign-in and updates
+
+Updates are discovered in the background. A sidebar prompt and desktop notification offer the release notes and an explicit Install and reopen action. Closing Cue or leaving it idle does not install. The school preset is optional alongside Everyday browsing, Work and projects, Study and reading, and Watch and listen. Fullscreen pages use a user-origin cursor rule in normal and Vanish tabs. YouTube filtering leaves the player's mute choice alone. WebAuthn uses the engine's native capabilities. For a provider that requires a supported external browser, the tab menu opens the site's origin in Chrome and the authenticated session stays there. Tab recording uses WebM first for reliable encoding.
+
 ## The goal right now
 Cue replaces Helium as Jason's daily browser. Jason does not want Helium or Brave data moved in. Helium is removed only after Cue is proven better
 on the Mac mini: see "Retiring Helium" below. Stage 2 (our own Chromium build) has not started.

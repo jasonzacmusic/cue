@@ -490,8 +490,9 @@ module.exports = async function run(c) {
     c.runTool('mark', ch);
     await until(() => ch.marks.length);
     check('YouTube: timestamp link', /youtu\.be\/[\w-]{11}\?t=\d+/.test(ch.marks[0] || ''), ch.marks);
+    const frameCount = fs.readdirSync(dir).filter((f) => /^Frame .*\.png$/.test(f)).length;
     c.runTool('frame', ch);
-    const ytFrame = await until(() => fs.readdirSync(dir).filter((f) => /^Frame .*\.png$/.test(f)).length >= 2);
+    const ytFrame = await until(() => fs.readdirSync(dir).filter((f) => /^Frame .*\.png$/.test(f)).length > frameCount);
     check('YouTube: grabs a frame', !!ytFrame);
   }
   c.closeTab(ch.id);
@@ -511,14 +512,17 @@ module.exports = async function run(c) {
 
   // ---- move in from Helium (bookmarks and history only: no secrets are read in this test)
   const importer = require('../src/main/importer');
-  const found = importer.findBrowsers();
-  const hel = found.find((x) => x.id === 'helium');
-  if (hel) {
-    const p = hel.profiles[0];
-    const n = c.lib.importBookmarks(importer.readBookmarks(hel, p));
-    const m = c.lib.importHistory(importer.readHistory(hel, p));
-    check('move in: Helium bookmarks and history', n > 0 && m > 0 && c.lib.bookmarks('').length > 0, { bookmarks: n, history: m });
-  } else check('move in: Helium found', false);
+  const hel = { id: 'helium', root: path.join(ud, 'fixture-helium') };
+  const profile = path.join(hel.root, 'Default');
+  fs.mkdirSync(profile, { recursive: true });
+  const entry = { type: 'url', name: 'Saved lesson', url: 'https://example.test/lesson' };
+  fs.writeFileSync(path.join(profile, 'Bookmarks'), JSON.stringify({ roots: { bookmark_bar: { children: [entry] } } }));
+  const history = new (require('node:sqlite').DatabaseSync)(path.join(profile, 'History'));
+  history.exec("CREATE TABLE urls (url TEXT, title TEXT, visit_count INTEGER, last_visit_time INTEGER, hidden INTEGER); INSERT INTO urls VALUES ('https://example.test/lesson','Saved lesson',1,13300000000000000,0)");
+  history.close();
+  const importedBookmarks = c.lib.importBookmarks(importer.readBookmarks(hel, 'Default'));
+  const importedHistory = c.lib.importHistory(importer.readHistory(hel, 'Default'));
+  check('move in: Helium bookmarks and history', importedBookmarks === 1 && importedHistory === 1 && c.lib.bookmarks('Saved lesson').length === 1);
 
   // ---- extensions
   const ext = require('../src/main/extensions');
