@@ -1,6 +1,6 @@
 // Run on a clean GitHub-hosted Windows or Linux runner after publishing a release.
-// Start the preceding signed-feed package, let it discover the live offer, close its window,
-// then launch the installed update with the same profile. Older releases install on normal quit.
+// Start the preceding signed-feed package and confirm both update prompts. The new release
+// must open the original profile itself.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -57,7 +57,11 @@ async function main() {
   const exe = path.join(live, core.exeName(platform));
   const args = platform === 'linux' ? ['--no-sandbox', '--disable-gpu'] : [];
   args.push('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0');
-  const app = spawn(exe, args, { env, stdio: 'ignore' });
+  // Preserve startup diagnostics for both processes if the native relaunch fails.
+  const logFile = path.join(dir, 'cue-output.log');
+  const output = fs.openSync(logFile, 'w');
+  const app = spawn(exe, args, { env, stdio: ['ignore', output, output] });
+  fs.closeSync(output);
   const staged = path.join(profile, 'updates', target);
   // Click only the update buttons of the test app's own sidebar in this disposable profile.
   let shell;
@@ -107,9 +111,18 @@ async function main() {
     try { return hashApp(live) === expected; } catch { return false; }
   }, 'verified package to replace old installation');
   await waitFor(() => app.exitCode !== null || app.signalCode, 'old process to exit');
-  await waitFor(() => {
-    try { return JSON.parse(fs.readFileSync(config)).lastVersion === target; } catch { return false; }
-  }, 'new Cue to reopen the same profile');
+  try {
+    await waitFor(() => {
+      try { return JSON.parse(fs.readFileSync(config)).lastVersion === target; } catch { return false; }
+    }, 'new Cue to reopen the same profile', 60000);
+  } catch (error) {
+    console.error('Installed file verified. Old process exit:', app.exitCode, app.signalCode);
+    console.error(fs.readFileSync(logFile, 'utf8').split('\n').slice(-30).join('\n'));
+    if (platform === 'linux') {
+      console.error(execFileSync('ps', ['-eo', 'pid,comm'], { encoding: 'utf8' }).split('\n').filter((line) => /cue|electron|chrome/i.test(line)).join('\n'));
+    }
+    throw error;
+  }
   assert.ok(JSON.parse(fs.readFileSync(config)).folders.some((folder) => folder.name === marker));
   console.log(`PASS ${platform}: ${old.version} discovered, verified and installed ${target}; new Cue opened with the original profile.`);
 }

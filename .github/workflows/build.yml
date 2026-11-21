@@ -8,6 +8,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      check_published_update:
+        description: Test the current published update using the preceding release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.check_published_update }}
     name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -234,6 +240,7 @@ jobs:
   upgrade-previous-release:
     name: Upgrade previous release (${{ matrix.os }})
     needs: release
+    if: ${{ always() && !cancelled() && (needs.release.result == 'success' || inputs.check_published_update) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     strategy:
