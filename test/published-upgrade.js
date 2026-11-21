@@ -55,7 +55,7 @@ async function main() {
   const config = path.join(profile, 'cue.json');
   fs.writeFileSync(config, JSON.stringify({ welcome: 'done', toldNoSandbox: true, folders: [{ id: 'personal', name: marker }], settings: { autoUpdate: false, agentPort: false, preset: null } }));
   const exe = path.join(live, core.exeName(platform));
-  const args = platform === 'linux' ? ['--no-sandbox', '--disable-gpu'] : [];
+  const args = platform === 'linux' ? ['--no-sandbox'] : [];
   args.push('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0');
   // Preserve startup diagnostics for both processes if the native relaunch fails.
   const logFile = path.join(dir, 'cue-output.log');
