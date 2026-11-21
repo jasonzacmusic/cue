@@ -42,6 +42,10 @@ Personal and School share sign-ins, and that used to include Claude, ChatGPT and
 - **Folder passcode is a switch** in Settings > Folders and accounts, "Ask for a passcode to open this folder", off by default. On asks for a new one, off asks for the current one.
 - **Boards never sleeps** (`OWN_PAGE_AWAKE` in `mustStayAwake`; Library, Bills and Thumbnail check too) and keeps each picture's card, so coming back or switching boards does not reload pictures. `test/ui-fixes.js`.
 
+## 0.7.4 (21-Nov-2026)
+- **Gmail's new compose page.** Gmail rewrites `?view=cm` to `?fs=1&tf=cm` and moved the To and Subject rows outside the block that holds the body and Send. `cue_gmail compose` stopped with "Gmail's To box does not show…", and the agent tab then sat on the compose page, so later searches came back empty until Cue restarted. `ON_COMPOSE` knows both addresses, `MARK_COMPOSE` widens to the whole email (never past a second body box), and To is typed only for addresses Gmail does not already show as a chip. The stand-in page in `test/whatsapp.js` now copies the new layout.
+- **Cue problems are fixed here, not reported to Jason** (his standing rule, 21-Nov-2026): when a Cue tool fails during other work, find the cause in this repo, fix, test, release, install. Never ask him to restart Cue.
+
 ## How to work
 - Plain English in anything Jason reads: Done / Not done / Need you, under 150 words.
 - Never ask him to run a command or open a dashboard. Passwords and 2FA are the only things he types.

@@ -213,18 +213,27 @@ const COMPOSE_JS = `
     root.addEventListener('input', () => setTimeout(() => { saved.textContent = 'Draft saved'; }, 400));
     setTimeout(() => { if (subject() || to()) saved.textContent = 'Draft saved'; }, 600);
   }`;
+// The compose page as Gmail draws it since 21-Nov-2026: the address is rewritten from ?view=cm to
+// ?fs=1&tf=cm, the To row sits OUTSIDE the block holding the body and Send, and the address from
+// the link is already a chip, with the To box itself empty.
 function composePage() {
   return `<!doctype html><title>Compose Mail - school@example.com - Gmail</title>
-  <div role="dialog" id="cm"><input aria-label="To recipients" name="to"><input name="subjectbox">
-    <div aria-label="Message Body" role="textbox" contenteditable="true"></div><div class="chips"></div>
+  <table id="cm"><tr><td class="I5">
+    <div class="torow"><span class="tochips"></span><input aria-label="To recipients" peoplekit-id="BbVjBd"></div>
+    <input name="subjectbox">
+    <div class="aDh"><div aria-label="Message Body" role="textbox" contenteditable="true"></div><div class="chips"></div>
     <div role="button" command="Files" aria-label="Attach files" data-tooltip="Attach files"></div>
     <div role="button" aria-label="Send ‪(⌘Enter)‬" data-tooltip="Send ‪(⌘Enter)‬">Send</div><span class="oG"></span></div>
+  </td></tr></table>
   <script>${COMPOSE_JS}</script>
   <script>
     const q = new URLSearchParams(location.search), cm = document.getElementById('cm');
-    cm.querySelector('[name=to]').value = q.get('to') || ''; cm.querySelector('[name=subjectbox]').value = q.get('su') || '';
+    if (q.get('view') === 'cm') { q.delete('view'); q.set('tf', 'cm'); history.replaceState(null, '', location.pathname + '?' + q.toString()); }
+    for (const a of (q.get('to') || '').split(',').filter(Boolean)) { const c = document.createElement('span'); c.setAttribute('email', a.trim()); c.textContent = a.trim(); cm.querySelector('.tochips').appendChild(c); }
+    cm.querySelector('[name=subjectbox]').value = q.get('su') || '';
     cm.querySelector('[aria-label="Message Body"]').innerText = q.get('body') || '';
-    wire(cm, () => cm.querySelector('[name=subjectbox]').value, () => cm.querySelector('[name=to]').value);
+    const typed = () => cm.querySelector('[peoplekit-id]').value.split(',').map((x) => x.trim()).filter(Boolean);
+    wire(cm, () => cm.querySelector('[name=subjectbox]').value, () => [...cm.querySelectorAll('.tochips [email]')].map((e) => e.getAttribute('email')).concat(typed()).join(', '));
   </script>`;
 }
 
@@ -296,7 +305,7 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState, userFolders, a
       }
       if (req.url === '/gmail/sent.json') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(gmailSent)); }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      if (req.url.startsWith('/gmail') && /[?&]view=cm\b/.test(req.url)) return res.end(composePage());
+      if (req.url.startsWith('/gmail') && /[?&](?:view|tf)=cm\b/.test(req.url)) return res.end(composePage());
       if (req.url.startsWith('/gmail')) return res.end(gmailPage());
       const which = req.url.startsWith('/school') ? 'school' : req.url.startsWith('/blank') ? null : 'personal';
       res.end(which ? page(which, { nosearch: /nosearch/.test(req.url) }) : '<!doctype html><title>WhatsApp</title><h1>Scan the QR code with your phone’s camera</h1><p>Link with phone number instead.</p>');
@@ -476,6 +485,8 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState, userFolders, a
     const g0 = gmailSent[0] || {};
     check('Gmail send:true waits for the uploads, sends, and confirms from "Message sent" and Sent', /^Sent from School Gmail/.test(gsend.text) && /Message sent/.test(gsend.text) && /in Sent \[[0-9a-f]+\]/.test(gsend.text), gsend.text);
     check('Gmail: the server got that email with both files', g0.to === 'jolly@example.com' && g0.subject === 'Your receipt' && (g0.files || []).map((f) => f.name).join('|') === 'Jolly receipt.pdf|chord chart.png', g0);
+    const afterWrite = await agentApi.gmail({ identity: 'school', action: 'search', query: 'internship' });
+    check('Gmail: a search straight after an email still finds its rows (the tab left the compose page)', /· 25 for/.test(afterWrite.text), afterWrite.text.slice(0, 120));
     const greply = await agentApi.gmail({ identity: 'school', action: 'reply', id, body: 'Thanks, our list is attached.', files: [pic], send: true });
     const g1 = gmailSent[1] || {};
     check('Gmail reply sends in the thread, with the file', /^Sent from School Gmail.*a reply in “Paid maker internship”/.test(greply.text) && g1.subject === 'Re: Paid maker internship' && (g1.files || [])[0] && g1.files[0].name === 'chord chart.png' && /our list is attached/.test(g1.body), [greply.text, g1]);

@@ -15,6 +15,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // never lands in the school's mailbox (googleForFolder in main.js).
 const BASE = () => process.env.CUE_GMAIL_URL || 'https://mail.google.com/mail/';
 const { human } = require('./attach');
+// Gmail's compose page. It is opened as ?view=cm, and Gmail rewrites that to ?fs=1&tf=cm (seen
+// 21-Nov-2026), so both spell "a compose page". Missing the second left the agent tab on the
+// compose page for every later search.
+const ON_COMPOSE = /[?&](?:view|tf)=cm\b/;
 
 // Rows of the list Gmail is showing now. Gmail keeps the lists it showed before in the page,
 // hidden with display:none, so only rows with no hidden ancestor count.
@@ -89,6 +93,14 @@ const MARK_COMPOSE = `(() => {
   let root = body;
   while (root.parentElement && !root.querySelector(${JSON.stringify(SEND_SEL)})) root = root.parentElement;
   if (!root.querySelector(${JSON.stringify(SEND_SEL)})) return null;
+  // Gmail keeps the To and Subject rows outside the block that holds the body and Send (seen
+  // 21-Nov-2026), so widen to the smallest block that also holds them, while it is still this
+  // one email: never a block holding a second body box.
+  const TO_BOX = 'input[peoplekit-id], input[name="to"], textarea[name="to"], input[aria-label*="To" i]';
+  const whole = (el) => el.querySelector('input[name="subjectbox"]') && el.querySelector(TO_BOX);
+  let wide = root;
+  while (!whole(wide) && wide.parentElement && wide.parentElement !== document.documentElement && bodies.filter((b) => wide.parentElement.contains(b)).length === 1) wide = wide.parentElement;
+  if (whole(wide)) root = wide;
   root.setAttribute('data-cue-compose', '1');
   const subj = root.querySelector('input[name="subjectbox"]') || document.querySelector('input[name="subjectbox"]');
   const to = [...root.querySelectorAll('[email]')].map((e) => e.getAttribute('email'))
@@ -101,7 +113,14 @@ const SET_FIELDS = (f) => `(() => {
   if (!root) return 'no-compose';
   const setVal = (el, v) => { const p = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p, 'value').set.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
   if (f.subject !== undefined) { const s = root.querySelector('input[name="subjectbox"]') || document.querySelector('input[name="subjectbox"]'); if (s && s.value !== f.subject) setVal(s, f.subject); }
-  if (f.to) { const t = root.querySelector('input[name="to"], textarea[name="to"], input[aria-label*="To" i], input[peoplekit-id]'); if (t && !t.value) { t.focus(); setVal(t, f.to + ','); t.blur(); } }
+  if (f.to) {
+    // Only the addresses Gmail does not already show as a chip or in the box: the compose address
+    // usually fills To by itself, and typing them again would add every person twice.
+    const t = root.querySelector('input[name="to"], textarea[name="to"], input[aria-label*="To" i], input[peoplekit-id]');
+    const have = ([...root.querySelectorAll('[email]')].map((e) => e.getAttribute('email')).join(' ') + ' ' + (t ? t.value : '')).toLowerCase();
+    const need = f.to.split(/[,;\\s]+/).filter((x) => /@/.test(x) && !have.includes(x.toLowerCase()));
+    if (t && need.length) { t.focus(); setVal(t, (t.value ? t.value.replace(/[,\\s]*$/, ', ') : '') + need.join(', ') + ','); t.blur(); }
+  }
   if (f.body !== undefined) {
     const b = [...root.querySelectorAll(${JSON.stringify(BODY_SEL)})].pop();
     if (b && !(b.innerText || '').trim()) { b.focus(); for (const [k, line] of f.body.split('\\n').entries()) { if (k) document.execCommand('insertLineBreak'); if (line) document.execCommand('insertText', false, line); } }
@@ -146,7 +165,7 @@ function makeGmail({ agentTab, wake, label, who, vetFiles, attachFiles }) {
     let end = Date.now() + 30000;
     while (wc.isLoading() && Date.now() < end) await sleep(150);
     // Left on a compose page by compose: back to the mailbox itself, keeping the folder's account.
-    if (/[?&]view=cm\b/.test(wc.getURL())) {
+    if (ON_COMPOSE.test(wc.getURL())) {
       const u = new URL(wc.getURL());
       const home = new URL(u.origin + u.pathname);
       if (u.searchParams.get('authuser')) home.searchParams.set('authuser', u.searchParams.get('authuser'));
@@ -156,7 +175,7 @@ function makeGmail({ agentTab, wake, label, who, vetFiles, attachFiles }) {
       wc.on('will-prevent-unload', leave);
       await wc.loadURL(home.toString()).catch(() => {});
       wc.removeListener('will-prevent-unload', leave);
-      if (/[?&]view=cm\b/.test(wc.getURL())) throw new Error(`The ${label(identity)} folder's agent Gmail tab still has an unsaved email open, so Cue left it alone. Nothing was done.`);
+      if (ON_COMPOSE.test(wc.getURL())) throw new Error(`The ${label(identity)} folder's agent Gmail tab still has an unsaved email open, so Cue left it alone. Nothing was done.`);
       end = Date.now() + 30000;
       while (wc.isLoading() && Date.now() < end) await sleep(150);
     }
