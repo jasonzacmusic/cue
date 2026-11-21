@@ -259,14 +259,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
         run: |
-          strace -f -s 300 -e trace=execve,exit_group -o "$RUNNER_TEMP/cue-exec.log" sh -c 'xvfb-run -a node test/published-upgrade.js; echo $? > "$RUNNER_TEMP/cue-result"' &
+          strace -f -s 300 -e trace=execve,exit_group,write -o "$RUNNER_TEMP/cue-exec.log" sh -c 'xvfb-run -a node test/published-upgrade.js; echo $? > "$RUNNER_TEMP/cue-result"' &
           watch_pid=$!
           for i in $(seq 1 240); do
             test -e "$RUNNER_TEMP/cue-result" && break
             sleep 1
           done
           kill -INT "$watch_pid" 2>/dev/null || true
-          grep -E 'execve.*(Cue|cue|chrome)' "$RUNNER_TEMP/cue-exec.log" | tail -45
+          grep -E 'write\(2,|SIG(SEGV|TRAP|ABRT)|exit_group' "$RUNNER_TEMP/cue-exec.log" | grep -E 'write\(2,|SIG(SEGV|TRAP|ABRT)' | tail -50
           exit "$(cat "$RUNNER_TEMP/cue-result")"
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
