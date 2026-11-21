@@ -258,6 +258,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/published-upgrade.js
+        # A desktop keeps its display alive while Cue closes and reopens.
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -noreset' node test/published-upgrade.js
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
