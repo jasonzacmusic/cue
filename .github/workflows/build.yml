@@ -246,7 +246,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04, ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -258,27 +258,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
-        run: |
-          strace -f -s 300 -e trace=execve,exit_group,write,clone,clone3,openat,socketpair,sendmsg,recvmsg,prctl,wait4,readlink,close,dup2 -o "$RUNNER_TEMP/cue-exec.log" sh -c 'xvfb-run -a node test/published-upgrade.js; echo $? > "$RUNNER_TEMP/cue-result"' &
-          watch_pid=$!
-          for i in $(seq 1 240); do
-            test -e "$RUNNER_TEMP/cue-result" && break
-            sleep 1
-          done
-          kill -INT "$watch_pid" 2>/dev/null || true
-          python3 - "$RUNNER_TEMP/cue-exec.log" <<'PYTHON'
-          import sys,re
-          last_zygote = {}
-          started=False
-          for line in open(sys.argv[1],errors='replace'):
-              if 'execve(' in line and '--type=relauncher' in line:
-                  started=True
-              if not started: continue
-              pid=line.split(maxsplit=1)[0]
-              if 'execve(' in line and '--type=zygote' in line: last_zygote[pid]=[]
-              if pid in last_zygote: last_zygote[pid]=(last_zygote[pid]+[line.rstrip()])[-35:]
-          for lines in last_zygote.values(): print('\n'.join(lines))
-          PYTHON
-          exit "$(cat "$RUNNER_TEMP/cue-result")"
+        # A desktop keeps its display alive while Cue closes and reopens.
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -noreset' node test/published-upgrade.js
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js

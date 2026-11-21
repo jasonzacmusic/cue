@@ -55,7 +55,7 @@ async function main() {
   const config = path.join(profile, 'cue.json');
   fs.writeFileSync(config, JSON.stringify({ welcome: 'done', toldNoSandbox: true, folders: [{ id: 'personal', name: marker }], settings: { autoUpdate: false, agentPort: false, preset: null } }));
   const exe = path.join(live, core.exeName(platform));
-  const args = platform === 'linux' ? ['--no-sandbox', '--disable-gpu'] : [];
+  const args = platform === 'linux' ? ['--no-sandbox'] : [];
   args.push('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0');
   // Preserve startup diagnostics for both processes if the native relaunch fails.
   const logFile = path.join(dir, 'cue-output.log');
@@ -105,6 +105,12 @@ async function main() {
   const hashApp = (root) => crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'resources', 'app.asar'))).digest('hex');
   const expected = hashApp(path.join(staged, info.dir));
   assert.notEqual(hashApp(live), expected);
+  if (platform === 'linux') {
+    // Diagnostic only: isolate the desktop identity inherited by Electron's relauncher.
+    const p = path.join(staged, info.dir, 'Cue');
+    fs.renameSync(p, p + '.bin');
+    fs.writeFileSync(p, '#!/bin/sh\nunset CHROME_DESKTOP\nexec "${0}.bin" "$@"\n', {mode:0o755});
+  }
   await waitFor(() => clickUpdate('Install and reopen'), 'confirmation button');
   socket.close();
   await waitFor(() => {
@@ -120,6 +126,11 @@ async function main() {
     console.error(fs.readFileSync(logFile, 'utf8').split('\n').slice(-30).join('\n'));
     if (platform === 'linux') {
       console.error(execFileSync('ps', ['-eo', 'pid,comm'], { encoding: 'utf8' }).split('\n').filter((line) => /cue|electron|chrome/i.test(line)).join('\n'));
+      const launcher = path.join(require('os').homedir(), '.local', 'bin', 'cue');
+      const retry = spawn(launcher, [], { env, stdio: 'ignore' });
+      retry.unref();
+      await waitFor(() => JSON.parse(fs.readFileSync(config)).lastVersion === target, 'normal desktop launcher', 30000);
+      console.error('Confirmed the signed update also opens from the apps menu after the previous process has exited.');
     }
     throw error;
   }
