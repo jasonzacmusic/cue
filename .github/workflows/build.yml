@@ -259,14 +259,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - if: runner.os == 'Linux'
         run: |
-          strace -f -s 300 -e trace=execve,exit_group,write -o "$RUNNER_TEMP/cue-exec.log" sh -c 'xvfb-run -a node test/published-upgrade.js; echo $? > "$RUNNER_TEMP/cue-result"' &
+          strace -f -s 300 -e trace=execve,exit_group,write,clone,clone3,openat,socketpair,sendmsg,recvmsg,prctl,wait4,readlink,close,dup2 -o "$RUNNER_TEMP/cue-exec.log" sh -c 'xvfb-run -a node test/published-upgrade.js; echo $? > "$RUNNER_TEMP/cue-result"' &
           watch_pid=$!
           for i in $(seq 1 240); do
             test -e "$RUNNER_TEMP/cue-result" && break
             sleep 1
           done
           kill -INT "$watch_pid" 2>/dev/null || true
-          grep -E 'write\(2,.*(ERROR|FATAL|error|failed|zygote|Failed|WARNING)|execve.*relauncher' "$RUNNER_TEMP/cue-exec.log" | tail -100
+          sed -n '/execve.*--type=relauncher/,$p' "$RUNNER_TEMP/cue-exec.log" | grep -E '= -1 (EPERM|EACCES|ECHILD|EBADF|EPIPE|ENOEXEC)|execve.*zygote|GPU process|sendmsg.*SCM_CREDENTIALS|proc/.*status.*ENOENT|clone3.*EPERM' | head -140 || true
           exit "$(cat "$RUNNER_TEMP/cue-result")"
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
