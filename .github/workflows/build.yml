@@ -266,7 +266,7 @@ jobs:
             sleep 1
           done
           kill -INT "$watch_pid" 2>/dev/null || true
-          grep -E 'write\(2,|SIG(SEGV|TRAP|ABRT)|exit_group' "$RUNNER_TEMP/cue-exec.log" | grep -E 'write\(2,|SIG(SEGV|TRAP|ABRT)' | tail -50
+          grep -E 'write\(2,.*(ERROR|FATAL|error|failed|zygote|Failed|WARNING)|execve.*relauncher' "$RUNNER_TEMP/cue-exec.log" | tail -100
           exit "$(cat "$RUNNER_TEMP/cue-result")"
       - if: runner.os == 'Windows'
         run: node test/published-upgrade.js
