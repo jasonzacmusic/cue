@@ -4,6 +4,7 @@
 const { packager } = require('@electron/packager');
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 const path = require('path');
+const fs = require('node:fs');
 
 const root = path.join(__dirname, '..');
 const pkg = require(path.join(root, 'package.json'));
@@ -41,6 +42,19 @@ packager({
       [FuseV1Options.EnableNodeCliInspectArguments]: false,
       [FuseV1Options.EnableCookieEncryption]: true,
     });
+    // A running Electron exports CHROME_DESKTOP. On restart its early Linux helpers
+    // resolve that desktop entry through GLib, start a thread and abort before they
+    // can render the window. Start the new browser like a fresh desktop launch.
+    // Keep the established executable name so updaters already in the field get the fix.
+    const launcher = path.join(dir, 'Cue');
+    fs.renameSync(launcher, launcher + '.bin');
+    fs.writeFileSync(launcher, [
+      '#!/bin/sh',
+      'unset CHROME_DESKTOP',
+      'launcher=$(readlink -f -- "$0") || exit 1',
+      'exec "${launcher}.bin" "$@"',
+      '',
+    ].join('\n'), { mode: 0o755 });
   }
   console.log('built', paths.join(', '));
 })
