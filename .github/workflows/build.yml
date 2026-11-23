@@ -82,6 +82,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
+      - name: Verify tab lifecycle (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CUE_TEST: tab-lifecycle
+          CUE_QUIET: '1'
+          CUE_USER_DATA: ${{ runner.temp }}\cue-lifecycle
+        run: npx --no-install electron .
+
+      - name: Verify tab lifecycle (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CUE_TEST: tab-lifecycle
+          CUE_QUIET: '1'
+          CUE_USER_DATA: ${{ runner.temp }}/cue-lifecycle
+        run: xvfb-run -a npx --no-install electron . --no-sandbox --disable-gpu
+
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         env:

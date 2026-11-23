@@ -5,6 +5,7 @@ const { BaseWindow, WebContentsView, Menu, clipboard, screen, dialog } = require
 const { whereToOpen, refuseOpen } = require('./signin');
 const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
 const vanishKeys = require('./vanish-keys');
+const { liveContents } = require('./view-contents');
 
 const BAR = 86; // tab strip + address bar
 
@@ -15,7 +16,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   let winFull = false; // he asked for full screen himself (the key, or "Open Vanish in full screen")
   const pref = (k) => (prefs() || {})[k];
   // One place for a notice that belongs to Vanish: a line in its own toolbar, never the main window.
-  const say = (text) => { if (ui && !ui.webContents.isDestroyed()) ui.webContents.send('vanish:note', String(text)); };
+  const say = (text) => liveContents(ui)?.send('vanish:note', String(text));
   // Closing the window empties its session, and that takes a moment. A Vanish tab opened in that
   // moment used to have its page cancelled by the clearing and sat there blank, which is why a new
   // Vanish tab sometimes did nothing. Pages now wait for the clearing to finish.
@@ -45,11 +46,13 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   const byId = (id) => tabs.find((t) => t.id === id);
 
   function state() {
-    if (!ui || ui.webContents.isDestroyed()) return;
+    const bar = liveContents(ui);
+    if (!bar) return;
     const a = byId(activeId);
-    ui.webContents.send('vanish:state', {
+    const wc = liveContents(a?.view);
+    bar.send('vanish:state', {
       tabs: tabs.map((t) => ({ id: t.id, title: t.url === startFile ? 'New tab' : t.title, icons: icons(t), active: t.id === activeId, loading: t.loading && !t.favicon, muted: !!t.muted })),
-      url: a && !a.url.startsWith('file:') ? a.url : '', canBack: !!a && a.view.webContents.navigationHistory.canGoBack(), canFwd: !!a && a.view.webContents.navigationHistory.canGoForward(),
+      url: a && !a.url.startsWith('file:') ? a.url : '', canBack: wc?.navigationHistory.canGoBack() ?? false, canFwd: wc?.navigationHistory.canGoForward() ?? false,
     });
   }
 
@@ -76,7 +79,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   function zoom({ dir = 0, reset = false } = {}) {
     const a = byId(activeId); if (!a) return;
     a.zoom = reset ? 0 : Math.max(-8, Math.min(9, (a.zoom || 0) + dir * 0.5));
-    a.view.webContents.setZoomLevel(a.zoom);
+    liveContents(a.view)?.setZoomLevel(a.zoom);
   }
 
   function layout() {
@@ -84,14 +87,16 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const [w, h] = win.getContentSize();
     ui.setBounds({ x: 0, y: 0, width: w, height: h });
     for (const t of tabs) {
+      if (!t.view) continue;
       t.view.setBounds(full ? { x: 0, y: 0, width: w, height: h } : { x: 0, y: BAR, width: w, height: Math.max(0, h - BAR) });
       t.view.setVisible(t.id === activeId);
     }
   }
 
   function focusBar() {
-    if (!ui || ui.webContents.isLoading()) return;
-    ui.webContents.focus(); ui.webContents.send('vanish:focus');
+    const bar = liveContents(ui);
+    if (!bar || bar.isLoading()) return;
+    bar.focus(); bar.send('vanish:focus');
   }
 
   function step(by) {
@@ -107,7 +112,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const want = on || winFull;
     if (process.platform === 'darwin') win.setSimpleFullScreen(want); else win.setFullScreen(want);
     layout();
-    if (on) { win.focus(); const a = byId(activeId); if (a) a.view.webContents.focus(); }
+    if (on) { win.focus(); liveContents(byId(activeId)?.view)?.focus(); }
   }
 
   // Coming back from a full-screen film left no pointer and no scroll bar: the
@@ -115,8 +120,10 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   // video had asked for the pointer to be hidden. Measure again once the
   // animation is over and nudge the mouse so the pointer comes back.
   function settle(t) {
+    const wc = liveContents(t?.view);
+    if (!wc) return;
     const again = () => {
-      if (!t || !t.view || t.view.webContents.isDestroyed()) return;
+      if (liveContents(t.view) !== wc) return;
       layout();
       try { t.view.webContents.focus(); } catch {}
       try {
@@ -132,7 +139,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
 
   function leaveFull(wc) {
     if (!full) return;
-    wc.executeJavaScript('document.fullscreenElement ? document.exitFullscreen() : 0', true).catch(() => {});
+    wc?.executeJavaScript('document.fullscreenElement ? document.exitFullscreen() : 0', true).catch(() => {});
     setTimeout(() => { if (full) { full = false; fillScreen(false); } }, 800); // the page never answered
   }
 
@@ -146,7 +153,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   }
 
   function run(id, { n, fromStrip } = {}) {
-    const a = byId(activeId); const wc = a && a.view.webContents;
+    const a = byId(activeId); const wc = liveContents(a?.view);
     switch (id) {
       case 'open': case 'new': add(); return true;
       case 'close': if (a) closeTab(a.id); return true;
@@ -154,7 +161,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       case 'prev': step(-1); return true;
       case 'goto': { const t = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1]; if (t) activate(t.id); return true; } // Cmd+9 is always the last tab
       case 'play': if (wc) wc.send('cue:media', 'toggle'); return true;
-      case 'mute': if (a) { a.muted = !wc.isAudioMuted(); wc.setAudioMuted(a.muted); state(); } return true;
+      case 'mute': if (a) { a.muted = !a.muted; wc?.setAudioMuted(a.muted); state(); } return true;
       case 'find': openFind(); return true;
       case 'full': toggleFull(); return true;
       case 'leave':
@@ -164,7 +171,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
         return false;
       case 'forget': forget(); return true;
       case 'address': focusBar(); return true;
-      case 'reload': if (wc) wc.reload(); return true;
+      case 'reload': reload(); return true;
       case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); return true;
       case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); return true;
       case 'moveLeft': if (a) move(a.id, tabs.indexOf(a) - 1); return true;
@@ -186,19 +193,20 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   // Find on the page, in a small box in the Vanish toolbar.
   let finding = '';
   function openFind() {
-    if (!ui || ui.webContents.isDestroyed()) return;
-    ui.webContents.focus(); ui.webContents.send('vanish:find-open');
+    const bar = liveContents(ui);
+    if (!bar) return;
+    bar.focus(); bar.send('vanish:find-open');
   }
   function find({ text = '', back = false } = {}) {
-    const a = byId(activeId); if (!a) return;
-    const wc = a.view.webContents;
-    if (!text) { finding = ''; wc.stopFindInPage('clearSelection'); ui.webContents.send('vanish:find-result', { active: 0, total: 0 }); return; }
+    const wc = liveContents(byId(activeId)?.view);
+    if (!wc) return;
+    if (!text) { finding = ''; wc.stopFindInPage('clearSelection'); liveContents(ui)?.send('vanish:find-result', { active: 0, total: 0 }); return; }
     const again = text === finding; finding = text;
     wc.findInPage(text, { forward: !back, findNext: !again });
   }
   function stopFind() {
     finding = '';
-    for (const t of tabs) { try { t.view.webContents.stopFindInPage('clearSelection'); } catch {} }
+    for (const t of tabs) liveContents(t.view)?.stopFindInPage('clearSelection');
   }
 
   // "Close Vanish and forget everything": exactly what closing the last tab does - the window
@@ -208,10 +216,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   function add(url, { from, background } = {}) {
     if (!win) build();
     else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } // it may be behind Cue or on another desktop
-    const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false, disableHtmlFullscreenWindowResize: true } });
-    view.setBackgroundColor('#0B0B0D');
-    view.webContents.setVisualZoomLevelLimits(1, 5).catch(() => {}); // pinch to zoom, as in the main window
-    const t = { id: nextId--, view, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
+    const t = { id: nextId--, view: null, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
     // A link from a page either brings its new tab to the front (Vanish's own setting, "go" by
     // default) or opens it behind. Opened behind a video that is playing, it waits silent until
     // you go to it, so nothing starts talking over the film.
@@ -219,8 +224,30 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (behind && from.playing) t.calm = true;
     if (from && pref('vanishNewTabPlace') !== 'end') tabs.splice(tabs.indexOf(from) + 1, 0, t);
     else tabs.push(t);
+    ensureTabView(t);
+    if (behind) { layout(); state(); } else activate(t.id);
+    if (!url) focusBar();
+    return t;
+  }
+
+  function ensureTabView(t) {
+    const existing = liveContents(t.view);
+    if (existing) return existing;
+    const view = new WebContentsView({ webPreferences: { session: session(), preload, contextIsolation: true, sandbox: true, spellcheck: false, disableHtmlFullscreenWindowResize: true } });
+    view.setBackgroundColor('#0B0B0D');
+    t.view = view;
     win.contentView.addChildView(view);
     const wc = view.webContents;
+    wc.setVisualZoomLevelLimits(1, 5).catch(() => {}); // pinch to zoom, as in the main window
+    wc.setAudioMuted(!!t.muted);
+    wc.once('destroyed', () => {
+      if (t.view !== view) return;
+      t.view = null; t.loading = false; t.playing = false; t.held = false;
+      if (!win || win.isDestroyed()) return;
+      win.contentView.removeChildView(view);
+      if (activeId === t.id) { finding = ''; if (full) { full = false; fillScreen(false); } say('This tab closed. Reload it to reopen the page.'); }
+      layout(); state();
+    });
     const sync = () => { t.url = wc.getURL(); state(); };
     wc.on('page-title-updated', (_e, title) => { t.title = title; state(); });
     wc.on('page-favicon-updated', (_e, f) => { t.favicon = f[0] || null; state(); });
@@ -244,8 +271,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
         let loud = false;
         try { loud = wc.isCurrentlyAudible(); } catch {}
         if (!loud && sounding) loud = await wc.executeJavaScript(sounding, true).catch(() => false);
-        if (!loud || !t.playing) return;
-        for (const o of tabs) if (o !== t && o.playing && !o.view.webContents.isDestroyed()) o.view.webContents.send('cue:media', 'pause');
+        if (!loud || liveContents(t.view) !== wc || !t.playing) return;
+        for (const o of tabs) if (o !== t && o.playing) liveContents(o.view)?.send('cue:media', 'pause');
       }, 600);
     });
     wc.on('media-paused', () => { t.playing = false; });
@@ -268,16 +295,14 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       return { action: 'deny' };
     });
     wc.on('did-create-window', wirePopup);
-    wc.on('found-in-page', (_e, r) => { if (ui && !ui.webContents.isDestroyed() && activeId === t.id) ui.webContents.send('vanish:find-result', { active: r.activeMatchOrdinal, total: r.matches }); });
+    wc.on('found-in-page', (_e, r) => { if (activeId === t.id) liveContents(ui)?.send('vanish:find-result', { active: r.activeMatchOrdinal, total: r.matches }); });
     // Cue's own pages (Library, Bills, Boards) hold his history and his money; none of them opens
     // in here. The one exception is the dangerous-site warning, which Cue itself puts up.
     wc.on('will-navigate', (e, u) => { if (/^cue:/i.test(u)) { e.preventDefault(); say('Cue\u2019s own pages do not open in Vanish.'); } });
-    if (!url) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
+    if (t.url === startFile) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
     protect(wc, t);
     whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(guardUrl(t.url)).catch(() => {}); });
-    if (behind) { layout(); state(); } else activate(t.id);
-    if (!url) focusBar();
-    return t;
+    return wc;
   }
 
   // A Vanish "Sign in with..." window: the same session, the same guards, and it goes when the
@@ -305,15 +330,15 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   function activate(id) {
     const t = byId(id); if (!t) return;
     const was = byId(activeId);
-    if (full && was && was !== t) leaveFull(was.view.webContents);
-    if (was && was !== t && finding) { stopFind(); if (ui && !ui.webContents.isDestroyed()) ui.webContents.send('vanish:find-result', { active: 0, total: 0, closed: true }); }
-    activeId = id; layout(); state(); t.view.webContents.focus();
-    if (t.calm) { t.calm = false; if (t.held) { t.held = false; t.view.webContents.send('cue:media', 'play'); } }
+    if (full && was && was !== t) leaveFull(liveContents(was.view));
+    if (was && was !== t && finding) { stopFind(); liveContents(ui)?.send('vanish:find-result', { active: 0, total: 0, closed: true }); }
+    const wc = ensureTabView(t);
+    activeId = id; layout(); state(); wc.focus();
+    if (t.calm) { t.calm = false; if (t.held) { t.held = false; wc.send('cue:media', 'play'); } }
   }
 
   function pictureInPicture() {
-    const a = byId(activeId);
-    if (a) a.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {});
+    liveContents(byId(activeId)?.view)?.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {});
   }
 
   function closeTab(id) {
@@ -321,7 +346,9 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     const i = tabs.indexOf(t);
     if (full && id === activeId) { full = false; fillScreen(false); }
     tabs.splice(i, 1);
-    try { win.contentView.removeChildView(t.view); t.view.webContents.close(); } catch {}
+    const view = t.view;
+    t.view = null;
+    if (view) { win.contentView.removeChildView(view); liveContents(view)?.close(); }
     if (!tabs.length) { win.close(); return; }
     if (activeId === id) activate(tabs[Math.min(i, tabs.length - 1)].id); else { layout(); state(); }
   }
@@ -346,19 +373,21 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     // this window loses the front. Off by default; nothing restarts by itself.
     win.on('blur', () => {
       if (!pref('vanishPauseOnBlur')) return;
-      for (const t of tabs) if (t.playing && !t.view.webContents.isDestroyed()) t.view.webContents.send('cue:media', 'pause');
+      for (const t of tabs) if (t.playing) liveContents(t.view)?.send('cue:media', 'pause');
     });
     if (pref('vanishFullScreen')) { winFull = true; fillScreen(false); }
     win.on('leave-full-screen', () => { // the green button or a Mac gesture left full screen
       if (!full) return;
       full = false; layout();
       const a = byId(activeId);
-      if (a) a.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+      liveContents(a?.view)?.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
       settle(a);
     });
     win.on('closed', () => {
+      const bar = liveContents(ui);
       win = null; ui = null; activeId = null; full = false; winFull = false; finding = '';
-      tabs.splice(0).forEach((t) => { try { t.view.webContents.close(); } catch {} });
+      bar?.close();
+      tabs.splice(0).forEach((t) => liveContents(t.view)?.close());
       for (const p of [...popups]) { try { p.destroy(); } catch {} }
       popups.clear();
       wipe();
@@ -389,16 +418,25 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     state();
   }
 
+  function reload() {
+    const t = byId(activeId);
+    const wc = liveContents(t?.view);
+    if (wc) wc.reload();
+    else if (t) activate(t.id);
+  }
+
   function command(cmd, a = {}) {
-    const t = byId(activeId); const wc = t && t.view.webContents;
-    if (cmd === 'navigate' && wc) {
+    const t = byId(activeId); const wc = liveContents(t?.view);
+    if (cmd === 'navigate' && t) {
       const asked = resolveInput(a.text);
       if (/^cue:/i.test(asked)) { say('Cue\u2019s own pages do not open in Vanish.'); return; }
-      const u = guardUrl(asked); t.url = u; whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(u).catch(() => {}); }); wc.focus();
+      const u = guardUrl(asked); t.url = u;
+      if (wc) { whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(u).catch(() => {}); }); wc.focus(); }
+      else activate(t.id);
     }
     if (cmd === 'back' && wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
     if (cmd === 'forward' && wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
-    if (cmd === 'reload' && wc) wc.reload();
+    if (cmd === 'reload') reload();
     if (cmd === 'new') add();
     if (cmd === 'activate') activate(a.id);
     if (cmd === 'close') closeTab(a.id);
@@ -415,7 +453,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     win.setContentProtection(pref('vanishHideFromCapture') !== false);
   }
 
-  const owns = (wc) => !!wc && (tabs.some((t) => t.view.webContents === wc) || (!!ui && ui.webContents === wc));
+  const owns = (wc) => !!wc && (tabs.some((t) => liveContents(t.view) === wc) || liveContents(ui) === wc);
   return { add, closeTab, command, run, say, owns, applyPrefs, forget, toggleFull, pictureInPicture, wipe, zoom, wiping: () => wiping, tabs, activate, step, move, window: () => win, ui: () => ui, hasPopups: () => popups.size > 0, isFull: () => full, isWinFull: () => winFull, activeId: () => activeId, focused: () => !!win && win.isFocused(), close: () => { if (win) win.close(); } };
 }
 

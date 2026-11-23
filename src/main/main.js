@@ -33,6 +33,7 @@ const { makeWhatsApp, resolveWho, possessive, WA_HOST } = require('./whatsapp');
 const { makeGmail } = require('./gmail');
 const attachKit = require('./attach');
 const presets = require('./presets');
+const { liveContents } = require('./view-contents');
 
 app.setName('Cue');
 if (process.env.CUE_USER_DATA) app.setPath('userData', process.env.CUE_USER_DATA);
@@ -246,15 +247,18 @@ function rememberWhose(folder, key, label, who) {
 // Read it off the page itself once it has settled. Costs one tiny script on the
 // handful of sites that can be two people at once, and nothing anywhere else.
 function sniffWhose(t) {
-  if (!t || !t.view || !isFolder(t.identity)) return;
+  const wc = liveContents(t?.view);
+  if (!wc || !isFolder(t.identity)) return;
   let host = ''; try { host = new URL(t.url).hostname; } catch { return; }
   const site = WHOSE.find((w) => w.host.test(host));
   if (!site) return;
   const folder = t.identity;
   setTimeout(() => {
-    if (!t.view || t.view.webContents.isDestroyed()) return;
-    t.view.webContents.executeJavaScript(site.read, true)
-      .then((who) => rememberWhose(folder, site.key, site.label, String(who || '').slice(0, 40)))
+    if (liveContents(t.view) !== wc) return;
+    wc.executeJavaScript(site.read, true)
+      .then((who) => {
+        if (liveContents(t.view) === wc) rememberWhose(folder, site.key, site.label, String(who || '').slice(0, 40));
+      })
       .catch(() => {});
   }, 1500);
 }
@@ -412,6 +416,7 @@ let peek = null;
 let aiView = null;
 let stripOpen = false;
 let recTabId = null;
+let quitting = false;
 let updater = null;
 let sideReveal = false;
 let vanish = null;
@@ -1119,12 +1124,11 @@ function groupOf(t) {
 }
 
 function ensureView(t) {
-  // A view whose page has gone (crashed, or closed from under us) still sits
-  // on the tab as an object, and using it throws "Object has been destroyed".
-  // Treat it as no view and build a fresh one, so WhatsApp and the rest come
-  // back by themselves instead of failing.
-  if (t.view && t.view.webContents.isDestroyed()) { t.view = null; t.sleeping = true; }
-  if (t.view) return t.view;
+  if (liveContents(t.view)) return t.view;
+  if (t.view) forgetDeadView(t, t.view);
+  const host = hostWindow(t);
+  const w = host && !host.isDestroyed() ? host : mainWin;
+  if (w === mainWin) t.host = 'main';
   // A locked folder's tabs get no page at all until the passcode is typed.
   if (isLocked(t.identity)) throw new Error(`${folderName(t.identity)} is locked.`);
   const view = new WebContentsView({
@@ -1136,15 +1140,23 @@ function ensureView(t) {
   view.setBackgroundColor('#FFFFFF');
   // Pinch on the trackpad to zoom the page, the way Safari and Chrome do.
   // Electron ships with it switched off, which is why only Cmd+/Cmd- worked.
-  view.webContents.setVisualZoomLevelLimits(1, 5).catch(() => {});
+  const wc = view.webContents;
+  wc.setVisualZoomLevelLimits(1, 5).catch(() => {});
   t.view = view; t.sleeping = false;
+  const contentsId = wc.id;
+  wc.once('destroyed', () => forgetDeadView(t, view, contentsId));
   wireTab(t);
-  mainWin.contentView.addChildView(view);
-  view.setVisible(false);
-  view.setBounds(contentRect());
-  if (overlay) mainWin.contentView.addChildView(uiView);
-  view.webContents.loadURL(guardUrl(t.url)).catch(() => {});
-  if (t.zoom) view.webContents.setZoomLevel(t.zoom);
+  w.contentView.addChildView(view);
+  view.setVisible(w !== mainWin);
+  if (w === mainWin) {
+    view.setBounds(contentRect());
+    if (overlay) mainWin.contentView.addChildView(uiView);
+  } else {
+    const [width, height] = w.getContentSize();
+    view.setBounds({ x: 0, y: 0, width, height });
+  }
+  wc.loadURL(guardUrl(t.url)).catch(() => {});
+  if (t.zoom) wc.setZoomLevel(t.zoom);
   return view;
 }
 
@@ -1591,7 +1603,7 @@ async function carrySignIn(t) {
   if (r.cancelled) return;
   if (!r.count) { sendEvent('toast', `Chrome had no ${site} sign-in to bring over.`); return; }
   sendEvent('toast', `Your ${site} sign-in came over from Chrome (${r.from}).`);
-  t.view.webContents.reload();
+  liveContents(t.view)?.reload();
 }
 
 // The name a site is signed in under: "instagram.com" for www.instagram.com, "google.co.uk" for
@@ -1841,17 +1853,17 @@ function wireTab(t) {
       // tab. Nothing is paused for a video with no sound: give it a moment to
       // find its voice, and only then clear the room.
       setTimeout(async () => {
-        if (!t.view || t.view.webContents.isDestroyed() || !t.playing) return;
+        if (liveContents(t.view) !== wc || !t.playing) return;
         let loud = false;
-        try { loud = t.view.webContents.isCurrentlyAudible(); } catch {}
+        try { loud = wc.isCurrentlyAudible(); } catch {}
         // Chromium's own answer can lag, and is always "no" with sound switched off for the
         // whole app (CUE_QUIET). The page knows too: a film that is playing, not muted, and
         // has decoded sound is making sound. A Netflix hover preview is muted, so it still waits.
-        if (!loud) loud = await t.view.webContents.executeJavaScript(SOUNDING, true).catch(() => false);
-        if (!loud || !t.playing) return;
+        if (!loud) loud = await wc.executeJavaScript(SOUNDING, true).catch(() => false);
+        if (!loud || liveContents(t.view) !== wc || !t.playing) return;
         for (const o of tabs) {
           const together = sharesSplit(t) && sharesSplit(o);
-          if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) o.view.webContents.send('cue:media', 'pause');
+          if (o !== t && o.view && o.playing && o.id !== programId && !o.holdAwake && !together && (settings().onePlayer || o === from)) liveContents(o.view)?.send('cue:media', 'pause');
         }
       }, 600);
     }
@@ -1871,7 +1883,7 @@ function wireTab(t) {
     if (Date.now() - (t.crashAt || 0) < 60000) { sendEvent('toast', `${t.title} keeps crashing. Press reload to try again.`); return; }
     t.crashAt = Date.now();
     sendEvent('toast', `${t.title} crashed. Reloading it.`);
-    setTimeout(() => { if (t.view && t.view.webContents === wc && !wc.isDestroyed()) wc.reload(); }, 500);
+    setTimeout(() => { if (liveContents(t.view) === wc) wc.reload(); }, 500);
   });
   wc.on('context-menu', (_e, p) => contextMenu(t, p));
   wc.on('did-finish-load', () => {
@@ -2049,7 +2061,7 @@ function mergeDupes() {
   for (const t of drop) {
     const i = tabs.indexOf(t);
     if (i >= 0) tabs.splice(i, 1);
-    if (t.view) { try { t.view.webContents.close(); } catch {} }
+    destroyView(t);
   }
   return drop.length;
 }
@@ -2148,13 +2160,49 @@ function closeTab(id) {
   layout(); pushState(); persist();
 }
 
+function detachView(t) {
+  const view = t.view;
+  t.view = null;
+  clearTimeout(t.awakeTimer);
+  t.awake = false; t.sized = false;
+  for (const w of [mainWin, stageWin, t.popout]) {
+    if (w && !w.isDestroyed()) w.contentView.removeChildView(view);
+  }
+}
+
 function destroyView(t) {
   if (!t.view) return;
-  clearTimeout(t.awakeTimer); t.awake = false;
-  const v = t.view; t.view = null;
-  if (shield) { try { shield.forget(v.webContents.id); } catch {} }
-  for (const w of [mainWin, stageWin, t.popout]) { try { if (w) w.contentView.removeChildView(v); } catch {} }
-  try { v.webContents.close(); } catch {}
+  const wc = liveContents(t.view);
+  detachView(t);
+  if (wc && shield) shield.forget(wc.id);
+  wc?.close();
+}
+
+function forgetDeadView(t, view, contentsId) {
+  // A deliberate close clears t.view first. An old page must never clear its replacement.
+  if (t.view !== view) return;
+  const full = t.fullscreen;
+  detachView(t);
+  if (shield && contentsId !== undefined) shield.forget(contentsId);
+  Object.assign(t, { sleeping: true, loading: false, playing: false, audible: false,
+    canBack: false, canFwd: false, fullscreen: false, dirty: false, held: false });
+  if (quitting || !mainWin || mainWin.isDestroyed()) return;
+  if (recTabId === t.id) { sendEvent('rec-stop'); recTabId = null; }
+  // Wait until Electron finishes destroying the old page before attaching a replacement.
+  setImmediate(() => {
+    if (quitting || !mainWin || mainWin.isDestroyed() || byId(t.id) !== t || t.view || isLocked(t.identity)) return;
+    const w = hostWindow(t);
+    if (full && w && !w.isDestroyed()) w.setFullScreen(false);
+    const inUse = t.host !== 'main' || t.id === activeId || panes.some((p) => p.id === t.id) || cueIds.includes(t.id);
+    if (inUse && Date.now() - (t.recoveredAt || 0) >= 60000) {
+      t.recoveredAt = Date.now();
+      ensureView(t);
+    } else if (inUse) {
+      sendEvent('toast', 'This tab closed again. Reload it to reopen the page.');
+    }
+    layout();
+    pushState();
+  });
 }
 
 function serialize(t) {
@@ -2271,20 +2319,9 @@ function splitGutters(rects, mode) {
 let panes = [];
 let gutters = [];
 let wasFull = false;
-// A page that has gone - crashed, or closed from under us - leaves a view
-// object on the tab that throws "Object has been destroyed" the moment anything
-// touches it. One dead view used to take down the whole layout pass, and with
-// it whatever Jason or an agent had just asked for. Clear them first; the tab
-// is simply asleep and wakes on its next use.
-function reapDeadViews() {
-  for (const t of tabs) {
-    if (t.view && t.view.webContents.isDestroyed()) { t.view = null; t.sleeping = true; }
-  }
-}
-
 function layout() {
   if (!mainWin || mainWin.isDestroyed()) return;
-  reapDeadViews();
+  for (const t of tabs) if (t.view && !liveContents(t.view)) forgetDeadView(t, t.view);
   const [w, h] = mainWin.getContentSize();
   // A revealed sidebar floats over the page, so the page itself never jumps.
   uiView.setBounds({ x: 0, y: 0, width: sideReveal && !overlay ? sideWidth() : w, height: h });
@@ -2332,7 +2369,10 @@ function layout() {
       const w = Math.round((sw * (i + 1)) / n) - x;
       t.view.setBounds({ x, y: 0, width: w, height: sh });
     });
-    if (stageStandby) stageStandby.setBounds({ x: 0, y: 0, width: sw, height: sh });
+    if (stageStandby) {
+      stageStandby.setBounds({ x: 0, y: 0, width: sw, height: sh });
+      stageStandby.setVisible(up.length === 0);
+    }
   }
   for (const t of tabs) {
     if (t.host === 'popout' && t.popout && t.view) { const [pw, ph] = t.popout.getContentSize(); t.view.setBounds({ x: 0, y: 0, width: pw, height: ph }); }
@@ -2431,7 +2471,8 @@ function openStage() {
   stageWin.contentView.addChildView(stageStandby);
   stageStandby.webContents.loadFile(STAGE_HTML);
   stageWin.on('resize', layout);
-  stageWin.on('closed', () => { stageWin = null; stageStandby = null; if (live) setLive(false, true); });
+  const standby = stageStandby;
+  stageWin.on('closed', () => { liveContents(standby)?.close(); stageWin = null; stageStandby = null; if (live) setLive(false, true); });
   // macOS hands OBS its list of capturable windows on a delay, so a window a
   // second old is still "invalid" to it. Three goes, spread out, and the last
   // one always lands.
@@ -2498,8 +2539,10 @@ async function obsAimAtStage() {
 function saveNow() { try { persist(); store.flush(); } catch {} }
 
 function settleAfterFullScreen(t, entering = false) {
+  const wc = liveContents(t?.view);
+  if (!wc) return;
   const again = () => {
-    if (!t || !t.view || t.view.webContents.isDestroyed()) return;
+    if (liveContents(t.view) !== wc) return;
     layout();
     if (entering && t.fullscreen) {
       try { const b = t.view.getBounds(); t.view.setBounds({ ...b, width: Math.max(1, b.width - 1) }); t.view.setBounds(b); } catch {}
@@ -2518,7 +2561,8 @@ function settleAfterFullScreen(t, entering = false) {
 }
 
 function moveView(t, toWin, host) {
-  if (!t.view) ensureView(t);
+  if (!toWin || toWin.isDestroyed()) return;
+  ensureView(t);
   const from = hostWindow(t);
   try { if (from && !from.isDestroyed()) from.contentView.removeChildView(t.view); } catch {}
   t.host = host;
@@ -2530,7 +2574,7 @@ function moveView(t, toWin, host) {
 function setLive(on, stageClosed) {
   if (on === live) return;
   live = on;
-  tabs.forEach((t) => t.view && t.view.webContents.send('cue:hold', on));
+  tabs.forEach((t) => liveContents(t.view)?.send('cue:hold', on));
   if (on) {
     heldCount = 0;
     // Going live is the moment OBS has to be there. If it was shut when Cue
@@ -2541,12 +2585,13 @@ function setLive(on, stageClosed) {
     if (heldCount) sendEvent('toast', `${heldCount} notification${heldCount === 1 ? '' : 's'} held during class. See Bills & alerts.`);
     for (const t of stageIds.map(byId)) {
       if (!t) continue;
-      t.view && t.view.webContents.send('cue:safe', false);
+      liveContents(t.view)?.send('cue:safe', false);
       if (t.host === 'stage') moveView(t, mainWin, 'main');
     }
     const p = byId(programId);
-    if (p && p.host === 'stage') { p.view && p.view.webContents.send('cue:safe', false); moveView(p, mainWin, 'main'); }
+    if (p && p.host === 'stage') { liveContents(p.view)?.send('cue:safe', false); moveView(p, mainWin, 'main'); }
     programId = null; stageIds = [];
+    liveContents(stageStandby)?.close();
     if (!stageClosed && stageWin && !stageWin.isDestroyed()) stageWin.destroy();
     stageWin = null; stageStandby = null;
   }
@@ -2617,7 +2662,7 @@ function stageSplit(n) {
   if (!live) setLive(true);
   // Anything up there that is not in the new set comes home first.
   for (const t of stageIds.map(byId)) {
-    if (t && t.host === 'stage' && !list.includes(t)) { t.view && t.view.webContents.send('cue:safe', false); moveView(t, mainWin, 'main'); }
+    if (t && t.host === 'stage' && !list.includes(t)) { liveContents(t.view)?.send('cue:safe', false); moveView(t, mainWin, 'main'); }
   }
   for (const t of list) {
     ensureView(t);
@@ -2662,7 +2707,7 @@ function take(id) {
   stageIds = [next.id];
   if (settings().safeShare) next.view.webContents.send('cue:safe', true);
   if (prev) {
-    prev.view && prev.view.webContents.send('cue:safe', false);
+    liveContents(prev.view)?.send('cue:safe', false);
     moveView(prev, mainWin, 'main');
     activeId = prev.id;
   } else {
@@ -2724,7 +2769,7 @@ function miniPlay(t) {
   t.popout = w; t.mini = true;
   moveView(t, w, 'popout');
   // Give the page a beat to settle in the small window before the video takes it over.
-  const fill = () => t.view && t.view.webContents.executeJavaScript(MINI_FILL, true).catch(() => {});
+  const fill = () => liveContents(t.view)?.executeJavaScript(MINI_FILL, true).catch(() => {});
   setTimeout(fill, 150); setTimeout(fill, 1200);
   w.on('resize', () => { const [cw, ch] = w.getContentSize(); setSetting('miniSize', { width: cw, height: ch }); layout(); });
   w.on('closed', () => { if (t.popout === w) { t.popout = null; t.mini = false; if (t.view) { t.view.webContents.executeJavaScript(MINI_UNFILL, true).catch(() => {}); moveView(t, mainWin, 'main'); } layout(); pushState(); } });
@@ -2853,22 +2898,23 @@ function tabMenuItems(t) {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function captureTab(t) {
   ensureView(t);
-  const v = t.view; const w = hostWindow(t);
+  const v = t.view; const w = hostWindow(t); const wc = v.webContents;
   const hidden = !v.getVisible();
-  if (hidden && w) { w.contentView.addChildView(v, 1); v.setVisible(true); await wait(200); }
+  if (hidden && w && !w.isDestroyed()) { w.contentView.addChildView(v, 1); v.setVisible(true); await wait(200); }
   try {
-    for (let i = 0; ; i++) {
-      try { const img = await v.webContents.capturePage(); if (!img.isEmpty()) return img; } catch (e) { if (i >= 4) throw e; }
+    for (let i = 0; liveContents(t.view) === wc; i++) {
+      try { const img = await wc.capturePage(); if (!img.isEmpty()) return img; } catch (e) { if (i >= 4 && !wc.isDestroyed()) throw e; }
       if (i >= 4) return null;
       await wait(250);
     }
+    return null;
   } finally { if (hidden && t.view === v) v.setVisible(false); }
 }
 
-function setMuted(t, m) { t.muted = m; if (t.view) t.view.webContents.setAudioMuted(m); pushState(); persist(); }
+function setMuted(t, m) { t.muted = m; liveContents(t.view)?.setAudioMuted(m); pushState(); persist(); }
 function setVolume(t, v) {
   t.volume = Math.max(0, Math.min(1, Number(v) || 0));
-  if (t.view) t.view.webContents.send('cue:volume', t.volume);
+  liveContents(t.view)?.send('cue:volume', t.volume);
   if (t.volume > 0 && t.muted) setMuted(t, false);
   pushState(); persist();
 }
@@ -2927,7 +2973,8 @@ function folderFaces(here) {
 }
 
 function sendState() {
-  if (!uiView || uiView.webContents.isDestroyed()) return;
+  const ui = liveContents(uiView);
+  if (!ui) return;
   const s = settings();
   const here = openFolder();
   const shut = isLocked(here);
@@ -2951,7 +2998,7 @@ function sendState() {
       host: t.host, mini: !!t.mini, canBack: t.canBack, canFwd: t.canFwd, crashed: !!t.crashed, space: t.space, badge: t.badge,
       lastActive: t.lastActive, temp: !!t.temp, tempAt: t.tempAt || 0,
       aiBusy: !!t.aiBusy,
-      blocked: t.view && !t.view.webContents.isDestroyed() && shield ? shield.blockedOn(t.view.webContents.id) : 0,
+      blocked: shield ? shield.blockedOn(liveContents(t.view)?.id) : 0,
       adsOk: !!(shield && t.url && shield.isAllowed(t.url)),
     })), ...away],
     space: store.data.space, spaces: spaces(), spaceList: spaceList(), spaceTints: SPACE_TINTS, kits: KITS,
@@ -2976,12 +3023,12 @@ function sendState() {
     update: updater ? updater.state() : null,
     vanishKeys: VANISH_KEYS_SHOWN,
   };
-  uiView.webContents.send('ui:state', lastState);
+  ui.send('ui:state', lastState);
 }
 let lastState = null; // what the sidebar was last told, kept for the tests that prove what it was NOT told
 const VANISH_KEYS_SHOWN = vanishKeys.shown();
 
-function sendEvent(name, data) { if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send('ui:event', name, data); }
+function sendEvent(name, data) { liveContents(uiView)?.send('ui:event', name, data); }
 
 let thumbTimer = null;
 function startThumbs() {
@@ -3000,7 +3047,7 @@ function startThumbs() {
 ipcMain.on('cue:tab-init', (e) => {
   const t = byWC(e.sender);
   const ytAds = settings().blockAds !== false && !(shield && shield.isAllowed('https://youtube.com/'));
-  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.id === programId && settings().safeShare), hold: live, quiet: quietSite(e.sender.getURL() || (t && t.url) || '') };
+  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.host === 'stage' && settings().safeShare), hold: live, quiet: quietSite(e.sender.getURL() || (t && t.url) || '') };
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
@@ -3088,12 +3135,13 @@ ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
 // moment, then stop: after two thirds of a second the page may have the
 // keyboard, because by then he meant to click into it.
 function holdOmnibox(t) {
-  if (!t || !t.view) return;
-  const wc = t.view.webContents;
+  const wc = liveContents(t?.view);
+  if (!wc) return;
   const until = Date.now() + 1500;
   const hold = () => {
-    if (Date.now() > until || activeId !== t.id || wc.isDestroyed() || !uiView || uiView.webContents.isDestroyed()) return;
-    uiView.webContents.focus();
+    const ui = liveContents(uiView);
+    if (!ui || Date.now() > until || activeId !== t.id || liveContents(t.view) !== wc) return;
+    ui.focus();
     sendEvent('refocus-omnibox');
   };
   wc.once('dom-ready', hold);
@@ -3217,7 +3265,7 @@ function spaceCommand(cmd, a = {}) {
 function uiCommandRaw(cmd, a = {}) {
   let t = a.id ? byId(a.id) : byId(activeId);
   if (t && isLocked(t.identity)) t = null; // a locked folder's tab cannot be touched from here
-  const wc = t && t.view ? t.view.webContents : null;
+  const wc = liveContents(t?.view);
   if (cmd.startsWith('folder.') || cmd === 'folder-menu') return folderCommand(cmd, a);
   switch (cmd) {
     case 'navigate': navigate(a); break;
@@ -3231,11 +3279,14 @@ function uiCommandRaw(cmd, a = {}) {
       break;
     case 'back': if (wc && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
     case 'forward': if (wc && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
-    case 'reload': if (wc) { const site = offlineSite(wc.getURL()); if (site) wc.loadURL(site).catch(() => {}); else wc.reload(); } break;
+    case 'reload':
+      if (wc) { const site = offlineSite(wc.getURL()); if (site) wc.loadURL(site).catch(() => {}); else wc.reload(); }
+      else if (t) { ensureView(t); layout(); pushState(); }
+      break;
     case 'stop': if (wc) wc.stop(); break;
     case 'mute': if (t) setMuted(t, !t.muted); break;
     case 'volume': if (t) setVolume(t, a.value); break;
-    case 'media': if (t) { if (!t.view) ensureView(t); t.view.webContents.send('cue:media', a.cmd || 'toggle'); } break;
+    case 'media': if (t) { ensureView(t).webContents.send('cue:media', a.cmd || 'toggle'); } break;
     case 'rename': if (t) { const n = String(a.name || '').trim().slice(0, 60); t.name = n || null; pushState(); persist(); } break;
     case 'tab-menu': tabMenu(t); break;
     case 'reorder': reorder(a); break;
@@ -3471,15 +3522,11 @@ async function moveToFolder({ id, to, confirmed }) {
   }
   const live = t.id === activeId;
   const wasSplit = store.data.split.ids.includes(t.id);
-  if (t.view) { // let go of the old session's view; the tab object itself stays
-    try { mainWin.contentView.removeChildView(t.view); } catch {}
-    try { t.view.webContents.close(); } catch {}
-    t.view = null;
-  }
+  // Let go of the old session's page before opening it in the new folder.
+  destroyView(t);
   t.identity = to;
   t.sleeping = false;
   ensureView(t); // rebuilt in the new folder's cookie jar
-  t.view.webContents.loadURL(t.url);
   if (live) activate(t.id); else if (wasSplit) { layout(); pushState(); }
   pushState(); persist();
   sendEvent('toast', `Moved to ${into}. This page is now signed in as ${into}.`);
@@ -3692,6 +3739,7 @@ function openPeek(url, from) {
   const wc = view.webContents;
   wc.on('page-title-updated', (_e, title) => { if (peek && peek.view === view) { peek.title = title; pushState(); } });
   wc.on('did-navigate', (_e, u) => { if (peek && peek.view === view) { peek.url = u; pushState(); } });
+  wc.once('destroyed', () => { if (peek?.view === view) closePeek(); });
   wc.on('before-input-event', (e, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); closePeek(); } });
   wireSidePage(wc, () => from.identity);
   mainWin.contentView.addChildView(view);
@@ -3702,9 +3750,11 @@ function openPeek(url, from) {
 function closePeek() {
   if (!peek) return;
   const v = peek.view; peek = null;
-  try { mainWin.contentView.removeChildView(v); v.webContents.close(); } catch {}
+  if (mainWin && !mainWin.isDestroyed()) mainWin.contentView.removeChildView(v);
+  liveContents(v)?.close();
+  if (quitting) return;
   layout(); pushState();
-  const t = byId(activeId); if (t && t.view) t.view.webContents.focus();
+  liveContents(byId(activeId)?.view)?.focus();
 }
 
 // ---------------------------------------------------------------- AI side panel
@@ -3734,8 +3784,17 @@ function openAI(which, url) {
     aiIdentity = id;
     aiView = new WebContentsView({ webPreferences: { session: sessionFor(id), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true } });
     aiView.setBackgroundColor('#FFFFFF');
-    wireSidePage(aiView.webContents, () => id);
-    mainWin.contentView.addChildView(aiView);
+    const view = aiView;
+    const wc = view.webContents;
+    wireSidePage(wc, () => id);
+    wc.once('destroyed', () => {
+      if (aiView !== view) return;
+      aiView = null; aiIdentity = null;
+      if (quitting || !mainWin || mainWin.isDestroyed()) return;
+      mainWin.contentView.removeChildView(view);
+      layout(); pushState();
+    });
+    mainWin.contentView.addChildView(view);
   }
   aiView.webContents.loadURL(url || AI_HOME[store.data.aiWhich]).catch(() => {});
   layout(); pushState();
@@ -3747,9 +3806,11 @@ function askAI(which, prompt) {
 }
 async function askAboutPage(which) {
   const t = byId(activeId);
-  if (!t || !t.view || t.identity === 'vanish' || isStart(t.url)) { openAI(which || aiWhich()); return; }
-  const wc = t.view.webContents; let text = '';
+  const wc = liveContents(t?.view);
+  if (!wc || t.identity === 'vanish' || isStart(t.url)) { openAI(which || aiWhich()); return; }
+  let text = '';
   try { text = await wc.executeJavaScript('(getSelection().toString() || document.body.innerText).slice(0, 4000)', true); } catch {}
+  if (liveContents(t.view) !== wc) return;
   askAI(which || aiWhich(), `I'm looking at this page: ${wc.getTitle()}\n${wc.getURL()}\n\n${text}\n\nWhat should I know about it?`);
 }
 
@@ -3946,7 +4007,7 @@ const internal = {
       try { const u = new URL(sender.getURL()); if (u.protocol === 'cue:' && u.hostname === 'danger') shown = u.searchParams.get('site') || ''; } catch {}
       if (!shown || shield.hostOf(shown) !== host) return false;
     }
-    if (!from && sender && vanish && vanish.tabs.some((x) => x.view.webContents === sender)) { vanishDangerOk.add(host); sender.loadURL(site).catch(() => {}); return true; }
+    if (!from && sender && vanish && vanish.tabs.some((x) => liveContents(x.view) === sender)) { vanishDangerOk.add(host); sender.loadURL(site).catch(() => {}); return true; }
     if (!from && sender) return false;
     dangerOk.add(host);
     const t = from || byId(activeId);
@@ -4266,9 +4327,8 @@ function offStage() {
   return { x: -(width + 400), y: r.y, width, height };
 }
 function wake(t) {
-  if (!t || !t.view || t.host !== 'main') return Promise.resolve();
-  const wc = t.view.webContents;
-  if (wc.isDestroyed()) return Promise.resolve();
+  const wc = liveContents(t?.view);
+  if (!wc || t.host !== 'main') return Promise.resolve();
   const first = !t.awake;
   t.awake = true;
   try { wc.setBackgroundThrottling(false); } catch {}
@@ -4285,7 +4345,7 @@ function wake(t) {
   // page is told its size outright with Chromium's own view-size override.
   const size = { width: r.width, height: r.height };
   return new Promise((ok) => setTimeout(ok, first ? 250 : 60)).then(() => wc.executeJavaScript('innerWidth', true)).then(async (w) => {
-    if (w || wc.isDestroyed() || !t.awake) return;
+    if (w || liveContents(t.view) !== wc || !t.awake) return;
     try { if (t.sized) wc.disableDeviceEmulation(); } catch {}
     try { wc.enableDeviceEmulation({ screenPosition: 'desktop', screenSize: size, viewPosition: { x: 0, y: 0 }, deviceScaleFactor: 0, viewSize: size, scale: 1 }); t.sized = true; } catch {}
     for (let i = 0; i < 20; i++) { await new Promise((ok) => setTimeout(ok, 50)); if (await wc.executeJavaScript('innerWidth', true).catch(() => 1)) break; }
@@ -4295,15 +4355,15 @@ function wake(t) {
 function unsize(t) {
   if (!t.sized) return;
   t.sized = false;
-  const wc = t.view && t.view.webContents;
-  if (wc && !wc.isDestroyed()) { try { wc.disableDeviceEmulation(); } catch {} }
+  const wc = liveContents(t.view);
+  if (wc) { try { wc.disableDeviceEmulation(); } catch {} }
 }
 function sleepAgain(t) {
   clearTimeout(t.awakeTimer);
   if (!t.awake) return;
   t.awake = false;
-  const wc = t.view && t.view.webContents;
-  if (!wc || wc.isDestroyed()) return;
+  const wc = liveContents(t.view);
+  if (!wc) return;
   unsize(t);
   try { wc.setBackgroundThrottling(true); } catch {}
   layout();
@@ -4820,7 +4880,7 @@ async function setupBlocker() {
     // The number on the shield is the only proof you ever get that any of this
     // is running, so it reaches the window as the requests are stopped.
     onCount: (wcId, n) => {
-      const t = tabs.find((x) => x.view && !x.view.webContents.isDestroyed() && x.view.webContents.id === wcId);
+      const t = tabs.find((x) => liveContents(x.view)?.id === wcId);
       if (t) sendEvent('blocked', { id: t.id, n });
     },
   });
@@ -4894,12 +4954,10 @@ function createMain() {
     const t = byId(activeId);
     if (!t || !t.fullscreen) return;
     t.fullscreen = false; layout(); pushState();
-    if (t.view && !t.view.webContents.isDestroyed()) {
-      t.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
-    }
+    liveContents(t.view)?.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
     settleAfterFullScreen(t);
   });
-  mainWin.on('closed', () => { mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
+  mainWin.on('closed', () => { quitting = true; mainWin = null; if (stageWin && !stageWin.isDestroyed()) stageWin.destroy(); app.quit(); });
 
   const saved = store.data.tabs || [];
   // A tab of a folder that is no longer there is dropped. It used to be shown in whatever folder
@@ -5134,7 +5192,10 @@ function removePreset() {
 function presetChanged() {
   if (shield) shield.setPresetHosts(presets.field('adblockHosts', []));
   buildMenu(); store.save(); persist(); layout(); pushState();
-  for (const t of tabs) if (t.view && !t.view.webContents.isDestroyed() && isStart(t.view.webContents.getURL())) t.view.webContents.reload();
+  for (const t of tabs) {
+    const wc = liveContents(t.view);
+    if (wc && isStart(wc.getURL())) wc.reload();
+  }
 }
 // The preset's own tiles on the start page, put in by main so start.html itself names nobody.
 function dressStartPage(wc) {
@@ -5454,7 +5515,7 @@ app.whenReady().then(async () => {
     destroyView });
 });
 
-app.on('before-quit', () => { if (store) { persist(); store.flush(); } if (lib) lib.close(); });
+app.on('before-quit', () => { quitting = true; if (store) { persist(); store.flush(); } if (lib) lib.close(); });
 app.on('window-all-closed', () => app.quit());
 app.on('web-contents-created', (_e, wc) => {
   wc.on('will-attach-webview', (ev) => ev.preventDefault());
