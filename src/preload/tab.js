@@ -101,11 +101,11 @@ function install(init) {
   // the message still reaches Cue's alert tray and the sidebar count, it just
   // never jumps in front of what he is doing. Settings holds the list.
   let quiet = !!init.quiet;
-  const report = (title, body) => document.dispatchEvent(new CustomEvent(`${init.key}n`, { detail: JSON.stringify({ title: String(title || ''), body: String(body || '') }) }));
+  const report = (title, opts) => document.dispatchEvent(new CustomEvent(`${init.key}n`, { detail: JSON.stringify({ title: String(title || ''), body: String(opts?.body || ''), tag: String(opts?.tag || '') }) }));
   if (window.Notification) {
     const RealN = window.Notification;
     const Quiet = function Notification(title, opts) {
-      report(title, opts && opts.body);
+      if (window.Notification.permission === 'granted') report(title, opts);
       if (held || quiet) return new EventTarget();
       return new RealN(title, opts);
     };
@@ -118,7 +118,7 @@ function install(init) {
   if (window.ServiceWorkerRegistration) {
     const realShow = ServiceWorkerRegistration.prototype.showNotification;
     ServiceWorkerRegistration.prototype.showNotification = function (title, opts) {
-      report(title, opts && opts.body);
+      if (window.Notification.permission === 'granted') report(title, opts);
       return (held || quiet) ? Promise.resolve() : realShow.call(this, title, opts);
     };
   }

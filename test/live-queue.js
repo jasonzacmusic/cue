@@ -11,10 +11,13 @@ module.exports = async (c) => {
     assert.equal(c.getState().programId, null);
     for (const t of [a, b]) c.command('cue-add', { id: t.id });
     queue('enter'); assert.equal(c.getState().programId, a.id);
+    assert.equal(a.view.webContents.getBackgroundThrottling(), false);
     c.activate(other.id);
     assert.equal(c.getState().programId, a.id);
     c.take(other.id); assert.equal(c.getState().programId, a.id);
     queue('next'); assert.equal(c.getState().programId, b.id);
+    assert.equal(a.view.webContents.getBackgroundThrottling(), true);
+    assert.equal(b.view.webContents.getBackgroundThrottling(), false);
     queue('next'); assert.equal(c.getState().programId, a.id);
     c.command('cue-remove', { id: a.id }); assert.equal(c.getState().programId, b.id);
     c.command('cue-remove', { id: b.id }); assert.equal(c.getState().programId, null);
