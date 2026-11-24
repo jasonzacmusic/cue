@@ -62,6 +62,26 @@ class OBS {
     return this.request('SetCurrentProgramScene', { sceneName });
   }
 
+  // This scene belongs to the class rig. A modified scene must never expose a
+  // second picture, and a stale capture must never be sent to the audience.
+  async selectQueueStage(window, stillLive) {
+    const sceneName = 'Cue Live Queue', source = 'Cue Live Queue Stage';
+    const items = (await this.request('GetSceneItemList', { sceneName }))?.responseData?.sceneItems;
+    if (!items) return; // OBS installations without the dedicated rig keep their selected scene.
+    const images = items.filter((i) => i.sceneItemEnabled
+      && !['coreaudio_input_capture', 'coreaudio_output_capture'].includes(i.inputKind));
+    const settings = await this.settings(source);
+    if (images.length !== 1 || images[0].sourceName !== source || images[0].inputKind !== 'screen_capture'
+        || settings?.type !== 1 || Number(settings.window) !== window || settings.application !== 'com.jasonzac.cue') {
+      throw new Error('Check the Cue Live Queue Stage source in OBS.');
+    }
+    const studio = (await this.request('GetStudioModeEnabled'))?.responseData?.studioModeEnabled;
+    if (!stillLive()) return;
+    const result = await this.setScene(sceneName);
+    if (!result?.requestStatus?.result) throw new Error('OBS could not show Cue Live Queue.');
+    if (studio && stillLive()) await this.request('SetCurrentPreviewScene', { sceneName });
+  }
+
   async inputs(kind) {
     const r = await this.request('GetInputList', kind ? { inputKind: kind } : {});
     return r && r.responseData ? r.responseData.inputs.map((i) => i.inputName) : [];

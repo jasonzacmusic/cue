@@ -522,7 +522,9 @@ function renderUpdate() {
 
 function renderExtras() {
   const k = S.settings.kits;
-  const bb = $('#billbadge'); const n = S.billCount + S.alertCount;
+  const bb = $('#billbadge'); const n = S.alertCount;
+  const label = `Bills and alerts · ${n} unread alert${n === 1 ? '' : 's'} · ${S.billCount} bill${S.billCount === 1 ? '' : 's'} to review`;
+  $('#openbills').title = label; $('#openbills').setAttribute('aria-label', label);
   bb.hidden = !n; bb.textContent = n > 99 ? '99+' : n;
   bb.classList.toggle('bad', S.billCount > 0);
   $('#openbills').hidden = !k.business;

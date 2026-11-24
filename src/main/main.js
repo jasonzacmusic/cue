@@ -472,14 +472,33 @@ function sessionFor(identity) {
   ses.setPermissionCheckHandler((wc, permission, origin) => {
     if (QUIET_OK.has(permission)) return true;
     if (permission === 'midi' || permission === 'midiSysex') return midiOk(identity, safeOrigin(origin));
-    if (permission === 'notifications') return !live && identity !== 'vanish';
+    if (permission === 'notifications') return identity !== 'vanish'
+      && store.data.permissions[`${identity}|${safeOrigin(origin)}|notifications`] === true;
     return store.data.permissions[`${identity}|${safeOrigin(origin)}|${permission}`] === true;
   });
 
   ses.setPermissionRequestHandler(async (wc, permission, cb, details) => {
     const always = ['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'speaker-selection', 'storage-access', 'top-level-storage-access'];
     if (always.includes(permission)) return cb(true);
-    if (permission === 'notifications') return cb(!live && identity !== 'vanish');
+    if (permission === 'notifications') {
+      const origin = safeOrigin(details.requestingUrl || wc?.getURL() || '');
+      if (live || identity === 'vanish' || !securePage(origin)) return cb(false);
+      const key = `${identity}|${origin}|notifications`;
+      const saved = store.data.permissions[key];
+      if (saved !== undefined) return cb(saved === true);
+      const tab = wc && byWC(wc);
+      if (!tab || tab.agent || tab.id !== activeId || !details.isMainFrame || isLocked(identity)
+          || safeOrigin(wc.getURL()) !== origin || process.env.CUE_TEST) return cb(false);
+      const result = await dialog.showMessageBox(askOver(), {
+        type: 'question', message: `Allow notifications from ${origin}?`,
+        detail: 'This choice applies to this site in this folder.',
+        buttons: ['Block', 'Allow'], defaultId: 0, cancelId: 0,
+      });
+      const allow = result.response === 1 && !live && !isLocked(identity)
+        && liveContents(tab.view) === wc && safeOrigin(wc.getURL()) === origin;
+      store.data.permissions[key] = allow;
+      store.save(); return cb(allow);
+    }
     if (permission === 'openExternal') {
       const link = details.externalURL || '';
       const from = byWC(wc);
@@ -1134,7 +1153,7 @@ function ensureView(t) {
   const view = new WebContentsView({
     webPreferences: {
       session: sessionFor(t.identity), preload: TAB_PRELOAD, contextIsolation: true, sandbox: true,
-      spellcheck: t.identity !== 'vanish', backgroundThrottling: true,
+      spellcheck: t.identity !== 'vanish', backgroundThrottling: t.host !== 'stage',
     },
   });
   view.setBackgroundColor('#FFFFFF');
@@ -2393,9 +2412,6 @@ function openStage() {
   stageWin.on('resize', layout);
   const standby = stageStandby;
   stageWin.on('closed', () => { liveContents(standby)?.close(); stageWin = null; stageStandby = null; if (live) setLive(false, true); });
-  // macOS hands OBS its list of capturable windows on a delay, so a window a
-  // second old is still "invalid" to it. Three goes, spread out, and the last
-  // one always lands.
   obsAimAtStage().catch(() => {});
   layout();
 }
@@ -2409,6 +2425,7 @@ function showStandby() { if (stageStandby) stageStandby.setVisible(true); }
 // OBS the new id itself: whenever the Stage opens, and again whenever OBS
 // reconnects. Any screen-capture source already pointed at Cue is re-aimed, so
 // his existing scenes keep working with no setting up.
+let requestedQueueScene = false;
 async function obsAimAtStage() {
   if (!stageWin || stageWin.isDestroyed() || obs.status !== 'connected') return;
   const stage = stageWin;
@@ -2423,6 +2440,11 @@ async function obsAimAtStage() {
     if (stage !== stageWin || stage.isDestroyed()) return;
     const response = await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
     if (!response?.requestStatus?.result) sendEvent('toast', 'Check the Cue Stage window source in OBS.');
+  }
+  if (requestedQueueScene && queueMode && stage === stageWin && !stage.isDestroyed()) {
+    requestedQueueScene = false;
+    await obs.selectQueueStage(window, () => queueMode && stage === stageWin && !stage.isDestroyed())
+      .catch((error) => sendEvent('toast', error.message));
   }
 }
 
@@ -2471,6 +2493,8 @@ function moveView(t, toWin, host) {
   ensureView(t);
   const from = hostWindow(t);
   try { if (from && !from.isDestroyed()) from.contentView.removeChildView(t.view); } catch {}
+  // A teaching window is often covered by OBS. Its page must keep drawing there.
+  if (host === 'stage' || t.host === 'stage') t.view.webContents.setBackgroundThrottling(host !== 'stage');
   t.host = host;
   toWin.contentView.addChildView(t.view);
   t.view.setVisible(true);
@@ -2480,7 +2504,7 @@ function moveView(t, toWin, host) {
 function setLive(on, stageClosed) {
   if (on === live) return;
   live = on;
-  if (!on) queueMode = false;
+  if (!on) { queueMode = false; requestedQueueScene = false; }
   tabs.forEach((t) => liveContents(t.view)?.send('cue:hold', on));
   if (on) {
     heldCount = 0;
@@ -2521,6 +2545,13 @@ let cueNextId = null;
 let stageIds = [];
 let queueMode = false;
 const mayShare = (t) => t && !t.private && !t.agent && !['vanish', 'agent'].includes(t.identity) && !isLocked(t.identity);
+
+function enterQueueFromBrowser() {
+  requestedQueueScene = process.platform === 'darwin' && ['127.0.0.1', 'localhost', '::1'].includes(settings().obs.host);
+  const alreadyOpen = !!stageWin;
+  showQueue('enter');
+  if (alreadyOpen) obsAimAtStage().catch(() => {});
+}
 
 function showQueue(action) {
   if (!['enter', 'next', 'status'].includes(action)) throw new Error('Unknown live queue action.');
@@ -2802,6 +2833,8 @@ function tabMenu(t) {
 function tabMenuItems(t) {
   const ids = openableIds();
   const moveTo = allFolders().filter((i) => i !== t.identity && !isLocked(i));
+  const origin = safeOrigin(t.url);
+  const notificationKey = `${t.identity}|${origin}|notifications`;
   const items = [
     { label: t.pinned ? 'Unpin' : 'Pin', click: () => { t.pinned = !t.pinned; if (t.pinned) { delete t.temp; delete t.tempAt; } pushState(); persist(); } },
     // The two tiers: a tab is kept until you close it, or it is just for now.
@@ -2814,6 +2847,14 @@ function tabMenuItems(t) {
     { label: 'Open site in Google Chrome for sign-in', enabled: /^https:\/\//i.test(t.url), click: () => {
       openSiteInChrome(t.url).catch(() => sendEvent('toast', 'Google Chrome could not open. Check that it is installed.'));
     } },
+    ...(isFolder(t.identity) && securePage(origin) && !t.agent ? [{
+      label: `Allow notifications from ${hostName(origin)}`, type: 'checkbox',
+      checked: store.data.permissions[notificationKey] === true,
+      click: (item) => {
+        if (isLocked(t.identity) || safeOrigin(t.url) !== origin) return;
+        store.data.permissions[notificationKey] = item.checked; store.save();
+      },
+    }] : []),
     { label: 'Duplicate', click: () => openTab({ url: t.url, identity: t.identity, after: t }) },
     // Two different things, named for what they do: one leaves this tab where
     // it is and opens a second copy elsewhere; the other takes this tab with you.
@@ -3016,13 +3057,21 @@ ipcMain.on('cue:scroll', (e, ratio) => {
 ipcMain.on('cue:peek', (e, url) => { const t = byWC(e.sender); if (t) openPeek(url, t); });
 ipcMain.on('cue:music-state', (_e, st) => sendEvent('music-state', st));
 ipcMain.on('cue:note', (e, n) => {
-  const t = byWC(e.sender); if (!t || t.identity === 'vanish' || !n) return;
+  const t = byWC(e.sender);
+  if (!t || !n || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || isLocked(t.identity)) return;
+  const origin = safeOrigin(e.sender.getURL());
+  if (store.data.permissions[`${t.identity}|${origin}|notifications`] !== true) return;
+  const title = String(n.title || '').slice(0, 200), body = String(n.body || '').slice(0, 500);
+  const tag = String(n.tag || '').slice(0, 200);
+  const previous = tag && store.data.alerts.find((a) => a.folder === t.identity && a.origin === origin && a.tag === tag);
+  if (previous && previous.title === title && previous.body === body) return;
   const now = Date.now(); // a page can send these as fast as it likes, so it gets a few a minute and no more
   t.noteTimes = (t.noteTimes || []).filter((at) => now - at < 60000);
   if (t.noteTimes.length >= 5) return;
   t.noteTimes.push(now);
-  if (live) heldCount++;
-  addAlert({ source: hostName(t.url), title: String(n.title || '').slice(0, 200), body: String(n.body || '').slice(0, 500), url: t.url, held: live, folder: t.identity });
+  if (previous) store.data.alerts.splice(store.data.alerts.indexOf(previous), 1);
+  if (live && !previous?.held) heldCount++;
+  addAlert({ source: hostName(origin), origin, tag, title, body, url: e.sender.getURL(), held: live, folder: t.identity });
 });
 // A password saved in one folder is offered in another ONLY when the person paired those two
 // folders, and never on a site where people keep two accounts.
@@ -3255,7 +3304,7 @@ function uiCommandRaw(cmd, a = {}) {
     case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
-    case 'live': if (a.on) showQueue('enter'); else setLive(false); break;
+    case 'live': if (a.on) enterQueueFromBrowser(); else setLive(false); break;
     case 'take': take(a.id); break;
     case 'cue-add': cueAdd(Number(a.id)); break;
     case 'cue-remove': cueRemove(Number(a.id)); break;
@@ -3806,7 +3855,7 @@ const alertsOf = (folder) => store.data.alerts.filter((a) => !a.folder || a.fold
 // history is.
 const billFolder = (b) => b.folder || 'personal';
 const billsOf = (folder) => store.data.bills.filter((b) => billFolder(b) === folder);
-const alertCount = (folder = openFolder()) => alertsOf(folder).filter((a) => !a.seen).length + tabs.filter((t) => t.identity === folder).reduce((n, t) => n + (t.badge || 0), 0);
+const alertCount = (folder = openFolder()) => alertsOf(folder).filter((a) => !a.seen).length;
 const billCount = (folder = openFolder()) => billsOf(folder).filter((b) => ['due', 'failed'].includes(bills.status(b))).length;
 
 function checkBills() {
@@ -3948,9 +3997,10 @@ const internal = {
   'bills.setRate': inPage(({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); }),
   'alerts.list': inPage((_a, f) => {
     const mine = alertsOf(f);
-    mine.forEach((a) => { a.seen = true; }); store.save(); pushState();
-    const counts = tabs.filter((t) => t.badge && t.identity === f).map((t) => ({ id: `tab${t.id}`, source: hostName(t.url), title: `${t.badge} new`, body: t.title, at: Date.now(), url: t.url, held: false }));
-    return [...counts, ...mine];
+    if (mine.some((a) => !a.seen)) {
+      mine.forEach((a) => { a.seen = true; }); store.save(); pushState();
+    }
+    return mine;
   }, []),
   'alerts.clear': inPage((_a, f) => { store.data.alerts = store.data.alerts.filter((a) => a.folder && a.folder !== f); store.save(); pushState(); }),
   'library.bookmarks': inPage((_a, f) => lib.in(f).bookmarks(''), []),
@@ -4731,7 +4781,7 @@ function buildMenu() {
     },
     ...(kit('teacher') ? [{
       label: 'Live', submenu: [
-        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: mainOnly(() => live ? setLive(false) : showQueue('enter')) },
+        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: mainOnly(() => live ? setLive(false) : enterQueueFromBrowser()) },
         { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: mainOnly(() => take()) },
         { type: 'separator' },
         { label: 'Cue This Tab', accelerator: 'CmdOrCtrl+Shift+C', click: mainOnly(() => cueAdd(activeId)) },

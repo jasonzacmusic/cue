@@ -4,6 +4,10 @@ Cue is Nathaniel School of Music's free, open-source browser, built on Electron 
 Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
 `AGENTS.md` points here so Codex reads the same file.
 
+## 0.7.9 — OBS preview and notification counts
+
+Live selects the configured local Cue Live Queue scene after verifying its only enabled visual is the current Cue Stage window. Stage tabs keep rendering when another window covers them. The bell counts the active folder’s unread alert entries. Each site needs notification permission in that folder. The tab menu can change that choice. Tab title counts and outstanding bills remain available separately.
+
 ## 0.7.8 — Live queue, sidebar and sign-in
 
 Live starts with the user's queue. Right-click a tab and choose **Add to live queue**, or open **Queue** and choose **Add current tab**. On the teaching rig, the right pedal selects the OBS Cue Live Queue scene. The middle pedal advances one queued app and wraps. A blank queue shows standby. The dedicated window capture excludes browser controls. Selecting another ordinary tab leaves Stage alone.

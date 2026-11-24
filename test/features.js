@@ -302,9 +302,17 @@ module.exports = async function run(c) {
 
   // ---- notifications and alert tray
   const nt = c.openTab({ url: `${base}/note`, identity: 'personal' }); await loaded(nt);
-  await nt.view.webContents.executeJavaScript(`new Notification('hello before class',{body:'one'});1`);
+  await nt.view.webContents.executeJavaScript(`try { new Notification('unapproved') } catch {} ;1`);
+  await sleep(150);
+  check('alerts: unapproved sites never reach the tray', !c.store.data.alerts.some((a) => a.title === 'unapproved'));
+  c.store.data.permissions[`personal|${base}|notifications`] = true;
+  await nt.view.webContents.executeJavaScript(`new Notification('hello before class',{body:'one',tag:'demo'});new Notification('hello before class',{body:'one',tag:'demo'});1`);
   await sleep(300);
-  check('alerts: notifications reach the tray', c.store.data.alerts.some((a) => a.title === 'hello before class'));
+  check('alerts: one tagged notification has one inbox entry', c.store.data.alerts.filter((a) => a.title === 'hello before class').length === 1);
+  const beforeBadge = c.lastState().alertCount;
+  nt.badge = 51; c.sendState(); await sleep(120);
+  check('alerts: a page title with 51 unread cannot inflate the bell', c.lastState().alertCount === beforeBadge);
+  nt.badge = 0;
   c.setLive(true); await sleep(500);
   await nt.view.webContents.executeJavaScript(`new Notification('hello during class');1`);
   await sleep(300);
