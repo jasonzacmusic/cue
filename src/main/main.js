@@ -3942,7 +3942,7 @@ const alertsOf = (folder) => store.data.alerts.filter((a) => !a.folder || a.fold
 // history is.
 const billFolder = (b) => b.folder || 'personal';
 const billsOf = (folder) => store.data.bills.filter((b) => billFolder(b) === folder);
-const alertCount = (folder = openFolder()) => alertsOf(folder).filter((a) => !a.seen).length;
+const alertCount = (folder = openFolder()) => alertsOf(folder).filter((a) => !a.seen && !a.unverifiedSite).length;
 const billCount = (folder = openFolder()) => billsOf(folder).filter((b) => ['due', 'failed'].includes(bills.status(b))).length;
 
 function checkBills() {
@@ -5421,6 +5421,18 @@ const MIGRATIONS = {
   // Before 0.7 tabs unused for two days were put away into Library > Archived (a saved 7 was
   // even forced down to 2), which is the opposite. Settings > Keeping tabs turns it back on.
   'archive-off-0.7': (s) => { s.archiveDays = 0; },
+  // Old website notifications recorded a hostname but no permission provenance.
+  // Keep their contents and read status. Local bill reminders share that hostname
+  // on some accounts, so recognize the exact reminder format and folder first.
+  'earlier-site-alerts': (_s, data) => {
+    for (const a of data.alerts || []) {
+      if (a.origin || !a.source || a.source !== hostName(a.url)) continue;
+      const reminder = (data.bills || []).some((b) => billFolder(b) === (a.folder || 'personal')
+        && b.name === a.source && b.url === a.url && typeof a.title === 'string'
+        && a.title.startsWith(b.name + ': ') && /^(card failed|due in -?\d+ days?)$/.test(a.title.slice(b.name.length + 2)));
+      if (!reminder) a.unverifiedSite = true;
+    }
+  },
 };
 function runMigrations() {
   const done = store.data.migrated && typeof store.data.migrated === 'object' ? store.data.migrated : {};

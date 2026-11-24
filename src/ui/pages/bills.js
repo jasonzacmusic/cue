@@ -206,6 +206,7 @@
     for (const a of alerts.slice().sort((x, y) => (y.at || 0) - (x.at || 0))) {
       const li = el('li', 'alert' + (a.held ? ' held' : ''));
       const top = el('div', 'top'); top.appendChild(el('span', 'src', a.source || 'Cue'));
+      if (a.unverifiedSite) top.appendChild(el('span', 'badge', 'Earlier alert · permission unverified'));
       if (a.held) top.appendChild(el('span', 'badge soon', 'Held during class'));
       li.appendChild(top);
       const when = el('div', 'when', a.at ? ago(a.at) : ''); if (a.at) when.title = new Date(a.at).toLocaleString(); li.appendChild(when);
