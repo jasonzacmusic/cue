@@ -4,6 +4,10 @@ Cue is Nathaniel School of Music's free, open-source browser, built on Electron 
 Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
 `AGENTS.md` points here so Codex reads the same file.
 
+## 0.7.16 — Homepage tabs and bill reminders
+
+Settings → Tabs and sound → Reuse website homepages is on by default. Opening a repeated homepage switches to the matching tab in that folder. Drive folders, video links and search results can open separately. Launch restores the user's tabs. The bell is available on a new install. Add a bill to track a one-time or monthly payment, see due dates in groups and read each reminder explicitly. Website notifications require permission. The Business kit enables recognition of bills on billing pages.
+
 ## 0.7.15 — Sync the practice click to a track
 
 Open the Music bar and choose Sync to track while a song is playing. Cue listens locally to the current player and starts the click when it finds a steady pulse. Pausing or seeking the track also pauses or repositions the click. Tempo and transpose are independent. Live mode and master mute keep the practice click visual. Hover over Tap and press T for manual tempo, or hover over Transpose and press + or −. Mark time copies the timestamp and link. Grab frame saves a PNG for supported video.

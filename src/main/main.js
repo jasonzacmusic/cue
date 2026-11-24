@@ -2,7 +2,7 @@
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 if (process.env.CUE_TEST && !process.env.CUE_REAL_SCREEN) require('../../test/hidden-windows');
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, protocol, net, webContents, screen, powerMonitor,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, nativeImage, protocol, net, webContents, screen, powerMonitor,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -18,6 +18,8 @@ const { settle, settledMessage } = require('./settle');
 const { Library } = require('./db');
 const { Vault } = require('./vault');
 const bills = require('./bills');
+const { askLocal } = require('./local-assistant');
+const { homepageKey } = require('./homepage');
 const tools = require('./page-tools');
 const capture = require('./capture');
 const importer = require('./importer');
@@ -97,7 +99,7 @@ const KITS = {
   creator: { name: 'Creator', what: 'Thumbnail check, YouTube Studio and comments' },
   designer: { name: 'Designer', what: 'Colour picker, palettes, font finder, ruler, Boards' },
   video: { name: 'Video', what: 'Page capture, tab recording, GIFs, timestamps, frame grabs' },
-  business: { name: 'Business', what: 'Bills radar and alert tray' },
+  business: { name: 'Business', what: 'Recognize bills on billing pages' },
 };
 // The panel is for the two tools he actually works with, not their consumer chats: Claude Code and
 // Codex, the same pair he keeps in Chrome. It opens in whichever folder is open, so it arrives
@@ -826,8 +828,11 @@ function followFolder(t) {
 function openApp(url) {
   const who = openFolder();
   if (isLocked(who)) { askUnlock(who); return; }
+  if (!alwaysPinned(url) && !/^https:\/\/mail\.google\.com\/(?:mail\/)?$/.test(url)) {
+    return openTab({ url: googleForFolder(url, who), requestedUrl: url, identity: who });
+  }
   const host = hostOf(url);
-  const mine = (t) => t.identity === who && t.id !== programId && hostOf(t.url) === host;
+  const mine = (t) => t.identity === who && !t.private && !t.agent && t.id !== programId && hostOf(t.url) === host;
   const inSpace = spaceOrder().filter(mine).sort((a, b) => b.lastActive - a.lastActive)[0];
   const anywhere = tabs.filter(mine).sort((a, b) => b.lastActive - a.lastActive)[0];
   const best = inSpace || anywhere;
@@ -1366,6 +1371,11 @@ function tabName(t) {
   // What HE calls it comes before what the app list calls it: the app list says "Classroom LMS
   // (Learning Portal)", and he says Learning Portal. The app list is next, so an NSM app is named
   // by its own name rather than by the school.
+  if (/^(claude\.ai|chatgpt\.com)$/.test(host) && /\/(chat|c|project|code)\//.test(t.url)) {
+    const pieces = String(t.title || '').split(TITLE_TAIL).map(x => x.trim());
+    const topic = pieces.find(x => x && !/^(claude( code)?|chatgpt|openai)$/i.test(x) && !/^https?:/i.test(x));
+    if (topic) return topic;
+  }
   if (SIGN_IN_TITLE.test(String(t.title || ''))) return siteLabel(host, t.title);
   return pick(siteNames(), host) || nsmAppName(host) || tidyTitle(t.title) || brandName(host) || host;
 }
@@ -1601,7 +1611,7 @@ function googleForFolder(url, identity) {
     const u = new URL(url);
     if (u.protocol !== 'https:' || !GOOGLE_PER_ACCOUNT.test(u.hostname)) return url;
     if (u.searchParams.has('authuser')) return url;        // he named one himself
-    if (/^\/mail\/u\/\d+\//.test(u.pathname)) return url;  // so did this
+    if (/^\/(mail|drive)\/u\/\d+(?:\/|$)/.test(u.pathname)) return url;  // so did this
     u.searchParams.set('authuser', who);
     return u.toString();
   } catch { return url; }
@@ -1972,58 +1982,24 @@ function jumpTo(url) {
   const folder = openFolder();
   if (isLocked(folder)) { askUnlock(folder); return; }
   if (!url) { openTab({}); return; }
-  let want = '';
-  try { want = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { want = ''; }
-  const here = tabs.find((t) => !t.private && t.identity === folder
-    && String(hostOf(t.url) || '').toLowerCase().replace(/^www\./, '') === want);
-  if (here) { activate(here.id); return; }
+  const existing = tabs.find(t => t.identity === folder && !t.private && !t.agent && t.id !== programId && t.url === url);
+  if (existing) { activate(existing.id); return; }
   openTab({ url, identity: folder });
 }
 
-// Some sites are one place, not many: your inbox, your WhatsApp, YouTube. Ten
-// Gmail tabs are ten copies of the same page and all the mess that follows.
-// Each folder keeps ONE tab for each of these and every later ask lands in it.
-const ONE_PER_FOLDER = [
-  /^mail\.google\.com$/i,
-  /^web\.whatsapp\.com$/i,
-  /^([a-z0-9-]+\.)?youtube\.com$/i,
-  /^studio\.youtube\.com$/i,
-  /^calendar\.google\.com$/i,
-  /^drive\.google\.com$/i,
-  /^([a-z0-9-]+\.)?instagram\.com$/i,
-  /^([a-z0-9-]+\.)?facebook\.com$/i,
-];
 // Apps that are a PLACE, not a page, kept in the strip at the top of the sidebar for ever - one per
 // folder - so they never appear as a row to pin, unpin or tidy (settings().alwaysPinned, a list of
 // sites). A plain install has none: anything pinned can be unpinned. The owner's install keeps its
 // four (WhatsApp, Gmail, Instagram, Facebook), and so does the school's starting setup.
 const alwaysPinned = (url) => { const h = hostOf(url); return !!h && presets.hostIn(h, settings().alwaysPinned || []); };
-// YouTube is three different jobs under one address, and he uses all three at
-// once: the channel he is watching, Studio where he publishes, and the posts
-// page where the community lives. Each keeps its own tab. Everything else on
-// youtube.com is "watching".
-const oneKey = (url) => {
-  const h = hostOf(url);
-  if (!h) return '';
-  if (/^studio\.youtube\.com$/i.test(h)) return 'studio.youtube.com';
-  if (/youtube\.com$/i.test(h)) {
-    let path = '';
-    try { path = new URL(url).pathname; } catch {}
-    return /\/(posts|community)(\/|$)|^\/post\//i.test(path) ? 'youtube-community' : 'youtube.com';
-  }
-  return ONE_PER_FOLDER.some((r) => r.test(h)) ? h.toLowerCase() : '';
-};
-// The tab this folder already keeps for that site, if it has one.
-function soleTab(url, who) {
-  const key = oneKey(url);
+function matchingHomepage(url, who, temp = false) {
+  const key = settings().reuseHomepages !== false && homepageKey(url);
   if (!key) return null;
-  return tabs.filter((t) => t.identity === who && t.id !== programId && oneKey(t.url) === key && !t.private)
-    .sort((a, b) => b.lastActive - a.lastActive)[0] || null;
+  return tabs.filter(t => t.identity === who && !t.private && !t.agent && t.host === 'main' &&
+    t.id !== programId && !cueIds.includes(t.id) && !!t.temp === temp && homepageKey(t.url) === key)
+    .sort((a, b) => b.lastActive - a.lastActive)[0];
 }
 
-// Tabs that were already piled up before the rule above existed. Keeps the one
-// used most recently in each folder and closes its copies. Pinned tabs are
-// never the one that goes.
 function mergeDupes() {
   const keep = new Map();
   const drop = [];
@@ -2031,15 +2007,15 @@ function mergeDupes() {
     if (!isFolder(t.identity) || t.private || t.id === programId || t.agent || isStart(t.url) || !t.url) continue;
     // Either a site that is only ever one place, or the very same address open
     // twice in the same folder — three Chord Trees tabs are three of one thing.
-    const key = oneKey(t.url) || t.url;
+    const key = homepageKey(t.url);
     if (!key) continue;
-    const k = `${t.identity}|${key}`;
+    const k = JSON.stringify([t.identity, t.space, !!t.temp, key]);
     // A pinned tab counts as the one this folder keeps. It used to be skipped
     // altogether, so a pinned WhatsApp and a loose second one both survived -
     // an icon at the top and a row under Social at the same time. The pinned one
     // wins (it sorts first) and the loose copy goes; a pinned tab is never the
     // one closed.
-    if (keep.has(k)) { if (!t.pinned) drop.push(t); } else keep.set(k, t);
+    if (keep.has(k)) { if (!t.pinned && t.id !== activeId && !t.dirty && !t.playing && !t.audible && !cueIds.includes(t.id) && !sharesSplit(t) && t.host === 'main') drop.push(t); } else keep.set(k, t);
   }
   for (const t of drop) {
     const i = tabs.indexOf(t);
@@ -2049,27 +2025,19 @@ function mergeDupes() {
   return drop.length;
 }
 
-function openTab({ url, identity, background, after, agent, pinned, focusUi, own, temp } = {}) {
+function openTab({ url, requestedUrl = url, identity, background, after, agent, pinned, focusUi, own, temp } = {}) {
   if (identity === 'vanish') return vanish.add(url && !isStart(url) ? url : undefined);
   const who = identityOf(identity) ? identity : folderForNewTab();
   if (isLocked(who)) throw new Error(`${folderName(who)} is locked. Type its passcode first.`);
-  // `own`: an agent's own tab, beside his. Without it, "one Gmail per folder" would hand the agent
-  // HIS inbox and move it to the agent's search while he reads.
-  const only = url && isFolder(who) && !own ? soleTab(url, who) : null;
+  const temporary = temp ?? !!(after && after.temp && after.identity === who && !agent);
+  const only = url && isFolder(who) && !own && !agent && !pinned && (matchingHomepage(requestedUrl, who, temporary) || matchingHomepage(url, who, temporary));
   if (only) {
-    // Go to the one that is already open, and take it where you asked to go.
-    ensureView(only);
-    if (url && hostOf(url) === hostOf(only.url) && url !== only.url) {
-      only.url = url;
-      only.view.webContents.loadURL(guardUrl(url)).catch(() => {});
-    }
-    if (!background) activate(only.id, agent ? 'agent' : 'user', { keepUiFocus: focusUi });
-    pushState();
+    if (!background) activate(only.id, 'user', { keepUiFocus: focusUi });
     return only;
   }
   const safe = settings().httpsFirst !== false && url ? secureVersion(url) : null;
   // A link opened from a "Just for now" tab is just for now too, unless asked otherwise.
-  const t = makeTab({ url: safe || url || START_URL, identity: who, agent, pinned, temp: temp ?? !!(after && after.temp && after.identity === who && !agent) });
+  const t = makeTab({ url: safe || url || START_URL, identity: who, agent, pinned, temp: temporary });
   if (safe) t.httpsFrom = url;
   if (after) {
     const i = tabs.indexOf(after);
@@ -2845,9 +2813,17 @@ function navigate({ text, engine, newTab, identity }) {
   const t = byId(activeId);
   if (newTab || !t) {
     const who = identity || (t ? t.identity : undefined);
-    return openTab({ url: googleForFolder(secure, who || store.data.folder), identity: who });
+    return openTab({ url: googleForFolder(secure, who || store.data.folder), requestedUrl: secure, identity: who });
   }
   const url = googleForFolder(secure, t.identity);
+  if (isStart(t.url) && !t.private && !t.agent && !t.pinned && !sharesSplit(t) && !cueIds.includes(t.id)) {
+    const existing = matchingHomepage(secure, t.identity, !!t.temp) || matchingHomepage(url, t.identity, !!t.temp);
+    if (existing && t.id !== programId) {
+      activate(existing.id);
+      closeTab(t.id);
+      return;
+    }
+  }
   ensureView(t);
   t.url = url;
   if (url !== typed) t.httpsFrom = typed;
@@ -2871,10 +2847,10 @@ function contextMenu(t, p) {
     items.push({ label: 'Save image as…', click: () => wc.downloadURL(p.srcURL) });
     items.push({ label: 'Copy image', click: () => wc.copyImageAt(p.x, p.y) });
     items.push({ label: 'Search this image with Google Lens', click: () => openTab({ url: 'https://lens.google.com/uploadbyurl?url=' + encodeURIComponent(p.srcURL), identity: t.identity, after: t }) });
-    items.push({ label: 'Ask Claude about this image', click: () => askAI('claude', `Tell me about this image: ${p.srcURL}`) });
+    items.push({ label: 'Ask Claude about this image', click: () => askAboutPage('claudecode', 'Describe the images on this page.') });
     if (kit('designer') && t.identity !== 'vanish') {
       const mine = lib.in(t.identity); // this folder's boards, never another's
-      const boards = mine.boardList();
+      const boards = mine.boardNames();
       items.push({ label: 'Add to board', submenu: [...boards.map((b) => ({ label: b.name, click: () => addToBoard(t, p, b.id) })), { type: 'separator' }, { label: 'New board', click: () => addToBoard(t, p, mine.boardCreate(`Board ${boards.length + 1}`)) }] });
       items.push({ label: 'Palette from this image', click: () => imagePalette(t, p) });
     }
@@ -3166,7 +3142,7 @@ ipcMain.on('cue:note', (e, n) => {
   t.noteTimes.push(now);
   if (previous) store.data.alerts.splice(store.data.alerts.indexOf(previous), 1);
   if (live && !previous?.held) heldCount++;
-  addAlert({ source: hostName(origin), origin, tag, title, body, url: e.sender.getURL(), held: live, folder: t.identity });
+  addAlert({ kind: 'website', source: hostName(origin), origin, tag, title, body, url: e.sender.getURL(), held: live, folder: t.identity });
 });
 // A password saved in one folder is offered in another ONLY when the person paired those two
 // folders, and never on a site where people keep two accounts.
@@ -3287,7 +3263,7 @@ function folderCommand(cmd, a) {
 function tidyDupes() {
   const n = mergeDupes();
   layout(); pushState(); persist();
-  return n ? `Closed ${n} duplicate${n === 1 ? '' : 's'}. One Gmail, one WhatsApp, one YouTube per folder.` : 'Nothing to tidy: you already have one of each.';
+  return n ? `Closed ${n} duplicate${n === 1 ? '' : 's'}. Kept separate pages and videos.` : 'Nothing to tidy: you already have one of each.';
 }
 // Spaces, by name. Renaming carries every tab, login, layout and collapsed group filed under the
 // old name, so the only thing that changes is the word. Removing never closes a tab: they move
@@ -3594,6 +3570,8 @@ async function uiInvoke(cmd, a = {}) {
   if (cmd === 'storage') return storageReport();
   // Settings asks for these and shows the answer on the row, so it never has to close.
   if (cmd.startsWith('space.')) return spaceCommand(cmd, a);
+  if (cmd === 'ask-local-run') return askTab(a);
+  if (cmd === 'ask-local-click') return confirmAssistant(a);
   if (cmd === 'tidy-dupes') return { ok: true, said: tidyDupes() };
   if (cmd === 'temp.clear') return { ok: true, n: clearTemp({ folder: openFolder() }) };
   if (cmd === 'team-vault') return teamSite() ? loadTeamVault(teamSite(), { into: [openFolder()] }) : { signedIn: false };
@@ -3947,19 +3925,45 @@ function openAI(which, url) {
   aiView.webContents.loadURL(url || AI_HOME[store.data.aiWhich]).catch(() => {});
   layout(); pushState();
 }
-// A question needs a surface that takes one in its address. Codex has no such address, so asking
-// about a page goes to Claude's chat whichever tool the panel is showing.
-function askAI(which, prompt) {
-  openAI(which, 'https://claude.ai/new?q=' + encodeURIComponent(prompt.slice(0, 6000)));
+let pendingAssistant = null;
+function assistantTab(id) {
+  const t = byId(id), wc = liveContents(t?.view);
+  if (!wc || t.id !== activeId || t.host !== 'main' || t.private || t.id === programId || cueIds.includes(t.id) ||
+      aiPaused() || !agentsMay(t.identity) || !/^https?:/.test(wc.getURL())) throw Error('Choose an off-air web tab in a folder enabled for AI agents.');
+  return wc;
 }
-async function askAboutPage(which) {
-  const t = byId(activeId);
-  const wc = liveContents(t?.view);
-  if (!wc || t.identity === 'vanish' || isStart(t.url)) { openAI(which || aiWhich()); return; }
-  let text = '';
-  try { text = await wc.executeJavaScript('(getSelection().toString() || document.body.innerText).slice(0, 4000)', true); } catch {}
-  if (liveContents(t.view) !== wc) return;
-  askAI(which || aiWhich(), `I'm looking at this page: ${wc.getTitle()}\n${wc.getURL()}\n\n${text}\n\nWhat should I know about it?`);
+function askAboutPage(which, question = '') {
+  try { assistantTab(activeId); } catch (err) { sendEvent('toast', err.message); return; }
+  pendingAssistant = null;
+  sendEvent('ask-local', { id:activeId, which:which || aiWhich(), title:tabName(byId(activeId)), question });
+}
+async function askTab({ id, which, question }) {
+  if (!['codex','claudecode'].includes(which) || typeof question !== 'string' || !question.trim()) throw Error('Choose an assistant and enter a question.');
+  const wc = assistantTab(id), url = wc.getURL(), doc = crypto.randomUUID();
+  const page = await wc.executeJavaScriptInIsolatedWorld(1002,[{code:`(() => {
+    const controls = [...document.querySelectorAll('button,a[href],[role=button],summary')].filter(e => e.getClientRects().length && !e.disabled).slice(0,80);
+    globalThis.cueControls = { doc:${JSON.stringify(doc)}, controls };
+    return { title:document.title, text:(getSelection()?.toString() || document.body.innerText).slice(0,6000),
+      controls:controls.map((e,i)=>({ i,label:(e.getAttribute('aria-label') || e.innerText || e.title || '').trim().slice(0,100) })) };
+  })()`}]);
+  if (wc !== assistantTab(id) || wc.getURL() !== url) throw Error('The tab changed. Ask again.');
+  store.data.aiWhich = which; store.save();
+  const answer = await askLocal(which, question.slice(0,3000), page);
+  if (wc !== assistantTab(id) || wc.getURL() !== url) throw Error('The tab changed. Ask again.');
+  const item = page.controls[answer.control];
+  pendingAssistant = item?.label ? { id,wc,url,doc,index:item.i,label:item.label } : null;
+  return { answer:answer.answer.slice(0,12000), label:pendingAssistant?.label, doc };
+}
+async function confirmAssistant({id,doc}) {
+  const p = pendingAssistant; pendingAssistant = null;
+  const wc = assistantTab(id);
+  if (!p || p.id !== id || p.wc !== wc || p.doc !== doc || p.url !== wc.getURL()) return false;
+  return wc.executeJavaScriptInIsolatedWorld(1002,[{code:`(() => {
+    const s = globalThis.cueControls; const e = s?.controls[${p.index}];
+    if (s?.doc !== ${JSON.stringify(doc)} || !e?.isConnected || e.disabled || !e.getClientRects().length ||
+      (e.getAttribute('aria-label') || e.innerText || e.title || '').trim().slice(0,100) !== ${JSON.stringify(p.label)}) return false;
+    e.click(); return true;
+  })()`}],true);
 }
 
 // ---------------------------------------------------------------- alerts and bills
@@ -3968,6 +3972,8 @@ async function askAboutPage(which) {
 function addAlert(a) {
   store.data.alerts.unshift({ id: Date.now() + Math.random(), at: Date.now(), held: false, ...a });
   store.data.alerts.length = Math.min(store.data.alerts.length, 200);
+  for (const tab of tabs) if (['cue://bills','cue://bills/'].includes(tab.url) && (!a.folder || tab.identity === a.folder))
+    liveContents(tab.view)?.send('cue:alerts-updated');
   store.save(); pushState();
 }
 const alertsOf = (folder) => store.data.alerts.filter((a) => !a.folder || a.folder === folder);
@@ -3981,13 +3987,14 @@ const billCount = (folder = openFolder()) => billsOf(folder).filter((b) => ['due
 function checkBills() {
   store.data.bills.forEach((b) => bills.roll(b));
   for (const b of store.data.bills) {
-    const st = bills.status(b);
-    const key = `${st}|${b.renews}`;
-    if (st !== 'due' && st !== 'failed') continue;
-    if (b.warned === key) continue;
-    b.warned = key;
-    const d = b.renews ? bills.daysUntil(b.renews) : null;
-    addAlert({ source: b.name, title: st === 'failed' ? `${b.name}: card failed` : `${b.name}: due in ${d} day${d === 1 ? '' : 's'}`, body: b.amountINR ? `₹${b.amountINR.toLocaleString('en-IN')}` : '', url: b.url, folder: billFolder(b) });
+    const notice = bills.reminder(b);
+    if (!notice || notice.key === b.warned) continue;
+    b.warned = notice.key;
+    // Each bill has one current unread reminder. Keep prior notices in history.
+    for (const alert of store.data.alerts) if (alert.billId === b.id && alert.folder === billFolder(b)) alert.seen = true;
+    const amount = Number(b.amountINR);
+    const body = amount > 0 ? new Intl.NumberFormat(undefined, { style: 'currency', currency: store.data.currency || 'USD' }).format(amount) : '';
+    addAlert({ kind: 'bill', billId: b.id, source: b.name, title: notice.title, body, url: b.url, folder: billFolder(b), held: live });
   }
   store.save(); pushState();
 }
@@ -4101,27 +4108,48 @@ const internal = {
   'boards.create': inPage(({ name }, f) => lib.in(f).boardCreate(name), null),
   'boards.rename': inPage(({ id, name }, f) => lib.in(f).boardRename(id, name)),
   'boards.delete': inPage(({ id }, f) => lib.in(f).boardDelete(id)),
+  'boards.copy': inPage(({ itemId }, f) => {
+    const bytes = lib.in(f).boardPicture(itemId); if (!bytes) return false;
+    const image = nativeImage.createFromBuffer(Buffer.from(bytes)); if (image.isEmpty()) return false;
+    clipboard.writeImage(image); return true;
+  }, false),
   'boards.removeItem': inPage(({ itemId }, f) => lib.in(f).boardRemoveItem(itemId)),
   'bills.list': inPage((_a, f) => {
     const mine = billsOf(f);
-    mine.forEach((b) => bills.roll(b));
-    return { bills: mine.map((b) => ({ ...b, status: bills.status(b) })), usdToInr: store.data.usdToInr, currency: store.data.currency || 'USD' };
+    return { bills: mine.map((b) => ({ ...b, savedStatus: b.status, status: bills.status(b) })), usdToInr: store.data.usdToInr, currency: store.data.currency || 'USD' };
   }, { bills: [], usdToInr: 1, currency: 'USD' }),
   'bills.save': inPage(({ bill }, f) => {
     const cur = store.data.bills.find((b) => b.id === bill.id);
-    if (cur && billFolder(cur) !== f) return;
-    if (cur) Object.assign(cur, bill, { folder: f }); else store.data.bills.push({ ...bill, id: bill.id || Date.now().toString(36), folder: f });
-    checkBills();
-  }),
-  'bills.delete': inPage(({ id }, f) => { store.data.bills = store.data.bills.filter((b) => !(b.id === id && billFolder(b) === f)); store.save(); pushState(); }),
-  'bills.setRate': inPage(({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); }),
-  'alerts.list': inPage((_a, f) => {
-    const mine = alertsOf(f);
-    if (mine.some((a) => !a.seen)) {
-      mine.forEach((a) => { a.seen = true; }); store.save(); pushState();
+    if (bill.id && (!cur || billFolder(cur) !== f)) throw new Error('Bill unavailable');
+    const fields = { name: String(bill.name || '').trim().slice(0, 80), note: String(bill.note || '').trim().slice(0, 200),
+      amountINR: Number(bill.amountINR || 0), renews: bill.renews || '', url: String(bill.url || '').trim(),
+      status: bill.status || 'ok', repeat: bill.repeat || cur?.repeat || 'once' };
+    if (!fields.name || !Number.isFinite(fields.amountINR) || fields.amountINR < 0 ||
+        !['ok', 'paid', 'due', 'failed'].includes(fields.status) || !['once', 'monthly'].includes(fields.repeat) ||
+        (fields.renews && (!/^\d{4}-\d{2}-\d{2}$/.test(fields.renews) || bills.iso(new Date(fields.renews + 'T00:00:00')) !== fields.renews)) ||
+        (fields.url && !/^https?:$/.test(new URL(fields.url).protocol))) throw new Error('Invalid bill details');
+    if (!cur || cur.renews !== fields.renews) fields.monthDay = fields.renews ? Number(fields.renews.slice(-2)) : 0;
+    if (cur) Object.assign(cur, fields);
+    else store.data.bills.push({ ...fields, id: crypto.randomUUID(), folder: f, source: 'manual' });
+    if (cur && !bills.reminder(cur)) {
+      delete cur.warned;
+      for (const alert of alertsOf(f)) if (alert.billId === cur.id) alert.seen = true;
     }
-    return mine;
-  }, []),
+    checkBills();
+    return true;
+  }),
+  'bills.delete': inPage(({ id }, f) => {
+    store.data.bills = store.data.bills.filter(b => !(b.id === id && billFolder(b) === f));
+    for (const alert of alertsOf(f)) if (alert.billId === id) alert.seen = true;
+    store.save(); pushState();
+  }),
+  'bills.setRate': inPage(({ usdToInr }) => { store.data.usdToInr = Number(usdToInr) || store.data.usdToInr; store.save(); }),
+  'alerts.list': inPage((_a, f) => alertsOf(f), []),
+  'alerts.read': inPage(({ ids }, f) => {
+    if (!Array.isArray(ids)) return;
+    for (const alert of alertsOf(f)) if (ids.includes(alert.id)) alert.seen = true;
+    store.save(); pushState();
+  }),
   'alerts.clear': inPage((_a, f) => { store.data.alerts = store.data.alerts.filter((a) => a.folder && a.folder !== f); store.save(); pushState(); }),
   'library.bookmarks': inPage((_a, f) => lib.in(f).bookmarks(''), []),
   'library.history': inPage(({ q }, f) => lib.in(f).history(q, 500), []),
@@ -4362,14 +4390,23 @@ async function lensFile({ name, type, bytes }) {
 
 // ---------------------------------------------------------------- Boards, designer and video tools
 async function addToBoard(t, p, boardId) {
-  const wc = t.view.webContents; let thumb = '';
+  const wc = t.view.webContents, source = wc.getURL(), folder = t.identity;
+  const current = () => activeId === t.id && byId(t.id) === t && t.identity === folder && !wc.isDestroyed() && wc.getURL() === source;
+  if (!current()) return;
+  let thumb = '', picture = null;
   try {
-    const r = await wc.executeJavaScript(tools.rectAt(p.x, p.y), true);
-    const img = await wc.capturePage(r);
-    if (!img.isEmpty()) thumb = `data:image/jpeg;base64,${img.resize({ width: 360 }).toJPEG(82).toString('base64')}`;
+    const rect = await wc.executeJavaScript(tools.rectAt(p.x, p.y), true);
+    if (rect && current()) {
+      const image = await wc.capturePage(rect);
+      if (!image.isEmpty()) {
+        picture = image.toPNG();
+        thumb = 'data:image/jpeg;base64,' + image.resize({ width: Math.min(360, image.getSize().width) }).toJPEG(82).toString('base64');
+      }
+    }
   } catch {}
-  lib.in(t.identity).boardAdd(boardId, { img: p.srcURL, source: wc.getURL(), title: p.titleText || p.altText || wc.getTitle(), thumb });
-  sendEvent('toast', 'Added to board.');
+  if (!current()) return;
+  const saved = lib.in(folder).boardAdd(boardId, { img: p.srcURL, source, title: p.titleText || p.altText || wc.getTitle(), thumb, picture });
+  sendEvent('toast', saved ? 'Added to board.' : 'This board is unavailable.');
 }
 
 async function imagePalette(t, p) {
@@ -4380,7 +4417,7 @@ async function imagePalette(t, p) {
   sendEvent('palette', { colors: tools.palette(img) });
 }
 
-async function runTool(name, t) {
+async function runTool(name, t, boardId) {
   if (!t) return;
   if (name === 'boards' || name === 'library' || name === 'bills' || name === 'thumbcheck') { openCuePage(name, t.identity); return; }
   ensureView(t);
@@ -4398,17 +4435,28 @@ async function runTool(name, t) {
       if (f) { copy(f); sendEvent('toast', `Copied: ${f}`); }
     } else if (name === 'ruler') {
       await wc.executeJavaScript(tools.RULER, true);
-    } else if (['copy-visible', 'copy-full', 'copy-area', 'copy-section'].includes(name)) {
-      const mode = name.slice(5);
+    } else if (/^(copy|board)-(visible|full|area|section)$/.test(name)) {
+      const mode = name.split('-')[1], source = wc.getURL(), folder = t.identity;
+      const current = () => t.id === activeId && t.host === 'main' && t.identity === folder && !isLocked(folder) &&
+        !wc.isDestroyed() && liveContents(t.view) === wc && wc.getURL() === source;
+      if (!current() || (name.startsWith('board-') && (!isFolder(folder) || !/^https?:/.test(source)))) return;
       let clip;
       if (mode === 'area' || mode === 'section') {
         clip = await wc.executeJavaScriptInIsolatedWorld(1001, [{ code: tools.pickScreenshot(mode) }], true);
         if (!clip) return;
       }
-      if (t.id !== activeId || t.host !== 'main' || isLocked(t.identity)) return;
+      if (!current()) return;
       const image = mode === 'visible' ? await wc.capturePage() : await capture.pageImage(wc, clip);
       if (image.isEmpty()) throw new Error('The page did not return a picture.');
-      if (t.id !== activeId || wc.isDestroyed() || isLocked(t.identity)) return;
+      if (!current()) return;
+      if (name.startsWith('board-')) {
+        const mine = lib.in(folder);
+        const id = boardId || mine.boardCreate('Clippings');
+        const thumb = image.resize({ width: Math.min(360, image.getSize().width) }).toDataURL();
+        if (!mine.boardAdd(id, { img: '', source, title: wc.getTitle(), thumb, picture: image.toPNG() })) throw new Error('Board unavailable');
+        sendEvent('toast', 'Saved to ' + (mine.boardNames().find(b => b.id === id)?.name || 'board'));
+        return;
+      }
       clipboard.writeImage(image);
       sendEvent('toast', 'Screenshot copied.');
     } else if (name === 'fullpage') {
@@ -4698,9 +4746,9 @@ const agentApi = {
   alert: (a) => {
     let folder;
     if (a.identity || a.folder) folder = agentFolder(a.identity || a.folder);
-    return addAlert({ source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '', ...(folder && folder !== 'agent' ? { folder } : {}) });
+    return addAlert({ kind: 'agent', source: a.source || 'AI agent', title: a.title, body: a.body || '', url: a.url || '', ...(folder && folder !== 'agent' ? { folder } : {}) });
   },
-  bills: () => store.data.bills.filter((b) => agentsMay(billFolder(b))).map((b) => ({ ...b, status: bills.status(b) })),
+  bills: () => store.data.bills.filter((b) => agentsMay(billFolder(b))).map((b) => ({ ...b, savedStatus: b.status, status: bills.status(b) })),
   // WhatsApp is its own narrow door. A general agent may not click or type in the person's own
   // tabs, and that stays true; this tool can work in a folder's WhatsApp tab because it can
   // do nothing else there — list chats, read one, send a message they asked for, and say whether
@@ -4984,8 +5032,16 @@ function vanishMenu() {
 }
 
 function pictureChoices(tab) {
-  return [['Visible page', 'visible'], ['Full page', 'full'], ['Drag an area…', 'area'], ['Choose a section…', 'section']]
-    .map(([label, mode]) => ({ label, click: () => { if (tab && tab.id === activeId && !isLocked(tab.identity)) runTool('copy-' + mode, tab); } }));
+  const modes = [['Visible tab', 'visible'], ['Full page', 'full'], ['Drag an area…', 'area'], ['Choose a section…', 'section']];
+  const items = modes.map(([label, mode]) => ({ label: 'Copy ' + label.toLowerCase(), click: () => runTool('copy-' + mode, tab) }));
+  if (kit('designer') && tab && isFolder(tab.identity) && !isLocked(tab.identity) && /^https?:/.test(tab.url)) {
+    const boards = lib.in(tab.identity).boardNames();
+    if (!boards.length) boards.push({ id: null, name: 'Create Clippings board' });
+    items.push({ type: 'separator' }, { label: 'Save to board', submenu: boards.map(board => ({
+      label: board.name, submenu: modes.map(([label, mode]) => ({ label, click: () => runTool('board-' + mode, tab, board.id) }))
+    })) });
+  }
+  return items;
 }
 
 function toolMenu(cmd) {
@@ -5014,7 +5070,7 @@ function toolMenu(cmd) {
       { label: 'YouTube Studio', click: () => openTab({ url: 'https://studio.youtube.com' }) },
       { label: 'YouTube Comments', click: () => openTab({ url: 'https://studio.youtube.com/channel/UC/comments/inbox' }) },
     ] : []),
-    ...(kit('business') ? [{ type: 'separator' }, tool('Bills and Alerts', 'bills')] : []),
+    { type: 'separator' }, tool('Bills and Alerts', 'bills'),
   ];
 }
 
@@ -5473,6 +5529,14 @@ const MIGRATIONS = {
       if (!reminder) a.unverifiedSite = true;
     }
   },
+  'bill-alert-kinds': (_s, data) => {
+    for (const a of data.alerts || []) {
+      if (a.kind || a.origin || a.unverifiedSite) continue;
+      const bill = (data.bills || []).find(b => billFolder(b) === a.folder && b.name === a.source && b.url === a.url &&
+        typeof a.title === 'string' && a.title.startsWith(b.name + ': ') && /^(card failed|due in -?\d+ days?)$/.test(a.title.slice(b.name.length + 2)));
+      if (bill) { a.kind = 'bill'; a.billId = bill.id; }
+    }
+  },
 };
 function runMigrations() {
   const done = store.data.migrated && typeof store.data.migrated === 'object' ? store.data.migrated : {};
@@ -5514,7 +5578,7 @@ app.whenReady().then(async () => {
   }
   runMigrations();
   masterMuted = !!settings().masterMuted;
-  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: false, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: false, sleepMinutes: 15, archiveDays: 0, tempClear: 'quit', linksJustForNow: false, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'both', vanishOnePlayer: false, vanishNewTab: 'go', vanishNewTabPlace: 'next', vanishPauseOnBlur: false, vanishHideFromCapture: true, vanishFullScreen: false, showDownloads: true, quietSites: [], muteSites: [], openOn: 'last', homeApp: '', agentSites: { whatsapp: false, gmail: false }, alwaysPinned: [], everyday: [] }, ...store.data.settings };
+  store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: false, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: false, sleepMinutes: 15, archiveDays: 0, tempClear: 'quit', linksJustForNow: false, reuseHomepages: true, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'both', vanishOnePlayer: false, vanishNewTab: 'go', vanishNewTabPlace: 'next', vanishPauseOnBlur: false, vanishHideFromCapture: true, vanishFullScreen: false, showDownloads: true, quietSites: [], muteSites: [], openOn: 'last', homeApp: '', agentSites: { whatsapp: false, gmail: false }, alwaysPinned: [], everyday: [] }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   // Teacher (on air, OBS) and Business (bills) are one person's tools; a plain install starts
   // without them, and they are one switch away in Settings > What you see.
@@ -5615,9 +5679,6 @@ app.whenReady().then(async () => {
   });
   buildMenu();
   createMain();
-  // One Gmail, one WhatsApp, one YouTube per folder, every launch, without him
-  // having to ask for it. mergeDupes never closes a pinned tab. Only on the owner's install: anyone
-  // else keeps every tab they left open, and can tidy copies from Settings when they want.
   // Some Linux systems (recent Ubuntu) stop Chromium's sandbox, and Cue then runs without it.
   // Say so once, plainly, rather than run with less protection than it looks like.
   if (process.platform === 'linux' && !process.env.CUE_TEST && (process.env.CUE_LINUX_UNSANDBOXED === '1' || app.commandLine.hasSwitch('no-sandbox')) && !store.data.toldNoSandbox) {
@@ -5626,7 +5687,6 @@ app.whenReady().then(async () => {
       dialog.showMessageBox(mainWin, { type: 'warning', buttons: ['OK'], message: 'This computer is running Cue with less protection.', detail: 'Your Linux system blocks the sandbox that keeps each website shut in its own box, so Cue started without it. Pages still work, but a harmful page has an easier way out. To fix it, allow Cue in AppArmor (search "AppArmor unprivileged user namespaces" for your Linux version), then open Cue again.' }).catch(() => {});
     }, 4000);
   }
-  if (settings().preset === 'nsm') setTimeout(() => { try { if (mergeDupes()) { layout(); pushState(); persist(); } } catch (e) { logProblem('tidy', e); } }, 8000);
   setTimeout(() => { try { archiveOldTabs(); } catch (e) { logProblem('tidy', e); } }, 20000);
   checkBills(); tidyInstallers(); loadRepos(); setTimeout(() => trimCaches().catch((e) => logProblem('trim', e)), 60000);
   setInterval(() => trimCaches().catch((e) => logProblem('trim', e)), 30 * 60000); // caches are checked all day, not only at launch
@@ -5688,7 +5748,7 @@ app.whenReady().then(async () => {
   wireSharing();
   sharedLogins = { syncNow: () => syncShared() };
   if (sharing.size) setTimeout(() => syncShared().catch(() => {}), 3000); // after the first pages, so start-up stays quick
-  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, askAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, mustStayAwake, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
+  if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, mustStayAwake, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
     // people's folders (test/people.js)
     addFolder, removeFolder, renameFolder, lockFolder, tryUnlock, setPasscode, lockSweep, isLocked, folderRows, userFolders, setShared, reopenClosed,
     lastState: () => lastState, sendState, closedStack, downloads, invoke: uiInvoke, internalAs: (cmd, a, from) => internal[cmd](a, from),

@@ -772,3 +772,9 @@ body.rail .recent-tabs { display: none; }
 #metro-play[aria-pressed="true"], #music-transport.on { color: var(--cued); background: var(--cued-wash); border-color: var(--cued); }
 #metro-mode, #metro-tap kbd { color: var(--muted); font-size: 11px; }
 #metro-tap kbd { font-family: inherit; }
+
+.tab-rename-sheet { max-width: 360px; }
+.tab-rename-sheet form { display: grid; gap: 12px; }
+.tab-rename-sheet label { font-size: 18px; font-weight: 600; }
+.tab-rename-sheet input { min-width: 0; }
+.tab-rename-sheet button { justify-self: end; }

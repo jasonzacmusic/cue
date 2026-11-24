@@ -21,7 +21,7 @@ const SNAPSHOT_JS = `(() => {
     if (r.width < 2 || r.height < 2) continue;
     const st = getComputedStyle(el); if (st.visibility === 'hidden' || st.display === 'none') continue;
     const ref = 'c' + (++n); el.setAttribute('data-cue-ref', ref);
-    const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.name || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+    const label = (el.getAttribute('aria-label') || el.innerText || (el.labels && el.labels[0]?.innerText) || el.placeholder || el.title || el.name || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
     out.push({ ref, tag: el.tagName.toLowerCase(), type: el.type || el.getAttribute('role') || '', label, href: el.href || undefined, inView: r.top < innerHeight && r.bottom > 0 });
     if (out.length >= 300) break;
   }

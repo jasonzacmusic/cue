@@ -275,6 +275,8 @@ function applySide(width = S.sideWidth) {
   document.body.classList.toggle('rail', width < RAIL_AT);
   document.body.classList.toggle('sidehidden', hidden);
   document.body.classList.toggle('peeking', !!S.sideReveal);
+  $('#sideshow').hidden = !hidden;
+  $('#sidehide').setAttribute('aria-expanded', String(!hidden));
   $('#sidehide').title = keysFor(hidden ? 'Keep the sidebar open (⌘\\)' : 'Hide the sidebar (⌘\\)');
 }
 
@@ -310,6 +312,8 @@ const snapSide = (x) => (x < 96 ? 64 : Math.min(420, Math.round(x)));
 grip($('#sidegrip'), 'x', (x) => { const w = snapSide(x); applySide(w); send('side-width', { w }); });
 $('#sidegrip').ondblclick = () => send('side-width', { w: S.sideWidth < RAIL_AT ? 248 : 64 });
 grip($('#aigrip'), 'x', (x) => send('ai-width', { w: Math.max(320, Math.min(720, Math.round(innerWidth - x))) }));
+$('#sideshow').innerHTML = ICONS.hide;
+$('#sideshow').onclick = () => send('side-hide');
 $('#sidehide').onclick = () => send('side-hide');
 let hideTimer = null;
 $('#edge').onmouseenter = () => { clearTimeout(hideTimer); send('side-reveal', { on: true }); };
@@ -530,7 +534,7 @@ function renderExtras() {
   $('#openbills').title = label; $('#openbills').setAttribute('aria-label', label);
   bb.hidden = !n; bb.textContent = n > 99 ? '99+' : n;
   bb.classList.toggle('bad', S.billCount > 0);
-  $('#openbills').hidden = !k.business;
+  $('#openbills').hidden = false;
   $('#openboards').hidden = !k.designer;
   $('#musicbtn').hidden = !k.music && !k.video;
   document.querySelector('label.live').hidden = !k.teacher;
@@ -653,7 +657,7 @@ function renderPins() {
     // Option-click silences or wakes the app without opening it.
     p.onclick = (e) => {
       if (e.altKey) { e.preventDefault(); send('mute', { id: t.id }); return; }
-      if (here(t)) send('activate', { id: t.id }); else send('app-open', { url: t.url });
+      if (here(t)) logoClick(e, t, () => send('activate', { id:t.id })); else send('app-open', { url: t.url });
     };
     p.oncontextmenu = (e) => { e.preventDefault(); send('tab-menu', { id: t.id }); };
     p.addEventListener('wheel', altWheel(t), { passive: false });
@@ -945,6 +949,26 @@ function tempSection(splitIds) {
   return sec;
 }
 
+// Activation redraws an inactive row. Track its first logo click by tab ID so the
+// second click can still rename it after Chromium replaces the DOM node.
+let lastLogoClick = null;
+function logoClick(e, t, activateTab) {
+  e.stopPropagation();
+  const now = performance.now();
+  const twice = lastLogoClick?.id === t.id && now - lastLogoClick.at < 500 &&
+    Math.abs(e.clientX-lastLogoClick.x) < 5 && Math.abs(e.clientY-lastLogoClick.y) < 5;
+  lastLogoClick = { id:t.id, at:now, x:e.clientX, y:e.clientY };
+  if (!twice && e.detail !== 2) { activateTab(); return; }
+  lastLogoClick = null;
+  openModal(sheet => {
+    sheet.classList.add('tab-rename-sheet');
+    const label = el('label', '', 'Rename tab'); label.htmlFor = 'tab-rename-field';
+    const form = el('form'), input = el('input'); input.id = 'tab-rename-field'; input.value = t.name || shortName(t); input.maxLength = 60;
+    const save = el('button', 'btn', 'Save'); save.type = 'submit';
+    form.append(label, input, save); form.onsubmit = ev => { ev.preventDefault(); send('rename', { id:t.id, name:input.value.trim() }); closeModal(); };
+    sheet.append(form); setTimeout(() => { input.focus(); input.select(); }, 40);
+  });
+}
 function tabRow(t, splitIds) {
   const row = el('div', 'tab');
   row.dataset.id = t.id;
@@ -954,7 +978,9 @@ function tabRow(t, splitIds) {
   if (t.mini) row.classList.add('inmini');
   if (S.live && t.id === S.programId) row.classList.add('onair');
   else if (S.live && t.id === S.activeId) row.classList.add('cued');
-  row.append(favEl(t));
+  const logo = favEl(t); row.append(logo);
+  tip(logo, shortName(t), 'Double-click the logo to rename');
+  logo.onclick = e => { if (!e.metaKey && !e.ctrlKey && !e.altKey) logoClick(e, t, () => send('activate', { id:t.id })); };
   const title = el('span', 'title', esc(shortName(t)));
   tip(title, t.title || shortName(t), t.name ? 'Your name for this tab · double-click to change it' : 'Double-click to rename');
   title.ondblclick = (e) => {
@@ -1429,7 +1455,7 @@ function commands() {
     ['New tab just for now', () => send('new-tab', { temp: true })],
     ['Side by side', () => send('split', { mode: 'cols2' })], ['Grid of four', () => send('split', { mode: 'grid4' })], ['One tab', () => send('split', { mode: 'single' })],
     ['Move in from another browser', () => openImport()], ['Settings', () => openSettings()], ...(on('designer') ? [['Boards', () => send('tool', { name: 'boards' })]] : []),
-    ['Bookmarks, history and archived tabs', () => send('tool', { name: 'library' })], ...(on('business') ? [['Bills and alerts', () => send('tool', { name: 'bills' })]] : []),
+    ['Bookmarks, history and archived tabs', () => send('tool', { name: 'library' })], ['Bills and alerts', () => send('tool', { name: 'bills' })],
     ...(on('creator') ? [['Thumbnail check', () => send('tool', { name: 'thumbcheck' })]] : []), ['AI side panel', () => send('ai')], ['Ask AI about this page', () => send('ai-ask')],
     ...(on('music') ? [['Music bar', () => send('strip')]] : []),
     ...(on('designer') ? [['Pick a colour', () => send('tool', { name: 'colour' })], ['Find a font', () => send('tool', { name: 'font' })], ['Ruler', () => send('tool', { name: 'ruler' })]] : []),
@@ -1886,6 +1912,7 @@ function settingsRooms(lockTarget) {
           toggle('onePlayer', s.onePlayer, 'Only one video plays at a time', 'Off is how other browsers behave. Turn it on and starting a video pauses the others. This is the main window only; Vanish has its own setting.'),
           toggle('originalSound', s.originalSound, 'Original sound for music', 'Turns off echo cancelling, noise cutting and automatic volume on your microphone in web calls. Reload the call page after changing it.'));
         heading(p, 'Tabs');
+        toggles(p, toggle('reuseHomepages', s.reuseHomepages !== false, 'Reuse website homepages', 'Opening a homepage again switches to its tab in this folder. Individual videos, files and folders open separately.'));
         p.append(settingRow('New tabs open', choice('newTabPlace', s.newTabPlace || 'next', [['next', 'Next to the current tab'], ['start', 'At the beginning'], ['end', 'At the end']])));
         p.append(settingRow('Let unused tabs sleep after', amount(text('sleepMinutes', s.sleepMinutes, '15', 'number'), 'minutes'),
           'A sleeping tab gives its memory back and wakes when you click it. Anything playing, recording or half-typed stays awake.'));
@@ -1894,11 +1921,11 @@ function settingsRooms(lockTarget) {
           toggle('syncScroll', s.syncScroll, 'Scroll split tabs together'),
           toggle('syncPlay', s.syncPlay, 'Play and pause split tabs together'));
         const dup = el('span', 'btnline');
-        const tb = el('button', 'btn', 'Merge duplicate tabs'); tb.type = 'button';
+        const tb = el('button', 'btn', 'Merge duplicate homepages'); tb.type = 'button';
         const tell = said(dup);
         tb.onclick = async () => { tb.disabled = true; const r = await ask('tidy-dupes'); tell(r && r.said); tb.disabled = false; };
         dup.prepend(tb);
-        p.append(settingRow('Copies of the same page', dup, 'Closes extra copies of one page in the same folder. It also runs by itself each time Cue opens. A pinned tab is never the one closed.'));
+        p.append(settingRow('Copies of the same page', dup, 'Closes spare homepage tabs in the same folder and Space. Pinned tabs, split views, queued apps and active work stay open.'));
       } },
 
     { id: 'keep', name: 'Keeping tabs', line: 'Kept tabs stay until you close them; Just for now tabs do not.',
@@ -2654,7 +2681,42 @@ window.cue.onState((s) => {
   else if (refreshMusic && practiceHover) send('practice-hover', { zone: practiceHover });
   metronome.setMode(s.live, !!s.settings.masterMuted);
 });
+function askLocalSheet(tab) {
+  openModal(sheet => {
+    const heading = el('h2','','Ask about this tab'), source = el('p','note');
+    source.textContent = tab.title + ' · The selected assistant receives visible text and control labels.';
+    const provider = el('select'); provider.setAttribute('aria-label','Assistant account');
+    for (const [value,text] of [['claudecode','Claude Code'],['codex','Codex']]) provider.add(new Option(text,value));
+    provider.value = tab.which;
+    const form = el('form'), input = el('input'); input.placeholder = 'Ask a question or find a button'; input.required = true; input.value = tab.question || ''; input.maxLength = 3000;
+    input.setAttribute('aria-label','Question about this tab');
+    const go = el('button','btn','Ask'); go.type = 'submit';
+    const output = el('p','note'); output.setAttribute('role','status');
+    const apply = el('button','btn'); apply.hidden = true;
+    form.append(input,go); sheet.append(heading,source,provider,form,output,apply);
+    form.onsubmit = async e => {
+      e.preventDefault(); if (go.disabled) return; go.disabled = true; apply.hidden = true;
+      output.textContent = 'Asking ' + provider.selectedOptions[0].text + '…';
+      try {
+        const r = await window.cue.invoke('ask-local-run',{id:tab.id,which:provider.value,question:input.value});
+        output.textContent = r.answer;
+        if (r.label) {
+          apply.textContent = 'Click “' + r.label + '”'; apply.hidden = false;
+          apply.onclick = async () => {
+            apply.hidden = true;
+            try { if (await window.cue.invoke('ask-local-click',{id:tab.id,doc:r.doc})) { closeModal(); toast('Clicked ' + r.label); }
+              else output.textContent = 'The control changed. Ask again.'; }
+            catch { output.textContent = 'The tab changed. Ask again.'; }
+          };
+        }
+      } catch(err) { output.textContent = String(err.message).replace(/^.*?Error: /,''); }
+      finally { go.disabled = false; }
+    };
+    setTimeout(()=>input.focus(),40);
+  });
+}
 window.cue.onEvent((name, data) => {
+  if (name === 'ask-local') askLocalSheet(data);
   if (name === 'track-beat') metronome.updateTrack(data);
   else if (name === 'practice-key') practiceKey(data);
   else if (name === 'toast') toast(data);

@@ -659,6 +659,7 @@ document.addEventListener('click', (e) => {
 
 // ---- Cue's own pages (Boards, Library, Bills, Thumbnail check)
 if (location.protocol === 'cue:') {
+  if (location.hostname === 'bills') ipcRenderer.on('cue:alerts-updated', () => window.dispatchEvent(new Event('cue-alerts-updated')));
   contextBridge.exposeInMainWorld('cueInternal', { invoke: (cmd, args) => ipcRenderer.invoke('cue:internal', cmd, args) });
 }
 

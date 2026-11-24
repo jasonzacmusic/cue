@@ -62,16 +62,20 @@
   async function load(preferId, quiet) {
     let fresh;
     try { fresh = (await call('boards.list')) || []; } catch (e) { if (quiet) return; fresh = []; toast('Could not load your boards.'); }
-    const seen = JSON.stringify(fresh);
+    const seen = JSON.stringify(fresh.map(b => [b.id, b.name, b.items.map(i => i.id)]));
     if (quiet && seen === lastSeen) return; // nothing new: leave the page exactly as it is
     lastSeen = seen; boards = fresh;
+    const items = new Set(fresh.flatMap(b => b.items.map(i => i.id)));
+    for (const id of cards.keys()) if (!items.has(id)) cards.delete(id);
+    const heads = new Set(fresh.map(b => b.items[0]?.id));
+    for (const id of thumbs.keys()) if (!heads.has(id)) thumbs.delete(id);
     if (preferId && boards.some((b) => b.id === preferId)) selected = preferId;
     else if (!boards.some((b) => b.id === selected)) selected = boards.length ? boards[0].id : null;
     render();
   }
 
   const thumbs = new Map();
-  function thumbFor(src) { let im = thumbs.get(src); if (!im) { im = el('img'); im.alt = ''; im.src = src; thumbs.set(src, im); } return im; }
+  function thumbFor(item) { let im = thumbs.get(item.id); if (!im) { im = el('img'); im.alt = ''; im.src = item.thumb; thumbs.set(item.id, im); } return im; }
   function renderList() {
     const ul = $('blist'); ul.textContent = '';
     for (const b of boards) {
@@ -79,7 +83,7 @@
       btn.setAttribute('aria-current', b.id === selected ? 'true' : 'false');
       const st = el('span', 'stack');
       const first = (b.items || [])[0];
-      if (first && first.thumb) { st.appendChild(thumbFor(first.thumb)); } else st.textContent = '▢';
+      if (first && first.thumb) { st.appendChild(thumbFor(first)); } else st.textContent = '▢';
       btn.append(st, el('span', 'nm', b.name), el('span', 'ct', String((b.items || []).length)));
       btn.addEventListener('click', () => { selected = b.id; renaming = false; confirmDelete = false; render(); });
       li.appendChild(btn); ul.appendChild(li);
@@ -90,7 +94,7 @@
   // coming back never makes its image load (and flash) again.
   const cards = new Map();
   function cardFor(board, it) {
-    const k = board.id + '|' + it.id + '|' + (it.thumb || it.img || '') + '|' + (it.title || '') + '|' + (it.source || '');
+    const k = it.id;
     let c = cards.get(k);
     if (!c) { c = renderCard(board, it); cards.set(k, c); }
     return c;
@@ -115,6 +119,11 @@
       a.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); open(it.source, e); } });
       row.appendChild(a);
     } else row.appendChild(el('span', 'nosrc', 'Source unknown'));
+    if (it.savedPicture) {
+      const copy = el('button', 'btn small', 'Copy picture'); copy.type = 'button';
+      copy.onclick = async () => toast(await call('boards.copy', { itemId: it.id }) ? 'Picture copied' : 'Picture unavailable');
+      row.append(copy);
+    }
     const rm = el('button', 'btn small quiet', 'Remove'); rm.type = 'button'; rm.title = 'Take this picture off the board';
     rm.setAttribute('aria-label', 'Remove ' + (it.title || 'this picture') + ' from the board');
     rm.addEventListener('click', async () => {
@@ -131,7 +140,7 @@
     const b = current();
     if (!boards.length) {
       const e = el('div', 'empty');
-      e.append(el('b', null, 'No boards yet'), el('p', null, 'Make your first board with the New board button. Then right-click any picture on any website in Cue and choose Add to board.'));
+      e.append(el('b', null, 'No boards yet'), el('p', null, 'Make your first board with the New board button. Use the toolbar camera to save a snip or a full page.'));
       m.appendChild(e); return;
     }
     if (!b) return;
@@ -171,11 +180,11 @@
     const items = b.items || [];
     if (!items.length) {
       const e = el('div', 'empty');
-      e.append(el('b', null, 'This board is empty'), el('p', null, 'Right-click any picture on a website in Cue and choose Add to board. It will appear here with the site it came from.'));
+      e.append(el('b', null, 'This board is empty'), el('p', null, 'On a web page, choose Camera → Save to board and select this board. Drag an area or capture the full page.'));
       m.appendChild(e); return;
     }
     const grid = el('div', 'grid');
-    for (const it of items.slice().reverse()) grid.appendChild(cardFor(b, it));
+    for (const it of items) grid.appendChild(cardFor(b, it));
     m.appendChild(grid);
   }
 

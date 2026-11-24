@@ -4,6 +4,7 @@
 const { BaseWindow, WebContentsView, Menu, clipboard, screen, dialog } = require('electron');
 const { whereToOpen, refuseOpen } = require('./signin');
 const { PICTURE_IN_PICTURE, protectedSite } = require('./video');
+const { homepageKey } = require('./homepage');
 const vanishKeys = require('./vanish-keys');
 const { liveContents } = require('./view-contents');
 
@@ -213,10 +214,16 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
   // closes, and its 'closed' handler empties the session.
   function forget() { if (win) win.close(); }
 
+  function matchingHome(url) {
+    const key = pref('reuseHomepages') !== false && homepageKey(url);
+    return key && tabs.find(t => homepageKey(t.url) === key);
+  }
   function add(url, { from, background } = {}) {
     if (!win) build();
     if (win.isMinimized()) win.restore();
     win.show(); win.focus(); // it may be behind Cue or on another desktop
+    const existing = matchingHome(url);
+    if (existing) { if (!from || !(background || pref('vanishNewTab') === 'stay')) activate(existing.id); return existing; }
     const t = { id: nextId--, view: null, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
     // A link from a page either brings its new tab to the front (Vanish's own setting, "go" by
     // default) or opens it behind. Opened behind a video that is playing, it waits silent until
@@ -439,6 +446,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (cmd === 'navigate' && t) {
       const asked = resolveInput(a.text);
       if (/^cue:/i.test(asked)) { say('Cue\u2019s own pages do not open in Vanish.'); return; }
+      const existing = t.url === startFile && matchingHome(asked);
+      if (existing) { activate(existing.id); closeTab(t.id); return; }
       const u = guardUrl(asked); t.url = u;
       if (wc) { whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(u).catch(() => {}); }); wc.focus(); }
       else activate(t.id);

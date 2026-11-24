@@ -25,6 +25,7 @@ class Library {
       CREATE TABLE IF NOT EXISTS board_items (id TEXT PRIMARY KEY, board TEXT, img TEXT, source TEXT, title TEXT, thumb TEXT, added INTEGER, folder TEXT NOT NULL DEFAULT 'personal');
     `);
     this.upgrade();
+    if (!this.cols('board_items').includes('picture')) this.db.exec('ALTER TABLE board_items ADD COLUMN picture BLOB');
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS history_last ON history(folder, last DESC);
       CREATE INDEX IF NOT EXISTS history_host ON history(folder, host, last DESC);
@@ -184,7 +185,7 @@ class Library {
   }
 
   boardListIn(f) {
-    const items = this.db.prepare('SELECT id, board, img, source, title, thumb, added AS addedAt FROM board_items WHERE folder = ? ORDER BY added DESC').all(f);
+    const items = this.db.prepare('SELECT id, board, img, source, title, thumb, picture IS NOT NULL AS savedPicture, added AS addedAt FROM board_items WHERE folder = ? ORDER BY added DESC').all(f);
     return this.db.prepare('SELECT id, name FROM boards WHERE folder = ? ORDER BY created').all(f)
       .map((b) => ({ ...b, items: items.filter((i) => i.board === b.id) }));
   }
@@ -201,11 +202,11 @@ class Library {
     this.db.prepare('DELETE FROM boards WHERE id = ? AND folder = ?').run(id, f);
   }
   boardRemoveItemIn(f, id) { this.db.prepare('DELETE FROM board_items WHERE id = ? AND folder = ?').run(id, f); }
-  boardAddIn(f, board, { img, source, title, thumb }) {
+  boardAddIn(f, board, { img, source, title, thumb, picture = null }) {
     // Only onto a board of the same folder.
     if (!this.db.prepare('SELECT 1 FROM boards WHERE id = ? AND folder = ?').get(board, f)) return false;
-    this.db.prepare('INSERT INTO board_items (id, board, img, source, title, thumb, added, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(crypto.randomUUID(), board, img, source, title || '', thumb || '', Date.now(), f);
+    this.db.prepare('INSERT INTO board_items (id, board, img, source, title, thumb, added, folder, picture) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(crypto.randomUUID(), board, img, source, title || '', thumb || '', Date.now(), f, picture);
     return true;
   }
 
@@ -248,6 +249,8 @@ class Library {
       suggest: (q, limit) => this.suggestIn(folder, q, limit),
       clearHistory: () => this.clearHistoryIn(folder),
       bookmarks: (q, limit) => this.bookmarksIn(folder, q, limit),
+      boardNames: () => this.db.prepare('SELECT id, name FROM boards WHERE folder = ? ORDER BY created').all(folder),
+      boardPicture: id => this.db.prepare('SELECT picture FROM board_items WHERE folder = ? AND id = ?').get(folder, id)?.picture,
       boardList: () => this.boardListIn(folder),
       boardCreate: (name) => this.boardCreateIn(folder, name),
       boardRename: (id, name) => this.boardRenameIn(folder, id, name),

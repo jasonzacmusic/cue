@@ -138,7 +138,7 @@ async function stranger(c) {
   check('plain: opens on the last tab', s().openOn === 'last');
   check('plain: nothing silent, nothing quiet', !(s().muteSites || []).length && !(s().quietSites || []).length, { mute: s().muteSites, quiet: s().quietSites });
   check('plain: Teacher and Business kits off, the others on', s().kits.teacher === false && s().kits.business === false && ['music', 'creator', 'designer', 'video'].every((k) => s().kits[k] !== false), s().kits);
-  check('plain: no Live menu, no Bills in Tools', !menuLabels().includes('Live') && !menuLabels().includes('Bills and Alerts'));
+  check('plain: no Live menu, Bills accessible in Tools', !menuLabels().includes('Live') && menuLabels().includes('Bills and Alerts'));
   check('plain: no Live class room in Settings', !(await (async () => { c.sendEvent('open-settings', 'tabs'); await sleep(400); const has = await ui('[...document.querySelectorAll(".snav button")].some((b) => b.dataset.id === "live")'); await ui('(() => { const m = document.querySelector("#modal"); m.hidden = true; m.innerHTML = ""; })()'); return has; })()));
   check('plain: the AI door is off and nothing is listening', s().agentPort === false && !c.portUp() && !(await listening(c.agentPort)), { agentPort: s().agentPort, port: c.agentPort });
   check('plain: the AI row in the sidebar is hidden', await ui('document.getElementById("airow").hidden'));

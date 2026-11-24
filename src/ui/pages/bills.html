@@ -50,17 +50,17 @@
   <div class="head">
     <div>
       <h1>Bills and alerts</h1>
-      <p>Every subscription and card payment in one place, soonest first, and the notifications that were held back while you were teaching.</p>
+      <p>Track payments in this folder. Cue reminds you within seven days, on the due date and when a payment becomes overdue.</p>
     </div>
-    <div class="sample-note" id="sampleNote" hidden>Showing sample bills</div>
+
   </div>
 
   <div class="strip" id="strip"></div>
 
-  <div class="sechead"><h2>Bills, soonest first</h2><button class="btn primary" id="addBtn" type="button">+ Add a bill</button></div>
+  <div class="sechead"><h2>Bills by due date</h2><button class="btn primary" id="addBtn" type="button">+ Add a bill</button></div>
   <ul class="list" id="bills"></ul>
 
-  <div class="sechead"><h2>Alerts, newest first</h2><button class="btn small" id="clearAlerts" type="button">Clear all alerts</button></div>
+  <div class="sechead"><h2>Alerts, newest first</h2><label>Show <select id="alertFilter"><option value="all">All alerts</option><option value="bill">Bill reminders</option><option value="website">Website notifications</option><option value="agent">Agent updates</option><option value="other">Other Cue alerts</option><option value="history">Earlier unverified alerts</option></select></label><button type="button" class="btn small" id="readAlerts" hidden>Mark as read</button><button class="btn small" id="clearAlerts" type="button">Clear all alerts</button></div>
   <ul class="list" id="alerts"></ul>
 </div>
 <script src="bills.js"></script>
