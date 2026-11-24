@@ -537,6 +537,8 @@ function renderExtras() {
   document.querySelectorAll('[data-m],.st-label').forEach((x) => { x.hidden = !k.music; });
   ['m-speed', 'm-semi'].forEach((i) => { $(`#${i}`).hidden = !k.music; });
   document.querySelectorAll('[data-t]').forEach((x) => { x.hidden = !k.video; });
+  document.querySelectorAll('.music-group').forEach(group => { group.hidden = !k.music; });
+  $('.frame-controls').hidden = !k.video;
   $('.metro-controls').hidden = !k.music;
   $('#strip').hidden = !S.strip;
   $('#musicbtn').classList.toggle('on', !!S.strip);
@@ -1626,10 +1628,16 @@ async function stopRecording() {
 // ---------------------------------------------------------------- music bar
 const M = { speed: 100, semi: 0, loop: false };
 function showMusic(data) {
+  const transport = $('#music-transport');
+  transport.disabled = typeof data.playing !== 'boolean';
+  transport.textContent = transport.disabled ? (data.synth ? 'Instrument' : 'No media') : data.playing ? '❚❚ Playing' : '▶ Paused';
+  transport.classList.toggle('on', !!data.playing);
+  transport.title = data.playing ? 'Pause media' : 'Play media';
   M.loop = !!data.loop; M.speed = Math.round((data.speed || 1) * 100); M.semi = data.semis || 0;
   $('#m-speed').textContent = M.speed + '%';
   $('#m-semi').textContent = M.semi > 0 ? '+' + M.semi : String(M.semi);
-  $('#m-loop').textContent = M.loop ? 'On' : 'Off';
+  $('#m-loop').textContent = M.loop ? 'Looping' : 'Off';
+  $('#m-loop').setAttribute('aria-pressed', String(M.loop));
   $('#m-loop').classList.toggle('on', M.loop);
   $('#m-loop').disabled = data.a == null || data.b == null;
   for (const point of ['a', 'b']) {
@@ -1649,6 +1657,35 @@ document.querySelectorAll('[data-m]').forEach((b) => {
   };
 });
 document.querySelectorAll('[data-t]').forEach((b) => { b.onclick = () => send('tool', { name: b.dataset.t }); });
+new ResizeObserver(() => {
+  const height = $('#strip').offsetHeight;
+  if (height) send('strip-height', { height });
+}).observe($('#strip'));
+$('#music-transport').onclick = () => music('toggle');
+let practiceHover = '';
+function setPracticeHover(zone) {
+  if (zone === practiceHover) return;
+  practiceHover = zone;
+  send('practice-hover', { zone });
+}
+for (const group of document.querySelectorAll('[data-hover]')) {
+  group.addEventListener('pointerenter', () => setPracticeHover(group.dataset.hover));
+  group.addEventListener('pointerleave', () => setPracticeHover(''));
+}
+function practiceKey(key) {
+  if (!S?.strip || !S.settings.kits.music) return false;
+  const zone = document.querySelector('[data-hover]:hover')?.dataset.hover;
+  if (zone === 'tempo' && key.toLowerCase() === 't') $('#metro-tap').click();
+  else if (zone === 'transpose' && ['+', '=', '-'].includes(key)) {
+    document.querySelector(key === '-' ? '[data-m="semi-"]' : '[data-m="semi+"]').click();
+  } else return false;
+  return true;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.repeat || e.isComposing ||
+      e.target.closest?.('input,textarea,select,[contenteditable="true"]')) return;
+  if (practiceKey(e.key)) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
 $('#musicbtn').onclick = () => send('strip');
 $('#aibtn').onclick = () => send('ai');
 $('#aiclose').onclick = () => send('ai');
@@ -2610,14 +2647,17 @@ function sharePicker(d) {
 window.cue.onState((s) => {
   if (S?.live && !s.live && activityOpen) { activityOpen = false; send('activity-open', { on: false }); }
   const refreshMusic = s.strip && (!S?.strip || S.activeId !== s.activeId);
+  if (S && S.activeId !== s.activeId && $('#metro-follow').getAttribute('aria-pressed') === 'true') metronome.stop();
   S = s; render();
   if (refreshMusic) { showMusic({}); music('status'); }
-  if (!s.strip || !s.settings.kits.music || s.live) metronome.stop();
-  $('#metro-play').disabled = !!s.live;
-  $('#metro-play').title = s.live ? 'Metronome is off while sharing the live queue' : 'Start or stop the metronome';
+  if (!s.strip || !s.settings.kits.music) { metronome.stop(); setPracticeHover(''); }
+  else if (refreshMusic && practiceHover) send('practice-hover', { zone: practiceHover });
+  metronome.setMode(s.live, !!s.settings.masterMuted);
 });
 window.cue.onEvent((name, data) => {
-  if (name === 'toast') toast(data);
+  if (name === 'track-beat') metronome.updateTrack(data);
+  else if (name === 'practice-key') practiceKey(data);
+  else if (name === 'toast') toast(data);
   // The count climbs while the page loads, so it is nudged straight onto the
   // button rather than waiting for the next full state push.
   else if (name === 'blocked') {

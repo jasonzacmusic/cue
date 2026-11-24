@@ -63,7 +63,7 @@ const GAP = 8;
 const AGENT_PORT = (process.env.CUE_TEST && Number(process.env.CUE_AGENT_PORT)) || 8813;
 const AI_MIN = 320; const AI_MAX = 720; const AI_GRIP = 8;
 const AI_HEAD = 38;
-const STRIP = 44;
+let stripHeight = 44;
 // A plain install has one Space, and you can add more and call them anything you like. A starting
 // setup (presets.js) brings its own list. Renaming one has to carry every tab, login and layout
 // filed under the old name with it, which is why it happens in one place.
@@ -433,6 +433,18 @@ const autoTried = {};
 let peek = null;
 let aiView = null;
 let stripOpen = false;
+let followTarget = null;
+function followPlayer(wc) {
+  if (followTarget && !followTarget.isDestroyed()) followTarget.send('cue:follow', false);
+  followTarget = wc;
+  if (wc) wc.send('cue:follow', true);
+}
+let practiceTarget = null;
+function setPracticeTarget(wc, zone) {
+  if (practiceTarget && !practiceTarget.isDestroyed() && practiceTarget !== wc) practiceTarget.send('cue:practice-hover', '');
+  practiceTarget = zone ? wc : null;
+  if (wc) wc.send('cue:practice-hover', zone);
+}
 let recTabId = null;
 let quitting = false;
 let updater = null;
@@ -1653,6 +1665,7 @@ function offlineSite(u) {
 // The same guards for every tab, Vanish included. Vanish passes no note, so nothing is written down.
 function protectPage(wc, t, note) {
   wc.on('dom-ready', () => {
+    if (wc === followTarget && stripOpen) wc.send('cue:follow', true);
     wc.insertCSS(':fullscreen, :fullscreen * { cursor: auto !important } @media (display-mode: fullscreen) { html, html * { cursor: auto !important } }', { cssOrigin: 'user' }).catch(() => {});
   });
   const inVanish = t.identity === 'vanish';
@@ -2235,7 +2248,7 @@ function persist() {
 // ---------------------------------------------------------------- layout
 function contentRect() {
   const [w, h] = mainWin.getContentSize();
-  const top = TOOLBAR + (stripOpen ? STRIP : 0); const x = sideSpace();
+  const top = TOOLBAR + (stripOpen ? stripHeight : 0); const x = sideSpace();
   return { x, y: top, width: Math.max(0, w - x - (aiView ? aiWidth() + AI_GRIP : 0)), height: Math.max(0, h - top) };
 }
 
@@ -3125,6 +3138,16 @@ ipcMain.on('cue:scroll', (e, ratio) => {
 });
 
 ipcMain.on('cue:peek', (e, url) => { const t = byWC(e.sender); if (t) openPeek(url, t); });
+ipcMain.on('cue:beat', (e, data) => {
+  if (stripOpen && e.sender === followTarget && e.sender === liveContents(byId(activeId)?.view)) sendEvent('track-beat', data);
+});
+ipcMain.on('cue:practice-key', (e, key) => {
+  if (stripOpen && mainWin?.isFocused() && e.sender === practiceTarget && e.sender === liveContents(byId(activeId)?.view)
+      && ['t', 'T', '+', '=', '-'].includes(key)) sendEvent('practice-key', key);
+});
+ipcMain.on('cue:player-changed', (e) => {
+  if (stripOpen && e.sender === liveContents(byId(activeId)?.view)) e.sender.send('cue:music', 'status');
+});
 ipcMain.on('cue:music-state', (e, st) => {
   if (e.sender === liveContents(byId(activeId)?.view)) sendEvent('music-state', st);
 });
@@ -3493,7 +3516,17 @@ function uiCommandRaw(cmd, a = {}) {
     // One click on the AI badge in the sidebar, the same thing the right-click menu does.
     case 'ai-tab': { const x = byId(a.id); if (x && !x.agent && x.identity !== 'vanish' && !x.private) { x.aiAllowed = !x.aiAllowed; pushState(); persist(); } break; }
     case 'ai-ask': askAboutPage(a.which); break;
-    case 'strip': stripOpen = !stripOpen; layout(); pushState(); break;
+    case 'strip-height': {
+      const height = Number(a.height);
+      if (stripOpen && Number.isInteger(height) && height >= 44 && height <= 600 && height !== stripHeight) {
+        stripHeight = height; layout();
+      }
+      break;
+    }
+    case 'follow-track': followPlayer(stripOpen && settings().kits.music && a.on ? wc : null); break;
+    case 'practice-hover':
+      setPracticeTarget(wc, stripOpen && settings().kits.music && ['tempo', 'transpose'].includes(a.zone) ? a.zone : ''); break;
+    case 'strip': stripOpen = !stripOpen; if (!stripOpen) setPracticeTarget(null, ''); layout(); pushState(); break;
     case 'music': if (wc) wc.send('cue:music', a.op, a.value); break;
     case 'tool': runTool(a.name, t); break;
     case 'open-page': openCuePage(a.page, openFolder()); break;
@@ -4389,7 +4422,7 @@ async function runTool(name, t) {
       sendEvent(recTabId ? 'rec-stop' : 'rec-start');
     } else if (name === 'mark') {
       const s = await wc.executeJavaScript(tools.VIDEO_TIME, true);
-      if (s == null) { sendEvent('toast', 'No video on this page.'); return; }
+      if (s == null) { sendEvent('toast', 'Play audio or video on this page to mark its time.'); return; }
       const whole = Math.floor(s);
       const yt = t.url.match(/(?:v=|youtu\.be\/|shorts\/)([\w-]{11})/);
       t.marks.push(yt ? `${tools.stamp(whole)} https://youtu.be/${yt[1]}?t=${whole}` : `${tools.stamp(whole)} ${t.url}`);
@@ -4397,11 +4430,18 @@ async function runTool(name, t) {
       sendEvent('toast', `Marked ${tools.stamp(whole)}. All ${t.marks.length} copied.`);
     } else if (name === 'frame') {
       const g = await wc.executeJavaScript(tools.GRAB_FRAME, true);
-      if (!g) { sendEvent('toast', 'No video on this page.'); return; }
+      if (!g || g.error) { sendEvent('toast', g?.error || 'Play a video on this page to grab its frame.'); return; }
       const png = g.png ? Buffer.from(g.png.split(',')[1], 'base64') : (await wc.capturePage(g.rect)).toPNG();
       const file = capture.nameFor(`Frame ${tools.stamp(g.time)} ${t.title}`, 'png');
-      fs.writeFileSync(file, png);
-      sendEvent('toast', 'Frame saved in Cue Captures.'); capture.reveal(file);
+      let destination = file;
+      for (let take = 2; ; take++) {
+        try { fs.writeFileSync(destination, png, { flag: 'wx' }); break; }
+        catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          destination = file.slice(0, -4) + ' (' + take + ').png';
+        }
+      }
+      sendEvent('toast', 'Frame saved in Cue Captures.'); capture.reveal(destination);
     }
   } catch (e) { sendEvent('toast', 'That tool could not run on this page.'); console.error(name, e.message); }
 }

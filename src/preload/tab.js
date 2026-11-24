@@ -166,6 +166,13 @@ function install(init) {
     if (!e || e.currentSrc !== loop.source) { clearLoop(); return; }
     if (!e.paused && e.currentTime >= loop.b) e.currentTime = loop.a;
   };
+  const loopEnded = (event) => {
+    const e = event.target;
+    if (!loop.on || e !== loop.player || e.currentSrc !== loop.source) return;
+    e.currentTime = loop.a;
+    e.play().catch(() => clearLoop());
+  };
+  document.addEventListener('ended', loopEnded, true);
   const shifters = new WeakMap();
   // Two crossfaded read heads over a short delay line: steady pitch, tempo untouched.
   const makeShifter = (src) => {
@@ -176,7 +183,7 @@ function install(init) {
     const size = 8192; const grain = 3072;
     const buf = [new Float32Array(size), new Float32Array(size)];
     let w = 0; let phase = 0;
-    const s = { ratio: 1 };
+    const s = { ratio: 1, output };
     node.onaudioprocess = (ev) => {
       const n = ev.inputBuffer.length;
       for (let ch = 0; ch < 2; ch++) {
@@ -230,7 +237,7 @@ function install(init) {
         shifter?.setPitch(pitch);
       }
     } else if (['speed', 'a', 'b', 'loop'].includes(op)) error = 'This live instrument has no playback timeline.';
-    return { speed: 1, semis: shifters.get(buses[0])?.semis || 0, error };
+    return { synth: true, speed: 1, semis: shifters.get(buses[0])?.semis || 0, error };
   }
 
   // Some public previews allow anonymous CORS but their player never requests
@@ -278,11 +285,112 @@ function install(init) {
     });
   }
 
+  // Listen only after the operator asks to sync. The spectral envelope stays
+  // on this device. Detection never asks for a microphone or a desktop source.
+  let followWake = null, followTimer = null, listening = null, snapshot = '', lastReport = 0;
+  function reportBeat(value) {
+    document.dispatchEvent(new CustomEvent(init.key + 'beat', { detail: JSON.stringify(value) }));
+  }
+  function detachListener() {
+    if (!listening) return;
+    const { source, analyser, stream, ownContext } = listening;
+    try { source?.disconnect(analyser); } catch {}
+    stream?.getTracks().forEach(track => track.stop());
+    if (ownContext) ownContext.close().catch(() => {});
+    listening = null;
+  }
+  function follow(on) {
+    clearTimeout(followTimer); followTimer = null;
+    const wakeEvents = ['play', 'pause', 'seeking', 'seeked', 'ratechange', 'loadeddata', 'emptied', 'ended'];
+    if (followWake) wakeEvents.forEach(name => document.removeEventListener(name, followWake, true));
+    followWake = null;
+    detachListener(); snapshot = ''; lastReport = 0;
+    if (!on) return;
+    let lastMedia, lastUrl, failed = false, state = '', attacks = [];
+    let prevFlux = 0, prevTime = 0, beforeFlux = 0, noise = 0;
+    let lastPosition = null, lastRate = 0;
+    const emit = (kind, e, force = false) => {
+      const now = performance.now();
+      if (!force && kind === state && now - lastReport < 480) return;
+      const reset = kind !== state; state = kind; lastReport = now;
+      reportBeat({ state: kind, session: snapshot, position: e?.currentTime || 0, rate: e?.playbackRate || 1,
+        at: performance.timeOrigin + now, attacks: kind === 'playing' ? attacks : [], reset });
+    };
+    const sample = () => {
+      // Reuse the current player between reports. Rescan when another player
+      // takes over, or when the last player is detached or paused.
+      const e = lastMedia && !lastMedia.paused && lastMedia.isConnected ? lastMedia : main();
+      const url = e?.currentSrc || '';
+      if (e !== lastMedia || url !== lastUrl) {
+        detachListener(); failed = false; attacks = []; noise = prevFlux = beforeFlux = 0;
+        lastPosition = null; state = ''; lastReport = 0;
+        snapshot = String(performance.timeOrigin + performance.now()); lastMedia = e; lastUrl = url;
+      }
+      if (!e) { emit('no-media', null); return; }
+      if (e.mediaKeys || failed) { emit('unavailable', e); return; }
+      if (e.paused || e.ended || e.seeking || e.readyState < 3) {
+        emit('paused', e); lastPosition = null; return;
+      }
+      try {
+        const shifted = shifters.get(e)?.output;
+        if (!listening || shifted !== listening.shifted) {
+          detachListener();
+          const stream = shifted ? null : e.captureStream();
+          const tracks = stream?.getAudioTracks();
+          if (tracks && !tracks.length) { stream.getTracks().forEach(t => t.stop()); failed = true; emit('unavailable', e); return; }
+          const ctx = shifted?.context || new AudioContext();
+          listening = { stream, ownContext: shifted ? null : ctx, shifted };
+          const source = shifted || ctx.createMediaStreamSource(new MediaStream([tracks[0]]));
+          const analyser = ctx.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0;
+          origConnect.call(source, analyser);
+          Object.assign(listening, { source, analyser, bins: new Uint8Array(512), prev: new Uint8Array(512), rate: ctx.sampleRate });
+          ctx.resume().catch(() => {});
+        }
+        const { analyser, bins, prev, rate } = listening;
+        const pos = e.currentTime, speed = e.playbackRate;
+        if (lastPosition == null || pos < lastPosition - .015 || pos - lastPosition > .28 || speed !== lastRate) {
+          attacks = []; prev.fill(0); prevTime = 0; noise = prevFlux = beforeFlux = 0;
+          emit('playing', e, true);
+        }
+        lastPosition = pos; lastRate = speed;
+        analyser.getByteFrequencyData(bins);
+        let low = 0, mid = 0, high = 0;
+        const lowEnd = Math.max(3, Math.round(180 * 1024 / rate)), midEnd = Math.round(1800 * 1024 / rate);
+        const highEnd = Math.min(512, Math.round(8500 * 1024 / rate));
+        for (let i = 1; i < highEnd; i++) {
+          const rise = Math.max(0, bins[i] - prev[i]);
+          if (i < lowEnd) low += rise; else if (i < midEnd) mid += rise; else high += rise;
+        }
+        prev.set(bins);
+        const flux = low/(lowEnd-1) + .7*mid/(midEnd-lowEnd) + .6*high/(highEnd-midEnd);
+        noise += .08*(flux-noise);
+        if (prevTime && prevFlux > beforeFlux && prevFlux >= flux && prevFlux > Math.max(1.5,noise*1.25)) {
+          const hit = { t: prevTime, v: prevFlux };
+          const last = attacks.at(-1);
+          if (!last || hit.t - last.t > .085) attacks.push(hit);
+          else if (hit.v > last.v) attacks[attacks.length-1] = hit;
+        }
+        while (attacks.length && attacks[0].t < pos-12) attacks.shift();
+        beforeFlux = prevFlux; prevFlux = flux; prevTime = pos - speed*.014;
+        emit('playing', e);
+      } catch { detachListener(); failed = true; emit('unavailable', e, true); }
+    };
+    followWake = () => {
+      clearTimeout(followTimer);
+      sample();
+      if (state === 'playing') followTimer = setTimeout(followWake, 18);
+      else if (lastMedia && !lastMedia.paused && !failed) followTimer = setTimeout(followWake, 250);
+    };
+    wakeEvents.forEach(name => document.addEventListener(name, followWake, true));
+    followWake();
+  }
+
   // These are Cue's hooks, not the page's. A website must not be able to un-blur
   // Safe-share, switch its own notifications back on in the middle of a class, or
   // undo the volume you set for its tab, so they sit behind a secret Cue makes
   // fresh for every page and never hands out.
   const api = {
+      follow,
       setHold(on) { held = !!on; },
       setQuiet(on) { quiet = !!on; },
       music(op, v) {
@@ -295,6 +403,11 @@ function install(init) {
         }
         let error;
         if (op === 'reset') { clearLoop(); shifters.get(e)?.setPitch(0); e.preservesPitch = true; e.defaultPlaybackRate = e.playbackRate = 1; }
+        if (op === 'toggle') {
+          if (e.paused) e.play().catch(() => document.dispatchEvent(new CustomEvent(init.key + 'm',
+            { detail: JSON.stringify({ ...api.music('status'), error: 'Start playback in this player.' }) })));
+          else e.pause();
+        }
         if (op === 'speed') { e.preservesPitch = true; e.defaultPlaybackRate = e.playbackRate = Math.max(0.25, Math.min(2, v)); }
         if (['a', 'b', 'loop'].includes(op) && !e.seekable.length) error = 'This player has no seekable passage to loop.';
         else if (op === 'a') { loop.a = e.currentTime; if (loop.b <= loop.a) { loop.b = null; loop.on = false; } }
@@ -321,7 +434,7 @@ function install(init) {
         }
         if (loop.on && !loop.timer) loop.timer = setInterval(checkLoop, 40);
         if (!loop.on && loop.timer) { clearInterval(loop.timer); loop.timer = 0; }
-        return { speed: e.playbackRate, a: loop.a, b: loop.b, loop: loop.on, semis: shifters.get(e)?.semis || 0, error };
+        return { playing: !e.paused && !e.ended, speed: e.playbackRate, a: loop.a, b: loop.b, loop: loop.on, semis: shifters.get(e)?.semis || 0, error };
       },
       setVolume(v) { tabVol = clamp(v); media().forEach(apply); gains.forEach((g) => { g.gain.value = tabVol; }); },
       media(cmd) {
@@ -501,6 +614,32 @@ for (const type of ['play', 'pause']) {
 
 ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
 ipcRenderer.on('cue:quiet', (_e, on) => call('setQuiet', on));
+// The page usually keeps keyboard focus as the pointer crosses the Music bar.
+let practiceZone = '';
+ipcRenderer.on('cue:practice-hover', (_e, zone) => { practiceZone = zone; });
+window.addEventListener('keydown', (e) => {
+  if (!e.isTrusted || !practiceZone || e.metaKey || e.ctrlKey || e.altKey || e.repeat || e.isComposing ||
+      e.composedPath().some(n => n.isContentEditable || n.matches?.('input,textarea,select'))) return;
+  if (practiceZone === 'tempo' ? e.key.toLowerCase() !== 't' : !['+', '=', '-'].includes(e.key)) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  ipcRenderer.send('cue:practice-key', e.key);
+}, true);
+for (const event of ['loadedmetadata', 'play', 'pause', 'ended', 'emptied', 'ratechange']) {
+  window.addEventListener(event, e => { if (e.target instanceof HTMLMediaElement) ipcRenderer.send('cue:player-changed'); }, true);
+}
+ipcRenderer.on('cue:follow', (_e, on) => call('follow', !!on));
+document.addEventListener(KEY + 'beat', e => {
+  if (typeof e.detail !== 'string' || e.detail.length > 24576) return;
+  try {
+    const d = JSON.parse(e.detail);
+    if (!['playing', 'paused', 'no-media', 'unavailable'].includes(d.state) ||
+        typeof d.session !== 'string' || d.session.length > 64 ||
+        ![d.at, d.position, d.rate].every(Number.isFinite) || d.rate <= 0 || d.rate > 16 ||
+        !Array.isArray(d.attacks) || d.attacks.length > 160 ||
+        !d.attacks.every(a => Number.isFinite(a.t) && Number.isFinite(a.v) && a.v > 0)) return;
+    ipcRenderer.send('cue:beat', d);
+  } catch {}
+});
 ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));
 document.addEventListener(`${KEY}m`, e => {
   try { ipcRenderer.send('cue:music-state', JSON.parse(e.detail)); } catch {}

@@ -88,17 +88,21 @@
 </header>
 
 <div id="strip" class="strip" hidden>
-  <span class="st-label">Speed</span><button data-m="speed-">−</button><output id="m-speed">100%</output><button data-m="speed+">+</button>
-  <span class="st-label">Transpose</span><button data-m="semi-">−</button><output id="m-semi">0</output><button data-m="semi+">+</button>
-  <span class="st-label">Loop</span><button data-m="a">Set A</button><button data-m="b">Set B</button><button data-m="loop" id="m-loop">Off</button><button data-m="clear" title="Clear both loop points">Clear</button>
+  <button id="music-transport" disabled title="Playback in the current tab">No media</button>
+  <span class="practice-group music-group"><span class="st-label">Speed</span><button data-m="speed-">−</button><output id="m-speed">100%</output><button data-m="speed+">+</button></span>
+  <span class="practice-group music-group" data-hover="transpose" title="Hover here and press + or − to transpose by one semitone"><span class="st-label">Transpose</span><button data-m="semi-" aria-label="Transpose down one semitone">−</button><output id="m-semi">0</output><button data-m="semi+" aria-label="Transpose up one semitone">+</button></span>
+  <span class="practice-group music-group"><span class="st-label">Loop</span><button data-m="a">Set A</button><button data-m="b">Set B</button><button data-m="loop" id="m-loop">Off</button><button data-m="clear" title="Clear both loop points">Clear</button></span>
   <button data-m="reset" title="Restore original speed and pitch and clear the loop">Reset</button>
-  <span class="metro-controls">
-    <button id="metro-play" aria-pressed="false" title="Start metronome">Metronome</button>
+  <span class="metro-controls" data-hover="tempo">
+    <button id="metro-follow" aria-pressed="false" title="Listen for the beat and sync the click to this track">Sync to track</button>
+    <button id="metro-play" aria-pressed="false" title="Start metronome">▶ Metronome</button>
+    <span id="metro-beats" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span id="metro-mode" hidden></span>
     <input id="metro-bpm" type="number" min="30" max="300" step="1" value="100" aria-label="Metronome tempo in beats per minute">
-    <button id="metro-tap" title="Tap several beats to set the tempo">Tap</button>
+    <button id="metro-tap" title="Click to tap tempo, or hover here and press T on each beat">Tap <kbd>T</kbd></button>
   </span>
-  <span class="st-gap"></span>
-  <button data-t="mark">Mark time</button><button data-t="frame">Grab frame</button>
+  <span class="practice-group frame-controls">
+  <button data-t="mark" title="Copy the current timestamp and page link">Mark time</button><button data-t="frame" title="Save the current video frame as a PNG in Downloads → Cue Captures">Grab frame</button></span>
 </div>
 <div id="aihead" class="aihead" hidden>
   <button data-ai="claudecode">Claude Code</button><button data-ai="codex">Codex</button>
@@ -117,6 +121,7 @@
 <div id="suggest" class="suggest" hidden></div>
 <div id="modal" class="modal" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="beat-grid.js"></script>
 <script src="metronome.js"></script>
 <script src="ui.js"></script>
 </body>

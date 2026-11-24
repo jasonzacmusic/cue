@@ -203,7 +203,7 @@ body.overlay #content { background: transparent; }
 .strip output { min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
 .st-label { color: var(--muted); margin-left: 10px; }
 .st-label:first-child { margin-left: 0; }
-.st-gap { flex: 1; }
+.frame-controls { margin-left: auto; }
 .aihead { position: fixed; top: var(--bar-h); right: 0; width: var(--ai-w); height: 38px; background: var(--side); border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 4px; padding: 0 6px; z-index: 3; }
 .aihead [data-ai] { border: 0; background: transparent; padding: 4px 9px; border-radius: 6px; cursor: pointer; color: var(--muted); }
 .aihead [data-ai].on { background: var(--raised); color: var(--ink); font-weight: 600; }
@@ -757,9 +757,18 @@ body.rail .recent-tabs { display: none; }
 #activity.on-air:hover, #activity[aria-expanded="true"] { background: #603037; }
 #mastermute[aria-pressed="true"] { background: var(--onair-wash); color: var(--onair); }
 #mastermute svg, #copyshot svg { width: 16px; height: 16px; }
-.strip { overflow-x: auto; white-space: nowrap; }
+.strip { flex-wrap: wrap; height: auto; min-height: 44px; max-height: 40vh; overflow: auto; white-space: nowrap; padding: 5px 9px; row-gap: 4px; box-sizing: border-box; }
 .strip > * { flex-shrink: 0; }
 .metro-controls { display: inline-flex; align-items: center; gap: 4px; border-left: 1px solid var(--line); padding-left: 8px; }
 #metro-bpm { width: 53px; font: inherit; color: var(--ink); border: 1px solid var(--line); background: var(--raised); border-radius: 6px; padding: 4px; }
 #metro-play[aria-pressed="true"] { color: var(--ink); border-color: var(--accent); }
 #livebox > label { margin-bottom: 6px; }
+
+.practice-group, #metro-beats { display: inline-flex; align-items: center; gap: 5px; }
+#metro-beats { gap: 3px; }
+#metro-beats i { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--muted); }
+#metro-beats i:first-child { border-radius: 2px; }
+#metro-beats i.current { background: var(--ink); outline: 1px solid var(--ink); }
+#metro-play[aria-pressed="true"], #music-transport.on { color: var(--cued); background: var(--cued-wash); border-color: var(--cued); }
+#metro-mode, #metro-tap kbd { color: var(--muted); font-size: 11px; }
+#metro-tap kbd { font-family: inherit; }

@@ -66,20 +66,28 @@ const rectAt = (x, y) => `(() => {
 
 // Full-size frame from a playing video. Falls back to its box on screen if the site forbids reading it.
 const GRAB_FRAME = `(() => {
-  const v = [...document.querySelectorAll('video')].sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
+  const v = [...document.querySelectorAll('video')].filter(e => e.readyState >= 2 && e.videoWidth && e.videoHeight)
+    .sort((a, b) => Number(a.paused) - Number(b.paused) || b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight)[0];
   if (!v) return null;
+  if (v.mediaKeys) return { error: 'This player protects its video frames.' };
   const r = v.getBoundingClientRect();
   const rect = { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
   try {
     const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
     return { png: c.toDataURL('image/png'), time: v.currentTime, rect };
-  } catch { return { rect, time: v.currentTime }; }
+  } catch {
+    if (r.width < 1 || r.height < 1 || r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight)
+      return { error: 'Bring the full video into view to grab its frame.' };
+    return { rect, time: v.currentTime };
+  }
 })()`;
 
 const VIDEO_TIME = `(() => {
-  const v = [...document.querySelectorAll('video')].sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
-  return v ? v.currentTime : null;
+  const sources = [...document.querySelectorAll('video,audio')].filter(e => e.readyState > 0);
+  sources.sort((a, b) => Number(a.paused) - Number(b.paused) || Number(a.muted) - Number(b.muted)
+    || (b.videoWidth || 0) - (a.videoWidth || 0));
+  return sources[0]?.currentTime ?? null;
 })()`;
 
 const stamp = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600); const m = Math.floor(s / 60) % 60; const x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };

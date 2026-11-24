@@ -38,7 +38,7 @@ const PAGES = {
   '/oops': `<title>Oops</title><script>console.error('deliberate test error');fetch('/missing.js')</script><img src="http://127.0.0.1:1/x.png">`,
   '/audio': `<title>Audio</title><audio id=a loop src="/tone.wav"></audio><video id=v muted loop src="/tone.wav" style="display:none"></video><script>
     const O=AudioContext.prototype.createGain;AudioContext.prototype.createGain=function(...a){const n=O.apply(this,a);window.__out=n;return n}
-    window.peak=()=>{const n=window.__out;const an=window.__an||(window.__an=(()=>{const x=n.context.createAnalyser();x.fftSize=8192;n.connect(x);return x})());
+    window.peak=()=>{const n=window.__out;const an=window.__an||(window.__an=(()=>{const x=n.context.createAnalyser();x.fftSize=8192;x.smoothingTimeConstant=0;n.connect(x);return x})());
       const d=new Float32Array(an.frequencyBinCount);an.getFloatFrequencyData(d);let b=0;for(let i=1;i<d.length;i++)if(d[i]>d[b])b=i;return b*n.context.sampleRate/an.fftSize}</script>`,
   '/note': `<title>Note</title><p>note</p>`,
   '/fav': `<title>Fav</title><link rel=icon href="/i.png"><p>named icon</p>`,
@@ -461,7 +461,9 @@ module.exports = async function run(c) {
   awc.send('cue:music', 'transpose', -5); await sleep(1000);
   const pm5 = await awc.executeJavaScript('window.peak()');
   check('music: transpose down 5', Math.abs(pm5 - 330) < 20, pm5);
-  awc.send('cue:music', 'speed', 0.8); await sleep(120);
+  awc.send('cue:music', 'speed', 0.8); await sleep(750);
+  const slowPeak = await awc.executeJavaScript('window.peak()');
+  check('music: slowing the transposed tone preserves its measured pitch', Math.abs(slowPeak - 330) < 20, slowPeak);
   awc.send('cue:music', 'reset'); await sleep(600);
   check('music: reset restores the original tempo', await awc.executeJavaScript('document.getElementById("a").playbackRate === 1'));
   const p0 = await awc.executeJavaScript('window.peak()');

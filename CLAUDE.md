@@ -4,6 +4,10 @@ Cue is Nathaniel School of Music's free, open-source browser, built on Electron 
 Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
 `AGENTS.md` points here so Codex reads the same file.
 
+## 0.7.15 — Sync the practice click to a track
+
+Open the Music bar and choose Sync to track while a song is playing. Cue listens locally to the current player and starts the click when it finds a steady pulse. Pausing or seeking the track also pauses or repositions the click. Tempo and transpose are independent. Live mode and master mute keep the practice click visual. Hover over Tap and press T for manual tempo, or hover over Transpose and press + or −. Mark time copies the timestamp and link. Grab frame saves a PNG for supported video.
+
 ## 0.7.14 — Stage privacy, practice tools and folder locking
 
 Queue cuts preserve the private tab in front. Only the staged tab can play browser audio during a live queue. The rig uses the Stage window plus the original bottom-right masked DSLR and ring. OBS waits for the exact Stage window before binding its capture. Vanish waits for the previous private session to clear before opening its address bar and page. Historical site alerts with no recorded permission remain available in history and are excluded from the unread badge. First-time Lock now opens passcode setup for that folder. Music adds tap tempo, reset and a browser-wide mute. Screenshots can copy the page, viewport, selected area or section to the clipboard.
