@@ -45,3 +45,19 @@ test('stale, whole-app, hidden and mixed captures cannot select the queue scene'
   await r.obs.selectQueueStage(81, () => false);
   assert.deepEqual(r.switches, []);
 });
+
+test('wait for the exact Stage window before rebinding, and keep an existing stream on subsequent cuts', async () => {
+  const obs = new OBS();
+  let settings = { application: 'com.jasonzac.cue', type: 1, window: 12 };
+  const writes = [];
+  obs.settings = async () => settings;
+  obs.setSettings = async (_, next) => { writes.push(next); settings = next; return { requestStatus: { result: true } }; };
+  let attempts = 0;
+  obs.propertyItems = async () => ++attempts === 1
+    ? [{ itemValue: 81, itemName: '[Cue] Personal' }]
+    : [{ itemValue: 81, itemName: '[Cue] Cue Stage — On Air' }];
+  await obs.bindQueueStage(81, () => true);
+  await obs.bindQueueStage(81, () => true);
+  assert.equal(attempts, 3);
+  assert.deepEqual(writes, [{ type: 1, window: 81, application: 'com.jasonzac.cue', show_cursor: false }]);
+});

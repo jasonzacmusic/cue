@@ -2438,7 +2438,7 @@ function openStage() {
   // It opens behind him, not over him. The Stage is what OBS and Zoom capture;
   // he carries on working in Cue's own window and never has to put it back.
   stageWin.showInactive();
-  stageStandby = new WebContentsView({ webPreferences: { contextIsolation: true, sandbox: true } });
+  stageStandby = new WebContentsView({ webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   stageWin.contentView.addChildView(stageStandby);
   stageStandby.webContents.loadFile(STAGE_HTML);
   stageWin.on('resize', layout);
@@ -2463,20 +2463,27 @@ async function obsAimAtStage() {
   const stage = stageWin;
   const window = stageWindowId();
   if (!window) return;
+  const current = () => stage === stageWin && !stage.isDestroyed();
+  if (queueMode) {
+    // The browser button and the pedal have separate entry points. Exactly one
+    // owns binding the OBS source for each entry into Live.
+    if (!requestedQueueScene) return;
+    requestedQueueScene = false;
+    try {
+      await obs.bindQueueStage(window, () => current() && queueMode);
+      if (current() && queueMode) await obs.selectQueueStage(window, () => current() && queueMode);
+    } catch (error) { sendEvent('toast', error.message); }
+    return;
+  }
   const names = await obs.inputs('screen_capture');
   for (const name of names) {
-    if (stage !== stageWin || stage.isDestroyed()) return;
+    if (!current() || queueMode) return;
     const was = await obs.settings(name);
     if (was?.application !== 'com.jasonzac.cue' || /retired/i.test(name)) continue;
     if (was.type === 1 && Number(was.window) === window) continue;
-    if (stage !== stageWin || stage.isDestroyed()) return;
-    const response = await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
-    if (!response?.requestStatus?.result) sendEvent('toast', 'Check the Cue Stage window source in OBS.');
-  }
-  if (requestedQueueScene && queueMode && stage === stageWin && !stage.isDestroyed()) {
-    requestedQueueScene = false;
-    await obs.selectQueueStage(window, () => queueMode && stage === stageWin && !stage.isDestroyed())
-      .catch((error) => sendEvent('toast', error.message));
+    if (await obs.waitForStageWindow(name, window, () => current() && !queueMode)) {
+      await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
+    }
   }
 }
 
@@ -2732,36 +2739,27 @@ function take(id) {
   cueNextId = at >= 0 ? (list[(at + 1) % list.length] || {}).id || null : (list[0] || {}).id || null;
   cueWake();
   layout(); pushState();
-  if (queueMode && process.platform === 'darwin') verifyStageCut(next, stageWin);
+  if (queueMode && process.platform === 'darwin') presentStageCut(next, stageWin);
   sendEvent('toast', `${next.title} is on air${next.obsScene ? ` · OBS: ${next.obsScene}` : ''}.`);
 }
 
-// Sample once per cut. An occluded macOS window can report its old frame
-// even with healthy capture dimensions. The samples stay in memory.
-async function verifyStageCut(tab, stage) {
-  const wc = liveContents(tab.view);
-  const current = () => queueMode && programId === tab.id && stageWin === stage && !stage.isDestroyed() && !wc.isDestroyed();
-  if (!wc) return;
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    if (!current()) return;
-    const image = await wc.capturePage(undefined, { stayAwake: true });
-    if (image.isEmpty() || !current() || obs.status !== 'connected') return;
-    const source = 'Cue Live Queue Stage';
-    const settings = await obs.settings(source);
-    if (!current() || settings?.application !== 'com.jasonzac.cue' || settings.type !== 1 || Number(settings.window) !== stageWindowId()) return;
-    const reply = await obs.request('GetSourceScreenshot', { sourceName: source, imageFormat: 'png', imageWidth: 48, imageHeight: 27 });
-    if (!current() || !reply?.responseData?.imageData) return;
-    const reference = image.resize({ width: 48, height: 27 }).toBitmap();
-    const observed = require('electron').nativeImage.createFromDataURL(reply.responseData.imageData).toBitmap();
-    if (reference.length !== observed.length) return;
-    let difference = 0;
-    for (let i = 0; i < reference.length; i += 4) difference += Math.abs(reference[i + 1] - observed[i + 1]);
-    if (difference * 4 / reference.length < 24) return;
-    await obs.setSettings(source, { show_cursor: true });
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    if (stageWin === stage) await obs.setSettings(source, { show_cursor: false });
-  } catch { /* The stage can close during a cut. */ }
+// AppKit can leave a newly attached, fully occluded view with its initial
+// white backing surface. Order the Stage once to commit the new view, then
+// put the operator's window back above it without changing keyboard focus.
+function presentStageCut(tab, stage) {
+  if (!stage || stage.isDestroyed()) return;
+  const operator = BaseWindow.getFocusedWindow();
+  stage.moveTop();
+  const restore = () => {
+    if (stageWin !== stage || stage.isDestroyed() || programId !== tab.id) return;
+    if (operator && operator !== stage && !operator.isDestroyed() && operator.isFocused()) {
+      operator.moveAbove(stage.getMediaSourceId());
+    } else if (!operator && mainWin && !mainWin.isDestroyed() && !mainWin.isMinimized()) {
+      stage.moveAbove(mainWin.getMediaSourceId());
+      mainWin.moveAbove(stage.getMediaSourceId());
+    }
+  };
+  setTimeout(restore, 75);
 }
 
 function popOut(t) {

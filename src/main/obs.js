@@ -62,6 +62,25 @@ class OBS {
     return this.request('SetCurrentProgramScene', { sceneName });
   }
 
+  async waitForStageWindow(source, window, stillLive) {
+    for (let attempt = 0; attempt < 25 && stillLive(); attempt++) {
+      const options = await this.propertyItems(source, 'window');
+      if (options.some((w) => Number(w.itemValue) === window && w.itemName.includes('Cue Stage'))) return stillLive();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return false;
+  }
+
+  async bindQueueStage(window, stillLive) {
+    const source = 'Cue Live Queue Stage';
+    const previous = await this.settings(source);
+    if (!previous) return;
+    if (!await this.waitForStageWindow(source, window, stillLive)) throw new Error('OBS cannot see the Cue Stage window yet.');
+    if (previous.application === 'com.jasonzac.cue' && previous.type === 1 && Number(previous.window) === window) return;
+    const result = await this.setSettings(source, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
+    if (!result?.requestStatus?.result) throw new Error('OBS could not connect to Cue Stage.');
+  }
+
   // This scene belongs to the class rig. A modified scene must never expose a
   // second picture, and a stale capture must never be sent to the audience.
   async selectQueueStage(window, stillLive) {
@@ -78,22 +97,13 @@ class OBS {
       throw new Error('Check the sources in the OBS Cue Live Queue scene.');
     }
     const target = { sceneName, sceneItemId: stage.sceneItemId };
-    // ScreenCaptureKit can accept the new window ID before its window list catches up.
-    // Resending identical settings is ignored by OBS. Restart the window stream only,
-    // preserving the window ID, and restore its cursor setting immediately afterward.
-    for (let attempt = 0; attempt < 12; attempt++) {
+    // Updating an active ScreenCaptureKit stream to force a repaint can block
+    // OBS's graphics thread. Once the enumerated window is bound, only observe.
+    for (let attempt = 0; attempt < 25; attempt++) {
       if (!stillLive()) return;
       const size = (await this.request('GetSceneItemTransform', target))?.responseData?.sceneItemTransform;
       if (size?.sourceWidth > 0 && size?.sourceHeight > 0) break;
-      if (attempt === 11) throw new Error('OBS has no frames from Cue Stage. Press the queue pedal to reconnect it.');
-      if (attempt === 2 || attempt === 6) {
-        const windows = await this.propertyItems(source, 'window');
-        if (windows.some((w) => Number(w.itemValue) === window && w.itemName.includes('Cue Stage')) && stillLive()) {
-          await this.setSettings(source, { show_cursor: true });
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          await this.setSettings(source, { show_cursor: false });
-        }
-      }
+      if (attempt === 24) throw new Error('OBS has no frames from Cue Stage.');
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     const studio = (await this.request('GetStudioModeEnabled'))?.responseData?.studioModeEnabled;
