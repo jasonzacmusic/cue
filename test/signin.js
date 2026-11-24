@@ -120,7 +120,7 @@ async function pageIn(ses, url) {
   return win;
 }
 
-module.exports = async ({ app, tabs, openTab, closeTab, internal, sessionFor, setSetting, signinGate, chromeCarry, addFolder, userFolders }) => {
+module.exports = async ({ app, tabs, openTab, closeTab, internal, sessionFor, setSetting, chromeCarry, addFolder, userFolders }) => {
   // A second folder, as on a two-folder install: a fresh Cue starts with one.
   if (!userFolders().some((x) => x.id === 'school')) addFolder({ id: 'school', name: 'School', color: '#C2410C' });
   fs.mkdirSync(OUT, { recursive: true });
@@ -175,18 +175,7 @@ module.exports = async ({ app, tabs, openTab, closeTab, internal, sessionFor, se
     check('pop-up: closed itself after handing back (window.close works)', !popupWC || popupWC.isDestroyed(), popupWC ? popupWC.isDestroyed() : null);
     closeTab(t.id);
 
-    // ------------------------------------------------ 3. the refusal gate cannot spin
-    if (signinGate) {
-      const g = signinGate();
-      const folder = `f${crypto.randomBytes(3).toString('hex')}`;
-      const t0 = 1e12;
-      check('refusal gate: the first refusal in a folder retries automatically', g.mayRetry(folder, t0) === true);
-      check('refusal gate: a second refusal within 10 minutes does not', g.mayRetry(folder, t0 + 60000) === false);
-      check('refusal gate: another folder is not held back by this one', g.mayRetry(`${folder}x`, t0 + 60000) === true);
-      check('refusal gate: after 10 minutes one more retry is allowed', g.mayRetry(folder, t0 + 10 * 60000 + 1) === true);
-    } else check('refusal gate: handle reachable', false, 'signinGate missing from the harness');
-
-    // Clearing a folder's Google state before signing in, and the address hint only when known.
+    // Choosing an account keeps existing services signed in.
     setSetting('label.school', 'music@nathanielschool.com');
     const ses = sessionFor('school');
     await ses.cookies.set({ url: 'https://accounts.google.com/', name: 'CUE_STALE', value: 'dead', secure: true }).catch(() => {});
@@ -196,7 +185,7 @@ module.exports = async ({ app, tabs, openTab, closeTab, internal, sessionFor, se
       const r = await internal['signin.google']({ identity: 'school' });
       const after = (await ses.cookies.get({})).filter((c) => /CUE_STALE/.test(c.name)).length;
       const kept = (await sessionFor('personal').cookies.get({ name: 'CUE_KEEP' })).length;
-      check('signing in empties ONLY that folder’s Google jar', after === 0 && kept === 1, { after, keptInOtherFolder: kept, cleared: r && r.cleared });
+      check('signing in preserves both folders’ existing Google sessions', after === 2 && kept === 1, { after, keptInOtherFolder: kept, cleared: r && r.cleared });
       const gTab = await until(() => tabs.filter((x) => /accounts\.google\.com/.test(x.url || '')).pop());
       check('it arrives as the folder’s own address', gTab && /Email=/.test(gTab.url), gTab && gTab.url);
       if (gTab) closeTab(gTab.id);
@@ -292,22 +281,11 @@ module.exports = async ({ app, tabs, openTab, closeTab, internal, sessionFor, se
     }
     identity.tap(null);
 
-    // Google's refusal address, for real, in a folder tab: one automatic clear-and-retry, then the
-    // help page - never a third go, never a loop.
-    const rj = 'https://accounts.google.com/signin/rejected?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F';
-    await sessionFor('school').cookies.set({ url: 'https://accounts.google.com/', name: 'CUE_DEAD', value: 'x', secure: true }).catch(() => {});
-    const rt = openTab({ url: rj, identity: 'school' });
+    // Google keeps ownership of the refusal page; a rejected OAuth request cannot sign out Gmail.
+    const rt = openTab({ url: 'https://accounts.google.com/signin/rejected', identity: 'school' });
     const rwc = await until(() => rt.view && rt.view.webContents);
-    const retried = await until(() => { const u = rwc.getURL(); return /accounts\.google\.com\/(AccountChooser|v3\/signin|ServiceLogin|signin\/v2)/.test(u) && !/rejected/.test(u) ? u : null; }, 30000);
-    const dead = (await sessionFor('school').cookies.get({ name: 'CUE_DEAD' })).length;
-    check('refusal: the first one clears that folder and retries by itself', !!retried && dead === 0, { url: (retried || rwc.getURL()).slice(0, 110), deadCookieLeft: dead });
-    rwc.loadURL(rj).catch(() => {});
-    const help = await until(() => (rwc.getURL().startsWith('cue://signin-blocked') ? rwc.getURL() : null), 30000);
-    check('refusal: a second one within 10 minutes shows the help page instead', !!help, rwc.getURL().slice(0, 110));
-    const words = help ? await rwc.executeJavaScript('document.body.innerText', true).catch(() => '') : '';
-    check('help page: plain words, what to try, no blame, never "Google rejects Cue"', /date and time/i.test(words) && /try again/i.test(words) && /different Google account/i.test(words) && !/reject|not secure|Cue is|your fault/i.test(words), words.replace(/\s+/g, ' ').slice(0, 160));
-    await sleep(3000);
-    check('refusal: no third automatic attempt', rwc.getURL().startsWith('cue://signin-blocked'), rwc.getURL().slice(0, 80));
+    await until(() => !rwc.isLoading() && rwc.getURL().startsWith('https://accounts.google.com/'));
+    check('refusal leaves existing sessions intact', (await ses.cookies.get({ name: 'CUE_STALE' })).length === 1);
     closeTab(rt.id);
 
     // ------------------------------------------------ 5. WhatsApp in three partitions

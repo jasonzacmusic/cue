@@ -332,9 +332,9 @@ module.exports = async function run(c) {
 
   // Links from other apps, when switched on.
   c.setSetting('linksJustForNow', true);
-  const link = c.openFromApp(page('from another app')); await sleep(100);
+  const link = c.openFromApp('http://127.0.0.1/from-another-app'); await sleep(100);
   c.setSetting('linksJustForNow', false);
-  const link2 = c.openFromApp(page('from another app, off')); await sleep(100);
+  const link2 = c.openFromApp('http://127.0.0.1/from-another-app-off'); await sleep(100);
   check('temp: "links from other apps start in Just for now" works, and is off by default', link.temp && !link2.temp);
   c.closeTab(link.id); c.closeTab(link2.id);
 

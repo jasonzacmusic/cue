@@ -1354,7 +1354,6 @@ const quickKeys = (folder) => quickKeysFor(isFolder(folder) ? folder : openFolde
 
 // Where Google lands you when it refuses the browser: "Couldn't sign you in. This browser or app
 // may not be secure."
-const GOOGLE_REFUSED = /^https:\/\/accounts\.google\.[a-z.]+\/.*(signin\/rejected|deniedsigninrejected)/i;
 
 // Not a refusal. Gmail answers this when the account slot in the address does not
 // match what the cookie jar holds - the sign-in was fine, the address was not.
@@ -1371,10 +1370,6 @@ const GOOGLE_LOGIN_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|google
 // of the ad ones, reached the password step every time. Sign-in starts from an empty jar or
 // it does not start.
 const GOOGLE_WIPE_HOST = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|googleusercontent\.com|googleadservices\.com|googlesyndication\.com|googletagmanager\.com|google-analytics\.com|doubleclick\.net|withgoogle\.com|googleapis\.com)$/i;
-
-// Where a Google sign-in lives, and the pages that keep their own copy of it.
-const GOOGLE_ORIGINS = ['https://accounts.google.com', 'https://mail.google.com', 'https://www.google.com',
-  'https://drive.google.com', 'https://calendar.google.com', 'https://www.youtube.com'];
 
 // The same, for Meta. Instagram, Facebook and Threads share one sign-in, so they
 // come over together or not at all: carrying Instagram alone leaves Facebook
@@ -1491,34 +1486,10 @@ async function carryAllFromChrome(identity) {
   return out;
 }
 
-// Google's own sign-in page, in the folder that asked, with the folder's address already filled in
-// so he never lands on the wrong account's inbox.
-// Empties a folder's Google jar. On 2-Nov-2026 both folders were left holding ~128 cookies from
-// the revoked Chrome carry, and that dead jar - not the browser - is what Google answers
-// "signin/rejected" and "CookieMismatch" to. Proved by probe: a FRESH Electron session reaches
-// "Enter your password" under a Chrome, Firefox or Safari identity alike, so Google has no quarrel
-// with Cue's engine. Signing in always starts from an empty jar.
-async function clearGoogleState(identity) {
-  if (isLocked(identity)) throw new Error(`${folderName(identity)} is locked. Type its passcode first.`);
-  const ses = sessionFor(identity);
-  const host = (c) => String(c.domain || '').replace(/^\./, '');
-  let cleared = 0;
-  for (const c of await ses.cookies.get({})) {
-    if (!GOOGLE_WIPE_HOST.test(host(c))) continue;
-    try { await ses.cookies.remove(cookieUrl(c), c.name); cleared++; } catch { /* one stubborn cookie never stops the rest */ }
-  }
-  for (const origin of GOOGLE_ORIGINS) {
-    await ses.clearStorageData({ origin, storages: ['localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }).catch(() => {});
-  }
-  await ses.cookies.flushStore();
-  return cleared;
-}
-
-// Google's own sign-in page, in the folder that asked, with the folder's address already filled in
-// so he never lands on the wrong account's inbox - and with that folder's stale Google state
-// cleared first, or Google refuses before he can type anything.
+// Open Google's account chooser in this folder, preserving its signed-in services.
 async function googleSignIn(identity, { otherAccount = false } = {}) {
-  const cleared = await clearGoogleState(identity).catch(() => 0);
+  if (isLocked(identity)) throw new Error('Unlock this folder first.');
+  const cleared = 0;
   const tab = await openTab({ url: googleSignInUrl(identity, '', { otherAccount }), identity });
   return { tab, cleared };
 }
@@ -1527,10 +1498,8 @@ async function signInAgain(t, sender, otherAccount) {
   const identity = t ? t.identity : (sender && popupIdentity.get(sender));
   if (!identity) return { error: 'Close this page and start the sign-in again from the site.' };
   if (isLocked(identity)) return { error: `${folderName(identity)} is locked. Type its passcode first.` };
-  // A press of the button is the person asking, so it is not held to the ten-minute rule.
-  signinGate.forget(identity);
   if (t) { const { cleared } = await googleSignIn(identity, { otherAccount }); return { signin: true, cleared }; }
-  const cleared = await clearGoogleState(identity).catch(() => 0);
+  const cleared = 0;
   sender.loadURL(googleSignInUrl(identity, '', { otherAccount })).catch(() => {});
   return { signin: true, cleared };
 }
@@ -1563,13 +1532,19 @@ function googleSignInUrl(identity, cont = '', { otherAccount = false } = {}) {
 // meaning anything. ?authuser=<address> is Google's own answer to that, and it
 // works across Gmail, Calendar, Drive and YouTube alike. Note that the address
 // does NOT go in the path: /mail/u/<address>/ answers 404.
-const GOOGLE_PER_ACCOUNT = /^(mail|calendar|drive|docs|contacts|photos|keep|groups)\.google\.[a-z.]+$|^(www|studio|music)\.youtube\.[a-z.]+$/i;
+const GOOGLE_PER_ACCOUNT = /^(?:(?:mail|calendar|drive|docs|contacts|photos|keep|groups|console\.cloud)\.google\.com|(?:www|studio|music)\.youtube\.com)$/i;
+function orderedGroups(folder) {
+  const groups = groupList();
+  const order = Array.isArray(folder?.groupOrder) ? folder.groupOrder : [];
+  const rank = (id) => order.includes(id) ? order.indexOf(id) : order.length;
+  return groups.sort((a, b) => rank(a.id) - rank(b.id));
+}
 function googleForFolder(url, identity) {
   const who = emailOf(identity);
   if (!who || !/@/.test(who)) return url;
   try {
     const u = new URL(url);
-    if (!GOOGLE_PER_ACCOUNT.test(u.hostname)) return url;
+    if (u.protocol !== 'https:' || !GOOGLE_PER_ACCOUNT.test(u.hostname)) return url;
     if (u.searchParams.has('authuser')) return url;        // he named one himself
     if (/^\/mail\/u\/\d+\//.test(u.pathname)) return url;  // so did this
     u.searchParams.set('authuser', who);
@@ -1687,68 +1662,19 @@ function protectPage(wc, t, note) {
   wc.on('did-finish-load', () => { t.httpsFrom = null; });
 }
 
-// ---------------------------------------------------------------- Google's refusals, without a dead end
-// Google can answer a sign-in with "signin/rejected" ("This browser or app may not be secure") or
-// CookieMismatch. Probed again and again, the cause is the folder's own leftover Google state, not
-// the browser - so the cure is to empty ONLY that folder's Google jar and try again. Cue does that
-// once by itself, in any folder, with or without an address on file. If Google answers the same
-// way again within ten minutes, Cue does not try a third time (that is how a loop starts) and shows
-// cue://signin-blocked instead, which says in plain words what to try next.
-const RETRY_EVERY = 10 * 60 * 1000;
-function makeSigninGate(windowMs = RETRY_EVERY) {
-  const last = new Map();
-  return {
-    mayRetry(folder, now = Date.now()) {
-      const at = last.get(folder);
-      if (at !== undefined && now - at < windowMs) return false;
-      last.set(folder, now);
-      return true;
-    },
-    forget(folder) { last.delete(folder); },
-  };
-}
-const signinGate = makeSigninGate();
-const GOOGLE_SIGNIN_HOST = /^https:\/\/accounts\.google\.[a-z.]+\//i;
-const NOT_SECURE_WORDS = /this browser or app may not be secure/i;
-
-// Where to send a retry: back to where the sign-in was going (an OAuth pop-up's own continuation
-// included), as long as that is a plain https address.
-function continueOf(u) {
-  try { const c = new URL(u).searchParams.get('continue'); if (c && /^https:\/\//i.test(c)) return c; } catch {}
-  return '';
-}
-
+const GOOGLE_SIGNIN_HOST = /^https:\/\/accounts\.google\.com\//i;
 const signInSite = new WeakMap();
 const popupIdentity = new WeakMap(); // a pop-up's webContents -> the folder it belongs to
 
 function watchGoogleRefusal(wc, getIdentity) {
   let mismatchFixed = false;
-  let busy = false;
-  const refused = async (kind, u) => {
-    const identity = getIdentity();
-    if (identity === 'vanish' || busy || wc.isDestroyed()) return;
-    // CookieMismatch right after a GOOD sign-in is the /u/<n>/ slot pointing at an account this jar
-    // does not hold. With the folder's address on file, naming it outright cures that without
-    // touching a cookie. Once per page, so it cannot become a loop of its own.
-    if (kind === 'mismatch' && !mismatchFixed) {
-      const back = googleForFolder('https://mail.google.com/mail/', identity);
-      if (back !== 'https://mail.google.com/mail/') { mismatchFixed = true; wc.loadURL(back).catch(() => {}); return; }
-    }
-    busy = true;
-    try {
-      if (signinGate.mayRetry(identity)) {
-        const cleared = await clearGoogleState(identity).catch(() => 0);
-        logAgent({ tool: 'signin', note: `google ${kind} in ${identity}: cleared ${cleared}, retrying once` });
-        if (!wc.isDestroyed()) wc.loadURL(googleSignInUrl(identity, continueOf(u))).catch(() => {});
-      } else {
-        logAgent({ tool: 'signin', note: `google ${kind} again in ${identity}: showing the help page` });
-        if (!wc.isDestroyed()) wc.loadURL(`cue://signin-blocked?why=${kind}`).catch(() => {});
-      }
-    } finally { busy = false; }
-  };
   const look = (u) => {
-    if (GOOGLE_REFUSED.test(u)) refused('refused', u);
-    else if (GOOGLE_MISMATCH.test(u)) refused('mismatch', u);
+    const identity = getIdentity();
+    if (identity === 'vanish' || popupIdentity.has(wc)) return;
+    if (!mismatchFixed && GOOGLE_MISMATCH.test(u) && signInSite.get(wc) === 'https://mail.google.com') {
+      mismatchFixed = true;
+      wc.loadURL(googleForFolder('https://mail.google.com/mail/', identity)).catch(() => {});
+    }
     else if (!popupIdentity.has(wc) && /^https:\/\//i.test(u) && !GOOGLE_SIGNIN_HOST.test(u)) {
       const origin = new URL(u).origin;
       signInSite.set(wc, origin === 'https://auth.openai.com' ? 'https://chatgpt.com' : origin);
@@ -1757,13 +1683,7 @@ function watchGoogleRefusal(wc, getIdentity) {
   wc.on('did-navigate', (_e, u) => look(u));
   // Google's sign-in is one page that rewrites itself, so a refusal can arrive without a page load.
   wc.on('did-navigate-in-page', (_e, u, isMain) => { if (isMain) look(u); });
-  // ...and occasionally as words on a page whose address says nothing.
-  wc.on('did-stop-loading', () => {
-    const u = wc.getURL();
-    if (!GOOGLE_SIGNIN_HOST.test(u) || GOOGLE_REFUSED.test(u) || GOOGLE_MISMATCH.test(u)) return;
-    wc.executeJavaScript('document.body ? document.body.innerText.slice(0, 3000) : ""', true)
-      .then((txt) => { if (NOT_SECURE_WORDS.test(txt)) refused('refused', u); }).catch(() => {});
-  });
+
 }
 
 // A "Sign in with Google" (or Apple, Microsoft, Meta) window. It opens in the opener's folder, with
@@ -1809,7 +1729,7 @@ function wireTab(t) {
   protectPage(wc, t, (what) => logTab(t, 'blocked', what));
   wc.on('page-title-updated', (_e, title) => {
     t.title = title; if (t.popout) t.popout.setTitle(`${t.mini ? 'Cue mini' : 'Cue'} \u00b7 ${title}`);
-    if (remembers(t)) lib.in(t.identity).title(wc.getURL(), title);
+    if (remembers(t) && !folderById(t.identity)?.historyOff) lib.in(t.identity).title(wc.getURL(), title);
     t.badge = countIn(t, title);
     pushState(); persist();
   });
@@ -1830,7 +1750,7 @@ function wireTab(t) {
   let lastCode = 200;
   const visit = () => {
     const url = wc.getURL();
-    if (!remembers(t) || !/^https?:/.test(url)) return;
+    if (!remembers(t) || folderById(t.identity)?.historyOff || !/^https?:/.test(url)) return;
     if (lastCode >= 400 || BROKEN_PAGE.test((wc.getTitle() || '').trim())) return;
     lib.in(t.identity).visit(url, wc.getTitle()); // in this folder's history only
   };
@@ -2491,38 +2411,24 @@ function showStandby() { if (stageStandby) stageStandby.setVisible(true); }
 // his existing scenes keep working with no setting up.
 async function obsAimAtStage() {
   if (!stageWin || stageWin.isDestroyed() || obs.status !== 'connected') return;
-  let window = 0;
-  try { window = Number(String(stageWin.getMediaSourceId()).split(':')[1]) || 0; } catch { return; }
+  const stage = stageWin;
+  const window = stageWindowId();
   if (!window) return;
-  let names = [];
-  try { names = await obs.inputs('screen_capture'); } catch { return; }
-  const ours = [];
+  const names = await obs.inputs('screen_capture');
   for (const name of names) {
-    let was = null;
-    try { was = await obs.settings(name); } catch { continue; }
-    if (was && (was.application === 'com.jasonzac.cue' || /\bcue\b/i.test(name))) ours.push({ name, was });
+    if (stage !== stageWin || stage.isDestroyed()) return;
+    const was = await obs.settings(name);
+    if (was?.application !== 'com.jasonzac.cue' || /retired/i.test(name)) continue;
+    if (was.type === 1 && Number(was.window) === window) continue;
+    if (stage !== stageWin || stage.isDestroyed()) return;
+    const response = await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
+    if (!response?.requestStatus?.result) sendEvent('toast', 'Check the Cue Stage window source in OBS.');
   }
-  if (!ours.length) return;
+}
 
-  // Wait until OBS's own list of capturable windows has the Stage in it.
-  // Setting it before that leaves the source dark with "Invalid target window
-  // ID" in the log, and OBS ignores a second attempt with the same numbers, so
-  // guessing at delays never fixed it.
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  let known = false;
-  for (let i = 0; i < 12 && !known; i++) {
-    try { known = (await obs.propertyItems(ours[0].name, 'window')).some((x) => Number(x.itemValue) === window); } catch { return; }
-    if (!known) await wait(700);
-  }
-  if (!known) return;
-
-  for (const { name, was } of ours) {
-    // Unchanged numbers are a no-op to OBS, so land on something else first
-    // when the capture is already pointed here but showing nothing.
-    if (was && was.type === 1 && Number(was.window) === window) await obs.setSettings(name, { window: 0 });
-    await obs.setSettings(name, { type: 1, window, application: 'com.jasonzac.cue', show_cursor: false });
-  }
-  sendEvent('toast', `OBS is showing the Stage only${ours.length > 1 ? ` (${ours.length} sources)` : ''}.`);
+function stageWindowId() {
+  if (!stageWin || stageWin.isDestroyed()) return 0;
+  return Number(stageWin.getMediaSourceId().split(':')[1]) || 0;
 }
 
 // Coming out of a full-screen video used to leave the page in a half-finished
@@ -2574,6 +2480,7 @@ function moveView(t, toWin, host) {
 function setLive(on, stageClosed) {
   if (on === live) return;
   live = on;
+  if (!on) queueMode = false;
   tabs.forEach((t) => liveContents(t.view)?.send('cue:hold', on));
   if (on) {
     heldCount = 0;
@@ -2612,6 +2519,30 @@ let cueNextId = null;
 // asked for a side-by-side stage, which OBS and Zoom then capture as one
 // window with no sidebar and no address bar in it.
 let stageIds = [];
+let queueMode = false;
+const mayShare = (t) => t && !t.private && !t.agent && !['vanish', 'agent'].includes(t.identity) && !isLocked(t.identity);
+
+function showQueue(action) {
+  if (!['enter', 'next', 'status'].includes(action)) throw new Error('Unknown live queue action.');
+  const list = cueTabs().filter(mayShare);
+  if (action !== 'status') {
+    if (action === 'next' && !queueMode) throw new Error('Enter the live queue first.');
+    queueMode = true;
+    if (!live) setLive(true);
+    const at = list.findIndex((t) => t.id === programId);
+    const next = at < 0 ? list[0] : list[(at + Number(action === 'next')) % list.length];
+    if (next) {
+      if (programId !== next.id || stageIds.length !== 1) take(next.id);
+    } else {
+      for (const tab of stageTabs()) {
+        liveContents(tab.view)?.send('cue:safe', false);
+        moveView(tab, mainWin, 'main');
+      }
+      stageIds = []; programId = null; showStandby(); layout(); pushState();
+    }
+  }
+  return { queueMode, window: stageWindowId(), count: list.length, position: list.findIndex((t) => t.id === programId) + 1 };
+}
 const stageTabs = () => stageIds.map(byId).filter((t) => t && t.view && t.host === 'stage');
 const cueTabs = () => cueIds.map(byId).filter((t) => t && !isLocked(t.identity));
 // Every folder a tab can be opened in right now, Vanish last: the menus' "Open as" lists.
@@ -2623,7 +2554,7 @@ function cueWake() {
 }
 function cueAdd(id) {
   const t = byId(id);
-  if (!t || t.private || t.identity === 'vanish') { sendEvent('toast', 'That tab never goes on air.'); return; }
+  if (!mayShare(t)) { sendEvent('toast', 'That tab never goes on air.'); return; }
   if (cueIds.includes(id)) { cueNextId = id; pushState(); return; }
   if (cueIds.length >= CUE_MAX) { sendEvent('toast', `Six is as many as the cue holds. Take one out first.`); return; }
   cueIds.push(id);
@@ -2635,6 +2566,7 @@ function cueAdd(id) {
 function cueRemove(id) {
   cueIds = cueIds.filter((x) => x !== id);
   if (cueNextId === id) cueNextId = cueIds[0] || null;
+  if (queueMode && id === programId) showQueue('enter');
   pushState(); persist();
 }
 function cueMove(id, to) {
@@ -2657,7 +2589,8 @@ function cueStep(d = 1) {
 // notation, say. One is the ordinary stage, so n=1 goes back to a single tab.
 function stageSplit(n) {
   const want = Math.max(1, Math.min(3, n));
-  const list = cueTabs().filter((t) => !t.private).slice(0, want);
+  if (queueMode && want > 1) { sendEvent('toast', 'Live queue shows one app at a time.'); return; }
+  const list = cueTabs().filter(mayShare).slice(0, want);
   if (!list.length) { sendEvent('toast', 'Nothing is cued yet. Drag a tab onto the On-air box first.'); return; }
   if (!live) setLive(true);
   // Anything up there that is not in the new set comes home first.
@@ -2674,7 +2607,7 @@ function stageSplit(n) {
   programId = stageIds[0];
   if (stageStandby) stageStandby.setVisible(false);
   const first = list[0];
-  if (first && first.obsScene) obs.setScene(first.obsScene);
+  if (!queueMode && first && first.obsScene) obs.setScene(first.obsScene);
   // Never leave him looking at a tab that has gone to the stage.
   if (stageIds.includes(activeId)) {
     const other = spaceOrder().find((t) => !stageIds.includes(t.id));
@@ -2696,9 +2629,15 @@ function take(id) {
     ?? activeId;
   const next = byId(pick);
   if (!next) return;
-  if (next.private) { sendEvent('toast', `${next.title} is a private tab. It never goes on air.`); return; }
-  if (next.id === programId) { sendEvent('toast', 'That tab is already on air.'); return; }
+  if (queueMode && !cueIds.includes(next.id)) { sendEvent('toast', 'Add this tab to the live queue first.'); return; }
+  if (!mayShare(next)) { sendEvent('toast', `${next.title} is a private tab. It never goes on air.`); return; }
+  if (next.id === programId && stageIds.length === 1) { sendEvent('toast', 'That tab is already on air.'); return; }
   const prev = byId(programId);
+  for (const tab of stageTabs()) {
+    if (tab === next || tab === prev) continue;
+    liveContents(tab.view)?.send('cue:safe', false);
+    moveView(tab, mainWin, 'main');
+  }
   ensureView(next);
   if (next.host === 'popout' && next.popout) { const w = next.popout; next.popout = null; moveView(next, mainWin, 'main'); w.destroy(); }
   moveView(next, stageWin, 'stage');
@@ -2706,7 +2645,7 @@ function take(id) {
   programId = next.id;
   stageIds = [next.id];
   if (settings().safeShare) next.view.webContents.send('cue:safe', true);
-  if (prev) {
+  if (prev && prev !== next) {
     liveContents(prev.view)?.send('cue:safe', false);
     moveView(prev, mainWin, 'main');
     activeId = prev.id;
@@ -2715,7 +2654,7 @@ function take(id) {
     activeId = other ? other.id : activeId;
     if (other) ensureView(other);
   }
-  if (next.obsScene) obs.setScene(next.obsScene);
+  if (!queueMode && next.obsScene) obs.setScene(next.obsScene);
   // The cue moves on by itself, so TAKE, TAKE, TAKE walks the class in order.
   const list = cueTabs();
   const at = list.findIndex((t) => t.id === next.id);
@@ -2885,7 +2824,16 @@ function tabMenuItems(t) {
     { label: t.mini ? 'Back from the mini player' : 'Mini player (floats while you work)', click: () => miniPlay(t) },
     { label: 'Pop out to its own window (for Zoom and OBS)', enabled: t.host === 'main', click: () => popOut(t) },
     { type: 'separator' },
-    { label: 'Off air: never shown to the class', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private; pushState(); persist(); } },
+    { label: cueIds.includes(t.id) ? 'Remove from live queue' : 'Add to live queue', enabled: mayShare(t), click: () => cueIds.includes(t.id) ? cueRemove(t.id) : cueAdd(t.id) },
+    { label: 'Off air: never shown to the class', type: 'checkbox', checked: t.private, click: () => { t.private = !t.private;
+      if (t.private) {
+        cueRemove(t.id);
+        if (t.host === 'stage') {
+          moveView(t, mainWin, 'main'); liveContents(t.view)?.send('cue:safe', false);
+          stageIds = stageIds.filter((id) => id !== t.id); programId = stageIds[0] || null; layout();
+        }
+      }
+      pushState(); persist(); } },
     { label: 'Let AI agents use this tab', type: 'checkbox', checked: t.aiAllowed || t.agent, enabled: !t.agent, click: () => { t.aiAllowed = !t.aiAllowed; pushState(); persist(); } },
     { label: 'Move to group', submenu: [{ label: 'Automatic', type: 'radio', checked: !t.groupOverride, click: () => { t.groupOverride = null; pushState(); persist(); } }, ...groupList().map((g) => ({ label: g.name, type: 'radio', checked: t.groupOverride === g.id, click: () => { t.groupOverride = g.id; pushState(); persist(); } }))] },
     { type: 'separator' },
@@ -3006,7 +2954,7 @@ function sendState() {
     peek: peek && peek.identity === here ? { title: peek.title, url: peek.url } : null,
     ai: aiView ? { which: aiWhich(), names: AI_NAMES, folder: aiIdentity } : null, strip: stripOpen, recording: recTabId, alertCount: shut ? 0 : alertCount(), billCount: shut ? 0 : billCount(),
     canCarryFromChrome: canCarryFromChrome(),
-    activeId: shut ? null : activeId, programId, live, cue: cueIds.filter((id) => byId(id)), cueNext: cueNextId, stageIds, groups: groupList(),
+    activeId: shut ? null : activeId, programId, live, cue: cueIds.filter((id) => byId(id)), cueNext: cueNextId, stageIds, groups: orderedGroups(folderById(here)),
     identities: faces.identities, labels: shut ? {} : { [here]: emailOf(here) },
     // The top row is the people's folders. The AI agent folder only appears while it still holds
     // tabs from before, because agents work in the folders they are allowed into now.
@@ -3017,7 +2965,7 @@ function sendState() {
     // Settings without anything that belongs to another folder: no account names, and only this
     // folder's own nine number keys.
     settings: { ...s, identityLabels: undefined, presetUndo: undefined, quickKeys: shut ? [] : quickKeysFor(here), sharedPairs: undefined, obs: { ...s.obs, password: s.obs.password ? '••••' : '' } },
-    collapsed: store.data.collapsed, obs: obs.status, downloads: shut ? [] : downloads.filter((d) => d.folder === here).slice(0, 8),
+    recordHistory: !folderById(here)?.historyOff, collapsed: store.data.collapsed, obs: obs.status, downloads: shut ? [] : downloads.filter((d) => d.folder === here).slice(0, 8),
     agent: { port: AGENT_PORT, on: doorOpen, listening: s.agentPort !== false, last: (() => { const l = agentLog[agentLog.length - 1]; return l ? { agent: l.agent, tool: l.tool, ok: l.ok } : null; })(),
       sites: Object.entries(AGENT_SITES).map(([id, v]) => ({ id, name: v.name, what: v.what })) },
     update: updater ? updater.state() : null,
@@ -3030,15 +2978,16 @@ const VANISH_KEYS_SHOWN = vanishKeys.shown();
 
 function sendEvent(name, data) { liveContents(uiView)?.send('ui:event', name, data); }
 
+let activityOpen = false;
 let thumbTimer = null;
 function startThumbs() {
   clearInterval(thumbTimer);
   thumbTimer = setInterval(async () => {
     const p = byId(programId);
-    if (!live || !p || !p.view) return;
+    if (!activityOpen || !live || !p || !p.view) return;
     try {
       const img = await p.view.webContents.capturePage();
-      if (!img.isEmpty()) sendEvent('program-thumb', img.resize({ width: 232 }).toDataURL());
+      if (activityOpen && p.id === programId && !img.isEmpty()) sendEvent('program-thumb', img.resize({ width: 232 }).toDataURL());
     } catch {}
   }, 1500);
 }
@@ -3140,7 +3089,7 @@ function holdOmnibox(t) {
   const until = Date.now() + 1500;
   const hold = () => {
     const ui = liveContents(uiView);
-    if (!ui || Date.now() > until || activeId !== t.id || liveContents(t.view) !== wc) return;
+    if (!ui || vanish.focused() || Date.now() > until || activeId !== t.id || liveContents(t.view) !== wc) return;
     ui.focus();
     sendEvent('refocus-omnibox');
   };
@@ -3273,7 +3222,7 @@ function uiCommandRaw(cmd, a = {}) {
     case 'app-open': openApp(a.url); break;
     case 'close': closeTab(a.id); break;
     case 'new-tab':
-      if (!a.identity && vanish.focused()) { vanish.add(); break; }
+      if (a.identity === 'vanish' || (!a.identity && vanish.focused())) { vanish.add(a.url && !isStart(a.url) ? a.url : undefined); break; }
       { const nt = openTab({ identity: a.identity, url: a.url, after: t && t.space === store.data.space ? t : undefined, focusUi: true, temp: !!a.temp });
         uiView.webContents.focus(); sendEvent('focus-omnibox'); holdOmnibox(nt); }
       break;
@@ -3306,7 +3255,7 @@ function uiCommandRaw(cmd, a = {}) {
     case 'move-tab': moveTab(a); break;
     case 'split': setSplit(a.mode); break;
     case 'split-add': addToSplit(a.id); break;
-    case 'live': setLive(!!a.on); break;
+    case 'live': if (a.on) showQueue('enter'); else setLive(false); break;
     case 'take': take(a.id); break;
     case 'cue-add': cueAdd(Number(a.id)); break;
     case 'cue-remove': cueRemove(Number(a.id)); break;
@@ -3318,6 +3267,18 @@ function uiCommandRaw(cmd, a = {}) {
     case 'popout': popOut(t); break;
     case 'mini': miniPlay(t); break;
     case 'overlay': setOverlay(a.on); break;
+    case 'history-record': { const f = folderById(openFolder()); if (f && !isLocked(f.id)) { f.historyOff = !a.on; store.save(); pushState(); } break; }
+    case 'activity-open': activityOpen = !!a.on; break;
+    case 'group-order': {
+      const f = folderById(openFolder());
+      if (!f || isLocked(f.id) || a.folder !== f.id) break;
+      const order = orderedGroups(f).map((g) => g.id);
+      if (!order.includes(a.group) || !order.includes(a.target) || a.group === a.target) break;
+      order.splice(order.indexOf(a.group), 1);
+      order.splice(order.indexOf(a.target) + (a.after ? 1 : 0), 0, a.group);
+      f.groupOrder = order;
+      store.save(); pushState(); break;
+    }
     case 'collapse': store.data.collapsed[a.group] = !store.data.collapsed[a.group]; store.save(); pushState(); break;
     case 'setting': setSetting(a.key, a.value); break;
     case 'find': if (wc) { if (a.stop || !a.text) wc.stopFindInPage('clearSelection'); else wc.findInPage(a.text, { forward: a.forward !== false, findNext: !!a.next }); } break;
@@ -3428,6 +3389,24 @@ ipcMain.on('ui:cmd', (e, cmd, a = {}) => { if (fromUi(e)) uiCommand(cmd, a); });
 
 ipcMain.handle('ui:invoke', (e, cmd, a = {}) => { if (!fromUi(e)) throw new Error('Not allowed'); return uiInvoke(cmd, a); });
 async function uiInvoke(cmd, a = {}) {
+  if (cmd === 'password-csv') {
+    const identity = openFolder();
+    const available = () => isPerson(identity) && openFolder() === identity && !isLocked(identity);
+    if (!available() || !vault.available()) return { error: 'Unlock this folder and its password vault first.' };
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
+      title: 'Import passwords into ' + folderName(identity), properties: ['openFile'],
+      filters: [{ name: 'Password CSV', extensions: ['csv'] }],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+    try {
+      const file = filePaths[0];
+      if ((await fs.promises.stat(file)).size > 16 * 1024 * 1024) return { error: 'Choose an export smaller than 16 MB.' };
+      const rows = require('./password-csv').passwordRows(await fs.promises.readFile(file, 'utf8'));
+      if (!available()) return { error: 'Reopen the destination folder and try again.' };
+      const count = vault.importMany(identity, rows);
+      return { count, skipped: rows.length - count };
+    } catch (e) { return { error: e.code ? 'Cue could not read or save this import.' : 'Check that your file has URL, Username and Password columns and complete quoted fields.' }; }
+  }
   if (cmd === 'obs-scenes') return obs.scenes();
   if (cmd === 'suggest') { const r = suggestions(a.q); warmUp(r); return r; }
   if (cmd === 'import-find') return findImports();
@@ -4572,6 +4551,7 @@ const agentApi = {
     if (focus) mainWin.show(); else { mainWin.showInactive(); mainWin.moveTop(); }
     return { ok: true };
   },
+  livequeue: (action) => showQueue(action),
   rig: () => ({
     pid: process.pid,
     bundle: 'com.jasonzac.cue',
@@ -4751,7 +4731,7 @@ function buildMenu() {
     },
     ...(kit('teacher') ? [{
       label: 'Live', submenu: [
-        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: mainOnly(() => setLive(!live)) },
+        { label: 'Go Live / End Live', accelerator: 'CmdOrCtrl+Shift+L', click: mainOnly(() => live ? setLive(false) : showQueue('enter')) },
         { label: 'TAKE: Put Cued Tab On Air', accelerator: 'CmdOrCtrl+Enter', click: mainOnly(() => take()) },
         { type: 'separator' },
         { label: 'Cue This Tab', accelerator: 'CmdOrCtrl+Shift+C', click: mainOnly(() => cueAdd(activeId)) },
@@ -5504,7 +5484,7 @@ app.whenReady().then(async () => {
     // Vanish (test/vanish-settings.js)
     runMigrations, vanishMemory: () => ({ dangerOk: [...vanishDangerOk], noHttps: [...VANISH_NO_HTTPS] }),
     // Google sign-in and the Chrome carry (test/signin.js)
-    signinGate: () => signinGate, chromeCarry: () => ({ canCarryFromChrome, chromeProfilesFor }),
+    chromeCarry: () => ({ canCarryFromChrome, chromeProfilesFor }),
     // Settings, Spaces and the two tiers of tabs (test/settings-tabs.js)
     spaceList, spaceCommand, setTemp, clearTemp, sweepTemp, tabMenuItems: (t) => tabMenuItems(t), openFromApp,
     // starting setups, the frozen owner's world and the first-run sheet (test/first-run.js, test/world.js)

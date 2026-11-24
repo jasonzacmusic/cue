@@ -21,12 +21,13 @@
   <div id="pins" class="pins"></div>
   <div id="groups" class="groups"></div>
   <div id="elsewhere" class="elsewhere" hidden></div>
-  <div id="livebox" class="livebox">
+  <div id="livebox" class="livebox" hidden>
+
     <div class="lb-head"><span class="lamp"></span>On air <span id="lb-title" class="lb-title"></span></div>
     <img id="lb-thumb" class="lb-thumb" alt="What students see">
     <div id="lb-cue" class="lb-cue"></div>
     <div id="lb-lay" class="lb-lay" role="group" aria-label="How many tabs on air"></div>
-    <div class="lb-row"><button id="lb-take" class="take">TAKE</button><button id="lb-end" class="btn">End live</button></div>
+    <div class="lb-row"><button id="queue-add" class="btn">Add current tab</button><button id="lb-take" class="take">TAKE</button><button id="lb-end" class="btn">End live</button></div>
   </div>
   <div id="downloads" class="downloads" hidden></div>
   <div id="credbar" class="credbar" hidden></div>
@@ -79,7 +80,8 @@
   <button id="recbtn" class="rec nodrag" hidden>● Stop recording</button>
   <button id="musicbtn" class="icon nodrag" title="Music bar: loop, transpose, speed (⇧⌘M)" aria-label="Music bar">♪</button>
   <button id="aibtn" class="icon nodrag" title="AI side panel (⌘J)" aria-label="AI side panel">✦</button>
-  <label class="live nodrag" title="Live class (⇧⌘L)"><input type="checkbox" id="livetoggle"> Live</label>
+<label class="live nodrag" title="Live class (⇧⌘L)"><input type="checkbox" id="livetoggle"> Live</label>
+  <button id="activity" class="btn nodrag" aria-expanded="false" aria-controls="livebox downloads">Live ▾</button>
   <button id="take" class="take nodrag" title="Put the cued tab on air (⌘↩)" hidden>TAKE</button>
 </header>
 

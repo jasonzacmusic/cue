@@ -210,18 +210,18 @@ function createShield({ dir, fetchImpl, log }) {
       try {
         const headers = tags[list.kind] ? { 'If-None-Match': tags[list.kind] } : {};
         const res = await fetcher(list.url, { headers });
-        reached += 1;
-        if (res.status === 304) continue;          // nothing new; a few hundred bytes spent
+        if (res.status === 304 && danger.size) { reached++; continue; }          // nothing new; a few hundred bytes spent
         if (!res.ok) continue;
         const hosts = parseHosts(await res.text());
         if (!hosts.length) continue;
+        reached++;
         fresh.set(list.kind, hosts);
         nextTags[list.kind] = res.headers.get('etag') || '';
         changed = true;
       } catch (e) { note({ tool: 'shield', error: `${list.kind}: ${e.message}` }); }
     }
     if (!changed) {
-      if (reached) putStamp({ dangerAt: Date.now() });  // asked, nothing new - do not ask again tomorrow
+      if (reached === DANGER_LISTS.length) putStamp({ dangerAt: Date.now() });  // asked, nothing new - do not ask again tomorrow
       return;
     }
     // Each list replaces only its own hosts. A list that answered 304, or that
@@ -230,7 +230,7 @@ function createShield({ dir, fetchImpl, log }) {
     for (const [host, kind] of danger) if (!fresh.has(kind)) got.set(host, kind);
     for (const [kind, hosts] of fresh) for (const h of hosts) got.set(h, kind);
     danger = got;
-    putStamp({ dangerAt: Date.now(), dangerTags: nextTags });
+    putStamp({ ...(reached === DANGER_LISTS.length ? { dangerAt: Date.now() } : {}), dangerTags: nextTags });
     try {
       fs.writeFileSync(dangerPath, [...danger].map(([h, k]) => `${h}\t${k}`).join('\n'));
     } catch (e) { note({ tool: 'shield', error: e.message }); }

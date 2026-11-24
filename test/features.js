@@ -104,6 +104,19 @@ module.exports = async function run(c) {
   c.app.focus({ steal: true }); c.win().setAlwaysOnTop(true); // pictures and clicks need the window in front
   await sleep(1000);
 
+  const ui = (code) => uwc.executeJavaScript(code, true);
+  check('activity starts collapsed', await ui("document.querySelector('#livebox').hidden && document.querySelector('#downloads').hidden"));
+  await ui("document.querySelector('#activity').click()");
+  check('activity shows both panels without going live', await ui("!document.querySelector('#livebox').hidden && !document.querySelector('#downloads').hidden") && !c.getState().live);
+  await ui("document.querySelector('#activity').click()");
+  const csv = require('../src/main/password-csv').passwordRows;
+  const imported = csv('Title,URL,Username,Password,Notes\r\nExample,https://fixture.test/path,reader,"a,b""c",');
+  check('browser export imports into the chosen folder', c.vault.importMany(c.openFolder(), imported) === 1 && c.vault.has(c.openFolder(), 'https://fixture.test', 'reader', 'a,b"c'));
+  c.vault.remove(c.vault.list(c.openFolder()).find((entry) => entry.origin === 'https://fixture.test').id);
+  const who = c.openFolder();
+  c.command('group-order', { folder: who, group: 'watch', target: 'google', after: false });
+  const order = c.userFolders().find((f) => f.id === who).groupOrder;
+  check('Watch and listen moves ahead of Google', order?.indexOf('watch') + 1 === order?.indexOf('google'));
   // ---- spaces
   const startSpace = c.store.data.space;
   const sp1 = c.openTab({ url: `${base}/note?space1` }); await loaded(sp1);

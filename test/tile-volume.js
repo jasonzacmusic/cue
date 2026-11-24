@@ -272,7 +272,7 @@ async function run(c) {
     wheel(p, down, true); await sleep(350);
     check('row: Option-scroll on the row changes it by 5%', vol(other) === 95, vol(other));
     c.sendEvent('volume-pop', { id: other.id }); await sleep(300);
-    check('row: Volume… opens the row\'s own slider', await js(`!!document.querySelector('${rowSel}.vol-open')`));
+    check('row: Volume… focuses the persistent slider for this tab', await js(`!!document.querySelector('${rowSel}.volopen') && document.activeElement.matches('.tv-range')`));
   }
 
   // ---- after sleep, the volume is back the moment it plays

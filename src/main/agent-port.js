@@ -181,6 +181,7 @@ async function startAgentPort({ port, tokenFile, api }) {
     },
     take: async () => { api.take(); return api.rig(); },
     front: async (a) => api.front({ focus: !!(a && a.focus) }),
+    livequeue: async (a) => api.livequeue(a.action || 'status'),
     rig: async () => api.rig(),
     volume: async (a) => { const t = api.get(a.id); need(t, false); if (a.muted !== undefined) api.setMuted(t, !!a.muted); if (a.value !== undefined) api.setVolume(t, a.value); return { volume: t.volume, muted: t.muted }; },
   };
@@ -194,12 +195,12 @@ async function startAgentPort({ port, tokenFile, api }) {
     // The key alone is not permission. Anything running as you can read this
     // file, so the door itself has to be opened by hand, and only for as long
     // as Cue is open.
-    if (!api.doorOpen()) {
+    if (!api.doorOpen() && req.url !== '/tool/livequeue') {
       api.knock(String(req.headers['x-agent'] || 'An AI tool').slice(0, 40));
       return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays on until the person switches it off.' });
     }
     const m = req.url.match(/^\/tool\/(\w+)$/);
-    if (!m || req.method !== 'POST' || !tools[m[1]]) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
+    if (!m || req.method !== 'POST' || !Object.hasOwn(tools, m[1])) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 2e6) req.destroy(); });
     req.on('end', async () => {

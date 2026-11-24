@@ -20,6 +20,7 @@ class OBS {
     try { ws = new WebSocket(`ws://${host}:${port}`); } catch { this.setStatus('off'); return; }
     this.ws = ws;
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.op === 0) { // Hello
         const ident = { rpcVersion: 1 };
@@ -37,8 +38,8 @@ class OBS {
         if (p) { this.pending.delete(msg.d.requestId); p(msg.d); }
       }
     };
-    ws.onclose = () => { this.ready = false; this.setStatus('off'); };
-    ws.onerror = () => { this.ready = false; this.setStatus('off'); };
+    ws.onclose = () => { if (this.ws !== ws) return; this.ready = false; this.setStatus('off'); };
+    ws.onerror = () => { if (this.ws !== ws) return; this.ready = false; this.setStatus('off'); };
   }
 
   close() {

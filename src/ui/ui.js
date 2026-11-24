@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const send = (cmd, args) => window.cue.send(cmd, args);
 let S = null;
 let editingOmni = false;
-let openVolId = null;
+let activityOpen = false;
 
 // A small screen with a smaller screen in its corner: the mini player.
 const MINI = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="1.3" y="3" width="13.4" height="10" rx="1.7"/><rect x="8" y="7.6" width="5.3" height="4" rx="1" fill="currentColor" stroke="none"/></svg>';
@@ -130,12 +130,26 @@ function iconSources(t) {
   return tries.filter(Boolean);
 }
 // An image that quietly tries the next source, and falls back to a letter.
+const iconResults = new Map();
 function iconImg(srcs, onGiveUp) {
   const i = new Image(); i.alt = '';
-  const list = srcs.slice();
-  i.onerror = () => { list.shift(); if (list.length) i.src = list[0]; else { i.remove(); onGiveUp(); } };
-  i.src = list[0];
-  return i;
+  const key = JSON.stringify(srcs);
+  const cached = iconResults.get(key);
+  const list = [...new Set(srcs)];
+  if (cached && Date.now() < cached.until) {
+    if (!cached.url) { i.hidden = true; onGiveUp(); return i; }
+    list.splice(list.indexOf(cached.url), 1); list.unshift(cached.url);
+  }
+  function remember(url) {
+    if (iconResults.size >= 512) iconResults.delete(iconResults.keys().next().value);
+    iconResults.set(key, { url, until: Date.now() + (url ? 3600000 : 60000) });
+  }
+  i.onload = () => remember(list[0]);
+  i.onerror = () => {
+    list.shift();
+    if (list.length) i.src = list[0]; else { remember(null); i.remove(); onGiveUp(); }
+  };
+  i.src = list[0]; return i;
 }
 // A tab is marked only when it is signed in somewhere other than the folder you
 // have open — otherwise every row in the folder carried the same mark.
@@ -182,6 +196,9 @@ const here = (t) => (aiFilter ? !!t.aiHanded : inSpace(t) && inFolder(t));
 // throwing away whatever had been typed. While a name is being edited, the
 // parts that would destroy the box are left alone.
 let editingName = 0;
+let draggingSidebar = false;
+$('#side').addEventListener('dragstart', () => { draggingSidebar = true; });
+document.addEventListener('dragend', () => { if (draggingSidebar) { draggingSidebar = false; render(); } });
 function inlineEdit({ hide, value, place, save, cls = 'rename', max = 60 }) {
   hideTip();
   const inp = el('input', cls);
@@ -208,6 +225,18 @@ function inlineEdit({ hide, value, place, save, cls = 'rename', max = 60 }) {
   inp.focus(); inp.select();
 }
 
+let sidebarSignature = '';
+function sidebarChanged() {
+  // Network counters, navigation progress and toolbar changes do not change a sidebar row.
+  const tabs = S.tabs.map(({ blocked, loading, adsOk, canBack, canFwd, ...row }) => row);
+  const key = JSON.stringify([tabs, S.activeId, S.folder, S.folderInfo, S.identities, S.labels, S.whose,
+    S.folders, S.pickFolders, S.space, S.spaces, S.spaceList, S.groups, S.collapsed, S.split, S.live,
+    S.programId, S.settings.tempClear, S.settings.kits, S.aiCount, S.aiPaused, aiFilter, S.sideWidth]);
+  if (sidebarSignature === key) return false;
+  sidebarSignature = key;
+  return true;
+}
+
 function render() {
   if (!S) return;
   document.body.dataset.live = S.live ? '1' : '';
@@ -216,7 +245,7 @@ function render() {
   document.body.dataset.tint = ((S.spaceList || []).find((x) => x.name === S.space) || {}).tint || 'rose';
   applySide();
   lastSpace = S.space;
-  if (!editingName) { renderSpaces(); renderFolders(); renderAI(); renderPins(); renderGroups(); renderElsewhere(); }
+  if (!editingName && !draggingSidebar && sidebarChanged()) { renderSpaces(); renderFolders(); renderAI(); renderPins(); renderGroups(); renderElsewhere(); if (VP.id != null) refreshVolPop(); }
   renderUpdate();
   renderBar();
   renderContent();
@@ -499,7 +528,7 @@ function renderExtras() {
   $('#openbills').hidden = !k.business;
   $('#openboards').hidden = !k.designer;
   $('#musicbtn').hidden = !k.music && !k.video;
-  document.querySelector('.live').hidden = !k.teacher;
+  document.querySelector('label.live').hidden = !k.teacher;
   document.querySelectorAll('[data-m],.st-label').forEach((x) => { x.hidden = !k.music; });
   ['m-speed', 'm-semi'].forEach((i) => { $(`#${i}`).hidden = !k.music; });
   document.querySelectorAll('[data-t]').forEach((x) => { x.hidden = !k.video; });
@@ -523,8 +552,14 @@ function renderExtras() {
 // to the folder you were in. One app, one place.
 let stripIds = new Set();
 
+const pinNodes = new Map();
+function syncChildren(box, nodes) {
+  const keep = new Set(nodes);
+  for (const child of [...box.children]) if (!keep.has(child)) child.remove();
+  nodes.forEach((node, index) => { if (box.children[index] !== node) box.insertBefore(node, box.children[index] || null); });
+}
 function renderPins() {
-  const box = $('#pins'); box.innerHTML = '';
+  const box = $('#pins'); const nodes = [];
   stripIds = new Set();
   // Dropping a tab on the strip pins it. Everywhere else in the sidebar you can
   // drag a row where you want it, and this row used to be the one place you
@@ -557,6 +592,10 @@ function renderPins() {
     if (better(x, byHost.get(key))) byHost.set(key, x);
   }
   for (const t of byHost.values()) {
+    const { blocked, loading, adsOk, canBack, canFwd, lastActive, ...tile } = t;
+    const key = JSON.stringify([tile, S.activeId === t.id, S.programId === t.id, here(t), S.folder, S.identities]);
+    const prev = pinNodes.get(t.id);
+    if (prev?.key === key) { stripIds.add(t.id); nodes.push(prev.node); continue; }
     const p = el('div', 'pin');
     p.draggable = true;
     p.ondragstart = (e) => { e.dataTransfer.setData('text/cue-tab', String(t.id)); p.classList.add('dragging'); };
@@ -620,11 +659,13 @@ function renderPins() {
     p.addEventListener('mouseleave', () => clearTimeout(VP.openT));
     p.addEventListener('mousedown', () => clearTimeout(VP.openT));
     stripIds.add(t.id);
-    box.append(p);
+    pinNodes.set(t.id, { key, node: p }); nodes.push(p);
   }
+  for (const id of pinNodes.keys()) if (!stripIds.has(id)) pinNodes.delete(id);
+  syncChildren(box, nodes);
   // The strip is rebuilt on every state push; the open volume control is not, so
   // it follows the new tile and shows the new level.
-  if (VP.id != null) refreshVolPop();
+
 }
 
 // ---------------------------------------------------------------- volume on the pinned apps
@@ -678,7 +719,7 @@ document.body.append(vpEl);
 const vpSpk = vpEl.querySelector('.tv-spk'); const vpRange = vpEl.querySelector('.tv-range');
 const vpPct = vpEl.querySelector('.tv-pct'); const vpReset = vpEl.querySelector('.tv-reset');
 const vpTab = () => S && S.tabs.find((x) => x.id === VP.id);
-const vpTile = () => (VP.id == null ? null : document.querySelector(`.pin[data-id="${VP.id}"]`));
+const vpTile = () => (VP.id == null ? null : document.querySelector(`.pin[data-id="${VP.id}"], .tab[data-id="${VP.id}"]`));
 
 function fillVolPop(t, v = volOf(t)) {
   const n = pctOf(v);
@@ -701,8 +742,8 @@ function placeVolPop() {
   const w = vpEl.offsetWidth;
   const x = Math.max(side.left + 6, Math.min(side.right - w - 6, r.left + r.width / 2 - w / 2));
   vpEl.style.left = `${Math.round(x)}px`;
-  vpEl.style.top = `${Math.round(r.bottom + 6)}px`;
-  document.querySelectorAll('.pin.volopen').forEach((p) => { if (p !== tile) p.classList.remove('volopen'); });
+  vpEl.style.top = `${Math.round(Math.min(r.bottom + 6, innerHeight - vpEl.offsetHeight - 6))}px`;
+  document.querySelectorAll('.volopen').forEach((p) => { if (p !== tile) p.classList.remove('volopen'); });
   tile.classList.add('volopen');
 }
 function openVolPop(id, mode) {
@@ -723,7 +764,7 @@ function closeVolPop() {
   clearTimeout(VP.closeT); clearTimeout(VP.openT); VP.closeT = 0;
   VP.id = null; VP.mode = null; VP.dragging = false;
   vpEl.hidden = true;
-  document.querySelectorAll('.pin.volopen').forEach((p) => p.classList.remove('volopen'));
+  document.querySelectorAll('.volopen').forEach((p) => p.classList.remove('volopen'));
 }
 function refreshVolPop() {
   const t = vpTab();
@@ -767,7 +808,7 @@ document.addEventListener('mousemove', (e) => {
   if (overVol(e.clientX, e.clientY)) { clearTimeout(VP.closeT); VP.closeT = 0; return; }
   // Opened from the menu, the pointer may start anywhere; it closes once it has
   // been in the control and left, or on Esc, or on a click somewhere else.
-  if (VP.mode === 'held' && !VP.entered) return;
+  if (VP.mode === 'held') return;
   closeSoon();
 });
 document.addEventListener('mouseout', (e) => { if (!e.relatedTarget && VP.mode === 'hover') closeSoon(); });
@@ -781,14 +822,36 @@ document.addEventListener('mousedown', (e) => {
 addEventListener('blur', () => { if (VP.id != null && Date.now() - (VP.at || 0) > 400) closeVolPop(); });
 addEventListener('resize', () => { if (VP.id != null) placeVolPop(); });
 
+const groupNodes = new Map();
 function renderGroups() {
   const box = $('#groups');
   const scroll = box.scrollTop;
-  box.innerHTML = '';
+  const next = [];
+  const used = new Set();
   const splitIds = S.split.mode !== 'single' ? S.split.ids : [];
+  const recent = S.tabs.filter((t) => here(t) && !t.agent && !t.temp && !stripIds.has(t.id) && t.id !== S.activeId && /^https?:/.test(t.url))
+    .sort((a, b) => b.lastActive - a.lastActive).slice(0, 3);
+  if (recent.length) {
+    const nav = el('nav', 'recent-tabs');
+    nav.setAttribute('aria-label', 'Recent tabs');
+    nav.append(el('span', '', 'Recent'));
+    for (const t of recent) {
+      const button = el('button', '', esc(shortName(t)));
+      button.title = t.title || t.url;
+      button.onclick = () => send('activate', { id: t.id });
+      nav.append(button);
+    }
+    next.push(nav);
+  }
   for (const g of S.groups) {
     const list = S.tabs.filter((t) => !t.pinned && !t.temp && !stripIds.has(t.id) && t.group === g.id && here(t));
     if (!list.length) continue;
+    const groupKey = JSON.stringify([S.folder, S.space, S.live, list.some((t) => t.id === S.programId) && S.programId,
+      list.some((t) => t.id === S.activeId) && S.activeId, g.name, S.collapsed[g.id], splitIds, S.identities,
+      list.map(({ blocked, loading, adsOk, canBack, canFwd, ...row }) => row)]);
+    used.add(g.id);
+    const previous = groupNodes.get(g.id);
+    if (previous?.key === groupKey) { next.push(previous.node); continue; }
     const wrap = el('section', 'group' + (S.collapsed[g.id] ? ' closed' : ''));
     const head = el('div', 'ghead', `<span class="caret">▾</span>${esc(g.name)}<span class="n">${list.length}</span>`);
     const anyAudio = list.some((t) => t.audible || t.playing);
@@ -797,18 +860,38 @@ function renderGroups() {
       gm.onclick = (e) => { e.stopPropagation(); list.forEach((t) => { if (!t.muted) send('mute', { id: t.id }); }); };
       head.insertBefore(gm, head.querySelector('.n'));
     }
+    head.draggable = true;
+    head.tabIndex = 0;
+    head.setAttribute('role', 'button');
+    head.setAttribute('aria-expanded', String(!S.collapsed[g.id]));
+    head.title = 'Drag to reorder · Option/Alt + ↑ or ↓ to move';
+    head.ondragstart = (e) => e.dataTransfer.setData('text/cue-group', g.id);
+    head.onkeydown = (e) => {
+      if (e.target !== head) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); head.click(); }
+      if (!e.altKey || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+      const target = e.key === 'ArrowUp' ? wrap.previousElementSibling : wrap.nextElementSibling;
+      if (target?.dataset.group) send('group-order', { folder: S.folder, group: g.id, target: target.dataset.group, after: e.key === 'ArrowDown' });
+    };
+    wrap.dataset.group = g.id;
     head.onclick = () => send('collapse', { group: g.id });
     head.ondragover = (e) => { e.preventDefault(); head.classList.add('drop'); };
     head.ondragleave = () => head.classList.remove('drop');
     // Dragging a pinned tab down onto a group takes it off the strip again.
-    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop'); const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id) return; const d = S.tabs.find((x) => x.id === id); if (d && d.pinned) send('pin', { id, on: false }); if (d && d.temp) send('tab-temp', { id, on: false }); send('reorder', { id, group: g.id }); };
+    head.ondrop = (e) => { e.preventDefault(); head.classList.remove('drop');
+      const group = e.dataTransfer.getData('text/cue-group');
+      if (group) { const r = head.getBoundingClientRect(); send('group-order', { folder: S.folder, group, target: g.id, after: e.clientY > r.top + r.height / 2 }); return; }
+      const id = Number(e.dataTransfer.getData('text/cue-tab')); if (!id) return; const d = S.tabs.find((x) => x.id === id); if (d && d.pinned) send('pin', { id, on: false }); if (d && d.temp) send('tab-temp', { id, on: false }); send('reorder', { id, group: g.id }); };
     wrap.append(head);
     const ul = el('div', 'tablist');
     for (const t of list) ul.append(tabRow(t, splitIds));
     wrap.append(ul);
-    box.append(wrap);
+    groupNodes.set(g.id, { key: groupKey, node: wrap }); next.push(wrap);
   }
-  box.append(tempSection(splitIds));
+  next.push(tempSection(splitIds));
+  for (const id of groupNodes.keys()) if (!used.has(id)) groupNodes.delete(id);
+  syncChildren(box, next);
   box.scrollTop = scroll;
 }
 
@@ -920,45 +1003,12 @@ function tabRow(t, splitIds) {
   }
   const hasSound = t.audible || t.muted || t.playing || t.volume < 1;
   const spk = el('button', 'spk' + (t.muted ? ' muted' : t.audible ? ' live' : ''), t.muted ? SPK.off : SPK.on);
-  tip(spk, t.muted ? 'Unmute this tab' : `Volume ${pctOf(volOf(t))}%`, `Click to mute · scroll here, or ${OPT}-scroll anywhere on the row, to change · hold still for the slider`);
-  // Silent tabs keep the speaker too, just faded: you can set a tab quiet
-  // before it ever makes a sound, and the control is always in the same place.
+  tip(spk, 'Adjust volume', 'Click for volume and mute');
+  spk.setAttribute('aria-label', `Adjust volume for ${shortName(t)}`);
   if (!hasSound) spk.classList.add('idle');
-  spk.onclick = (e) => { e.stopPropagation(); if (e.altKey) { toggleVol(); return; } send('mute', { id: t.id }); };
+  spk.onclick = (e) => { e.stopPropagation(); openVolPop(t.id, 'held'); };
   spk.onwheel = (e) => wheelStep(t, e);
-  // Option-scroll anywhere on the row does the same; a plain scroll still scrolls the list.
   row.addEventListener('wheel', altWheel(t), { passive: false });
-
-  const pop = el('div', 'volpop');
-  const r = el('input'); r.type = 'range'; r.min = 0; r.max = 100; r.value = Math.round(t.volume * 100);
-  r.setAttribute('aria-label', `Volume for ${t.title}`);
-  const pct = el('span', 'pct', `${r.value}%`);
-  r.oninput = () => { pct.textContent = `${r.value}%`; send('volume', { id: t.id, value: r.value / 100 }); };
-  r.onclick = (e) => e.stopPropagation();
-  pop.append(r, pct);
-  pop.onclick = (e) => e.stopPropagation();
-  // The slider used to slide over the whole row the moment the pointer crossed the
-  // speaker, which left you unable to click the tab you were aiming for. Now it
-  // only ever opens because you asked, and it sits at the end of the row.
-  let closeTimer;
-  const closeVol = () => { clearTimeout(closeTimer); if (openVolId === t.id) openVolId = null; row.classList.remove('vol-open'); };
-  const toggleVol = () => {
-    if (openVolId === t.id) { closeVol(); return; }
-    openVolId = t.id; row.classList.add('vol-open');
-    document.querySelectorAll('.tab.vol-open').forEach((o) => { if (o !== row) o.classList.remove('vol-open'); });
-    r.focus();
-  };
-  pop.addEventListener('mouseleave', () => { closeTimer = setTimeout(closeVol, 600); });
-  pop.addEventListener('mouseenter', () => clearTimeout(closeTimer));
-  // Resting on the speaker opens the slider. The old version opened it the
-  // instant the pointer crossed the row, which swallowed the click you were
-  // aiming at; waiting for the pointer to stop keeps both.
-  let openTimer;
-  spk.addEventListener('mouseenter', () => { openTimer = setTimeout(() => { if (openVolId !== t.id) toggleVol(); }, 500); });
-  spk.addEventListener('mouseleave', () => clearTimeout(openTimer));
-  spk.addEventListener('mousedown', () => clearTimeout(openTimer));
-  if (openVolId === t.id) row.classList.add('vol-open');
-  row.append(pop);
   ctl.append(spk);
 
   const up = el('button', 'movet', '↑'); tip(up, 'Move up', '⌥⌘↑');
@@ -1005,6 +1055,11 @@ function renderBar() {
   document.querySelectorAll('[data-split]').forEach((b) => b.classList.toggle('on', b.dataset.split === S.split.mode));
   $('#syncscroll').classList.toggle('on', !!S.settings.syncScroll);
   $('#syncplay').classList.toggle('on', !!S.settings.syncPlay);
+  const activity = $('#activity');
+  activity.textContent = (S.settings.kits.teacher || S.live ? 'Queue' : 'Downloads') + (activityOpen ? ' ▴' : ' ▾');
+  activity.setAttribute('aria-label', S.settings.kits.teacher || S.live ? 'Live and downloads' : 'Downloads');
+  activity.classList.toggle('on-air', S.live);
+  activity.setAttribute('aria-expanded', String(activityOpen));
   $('#livetoggle').checked = S.live;
   $('#take').hidden = !S.live;
   renderShield(a);
@@ -1079,7 +1134,8 @@ function renderLive() {
   const box = $('#livebox');
   // Always there, always ready. Off air it is a landing strip: drop a tab on it
   // and that tab goes up, which is the whole gesture — no switch to find first.
-  box.hidden = S.settings.kits.teacher === false && !S.live; // the Teacher kit off takes the on-air box with it
+  box.hidden = !activityOpen || (S.settings.kits.teacher === false && !S.live);
+  if (box.hidden) { $('#lb-title').textContent = ''; $('#lb-thumb').removeAttribute('src'); $('#lb-cue').replaceChildren(); return; } // the Teacher kit off takes the on-air box with it
   box.classList.toggle('off', !S.live);
   const p = S.tabs.find((t) => t.id === S.programId);
   const cued = (S.cue || []).map((id) => S.tabs.find((t) => t.id === id)).filter(Boolean);
@@ -1108,6 +1164,9 @@ function renderLive() {
     list.append(row);
   });
   if (!cued.length) list.append(el('div', 'cuempty', 'Drag the tabs for this class in here, then press TAKE.'));
+  const active = S.tabs.find((t) => t.id === S.activeId);
+  $('#queue-add').disabled = !active || active.private || active.agent || cued.some((t) => t.id === active.id);
+  $('#queue-add').textContent = cued.some((t) => t.id === S.activeId) ? 'Tab queued' : 'Add current tab';
   $('#lb-take').hidden = false;
   $('#lb-take').disabled = !cued.length && !S.live;
 
@@ -1165,19 +1224,21 @@ function renderAI() {
 
 function renderDownloads() {
   const box = $('#downloads');
-  const show = S.settings.showDownloads !== false && S.downloads.length;
+  const show = activityOpen && S.settings.showDownloads !== false;
   box.hidden = !show;
+  box.replaceChildren();
   if (!show) return;
-  box.innerHTML = '';
   const busy = S.downloads.filter((d) => d.state === 'progressing');
   const head = el('div', 'dl-head');
   head.append(el('span', 'dl-title', busy.length ? `Downloading ${busy.length}` : 'Downloads'));
   const clear = el('button', 'dl-clear', 'Clear');
   tip(clear, 'Clear this list', 'The files stay in your Downloads folder');
   clear.onclick = () => send('downloads-clear');
+  clear.hidden = !S.downloads.length;
   head.append(clear);
   box.append(head);
 
+  if (!S.downloads.length) box.append(el('span', 'note', 'No recent downloads'));
   for (const d of S.downloads) {
     const pct = d.total ? Math.min(100, Math.round((d.received / d.total) * 100)) : 0;
     const done = d.state === 'completed';
@@ -1398,10 +1459,27 @@ function openPalette() {
 }
 
 // ---------------------------------------------------------------- move in
+function passwordImport() {
+  const card = el('div', 'impcard');
+  card.append(el('b', '', esc('Import passwords into ' + folderName(S.folder))));
+  card.append(el('p', 'note', 'In Chrome, export from Google Password Manager → Settings. On a Mac, use Passwords → File → Export All Passwords to File. Choose the exported CSV here.'));
+  const button = el('button', 'btn', 'Choose password CSV…');
+  const result = el('span', 'note'); result.setAttribute('role', 'status');
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const r = await window.cue.invoke('password-csv');
+      result.textContent = r.error || (r.canceled ? '' : `Imported ${r.count} · skipped ${r.skipped}. You can now delete the unencrypted CSV.`);
+    } finally { button.disabled = false; }
+  };
+  card.append(button, result);
+  return card;
+}
 async function openImport() {
   const found = await window.cue.invoke('import-find');
   openModal((sh) => {
     sh.append(el('h2', '', 'Move in to Cue'));
+    sh.append(passwordImport());
     if (!found.length) sh.append(el('div', 'note', 'No other browser was found on this computer.'));
     sh.append(el('div', 'note', 'Copies your things into Cue. The other browser is not changed. Your computer may ask to unlock its keychain once for passwords and sign-ins.'));
     const rank = (b) => { const i = ['chrome', 'safari'].indexOf(b.id); return i < 0 ? 9 : i; };
@@ -1593,8 +1671,18 @@ document.addEventListener('click', (e) => {
 document.querySelectorAll('[data-split]').forEach((b) => { b.onclick = () => send('split', { mode: b.dataset.split }); });
 $('#syncscroll').onclick = () => send('setting', { key: 'syncScroll', value: !S.settings.syncScroll });
 $('#syncplay').onclick = () => send('setting', { key: 'syncPlay', value: !S.settings.syncPlay });
+$('#activity').onclick = () => {
+  activityOpen = !activityOpen;
+  send('activity-open', { on: activityOpen });
+  if (activityOpen && (S.settings.sideHidden || document.body.classList.contains('rail'))) {
+    send('setting', { key: 'sideHidden', value: false });
+    if (document.body.classList.contains('rail')) send('side-width', { w: 260 });
+  }
+  render();
+};
 $('#livetoggle').onchange = (e) => send('live', { on: e.target.checked });
 $('#take').onclick = () => send('take');
+$('#queue-add').onclick = () => send('cue-add', { id: S.activeId });
 $('#lb-take').onclick = () => send('take');
 $('#lb-end').onclick = () => send('live', { on: false });
 $('#opensettings').onclick = () => openSettings();
@@ -1751,6 +1839,11 @@ function settingsRooms() {
     { id: 'keep', name: 'Keeping tabs', line: 'Kept tabs stay until you close them; Just for now tabs do not.',
       more: `Pinned apps and ordinary tabs are kept: they come back every time Cue opens, until you close them. Tabs in the "Just for now" section of the sidebar use the folder's usual sign-ins, but are cleared when Cue closes (or after the time below) and never come back. Open one with ${MAC_KEYS ? '⌥⌘T' : 'Ctrl+Alt+T'}, the + on that section, or right-click a tab and choose Just for now. Pinning a tab, or choosing Keep this tab, keeps it.`,
       build: (p) => {
+        heading(p, 'Browsing history');
+        toggles(p, toggle('history-record', S.recordHistory, 'Save browsing history in this folder', '', (on) => send('history-record', { on })));
+        const history = el('button', 'btn', 'View or clear history');
+        history.onclick = () => { closeModal(); send('navigate', { text: 'cue://library#history', newTab: true }); };
+        p.append(history);
         heading(p, 'When Cue opens');
         p.append(settingRow('Go to', choice('openOn', s.openOn || 'home', [['home', 'The app I start in'], ['last', 'The tab I was last on']])));
         p.append(settingRow('The app I start in', text('homeApp', s.homeApp, 'https://web.whatsapp.com/', 'text', 'wide'),
@@ -2021,7 +2114,7 @@ function settingsRooms() {
       build: (p) => {
         toggles(p, ...Object.entries(S.kits).map(([k, v]) => toggle(`kit.${k}`, s.kits[k], v.name, v.what)));
         toggles(p,
-          toggle('showDownloads', s.showDownloads !== false, 'Downloads tray in the sidebar', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
+          toggle('showDownloads', s.showDownloads !== false, 'Show downloads under the toolbar’s Live or Downloads button', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
           toggle('sideHidden', s.sideHidden, 'Sidebar hidden until you reach for it', keysFor('The whole sidebar slides away (⌘\\).') + ' Move the pointer to the left edge and it comes back.'));
       } },
 
@@ -2061,6 +2154,7 @@ function settingsRooms() {
     { id: 'pw', name: 'Passwords', line: 'Cue offers to save a password when you sign in, then fills it in.',
       more: 'With “auto” ticked, Cue signs you in to that site by itself. Nothing leaves this computer, and nothing is ever filled into a page you did not open yourself. Only the open folder’s passwords are listed.',
       build: (p) => {
+        p.append(passwordImport());
         const team = el('span', 'btnline'); const teamBtn = el('button', 'btn', 'Load'); teamBtn.type = 'button';
         const tTell = said(team);
         teamBtn.onclick = async () => { teamBtn.disabled = true; tTell('Loading…'); const r = await ask('team-vault');
@@ -2499,15 +2593,10 @@ window.cue.onEvent((name, data) => {
   else if (name === 'focus-find') openFind();
   // Right-click > Volume…: the pinned app's control, or the slider on the tab's own row.
   else if (name === 'volume-pop' && data) {
-    if (document.querySelector(`.pin[data-id="${data.id}"]`)) openVolPop(data.id, 'held');
-    else {
-      openVolId = data.id; render();
-      const r = document.querySelector(`.tab[data-id="${data.id}"] .volpop input`);
-      if (r) r.focus();
-    }
+    openVolPop(data.id, 'held');
   }
   else if (name === 'find-result') $('#findcount').textContent = data.total ? `${data.active}/${data.total}` : 'No matches';
-  else if (name === 'program-thumb') $('#lb-thumb').src = data;
+  else if (name === 'program-thumb' && activityOpen && S.live) $('#lb-thumb').src = data;
   else if (name === 'share-picker') sharePicker(data);
   else if (name === 'palette-open') openPalette();
   else if (name === 'palette') showPalette(data.colors);

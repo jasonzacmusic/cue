@@ -215,7 +215,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
 
   function add(url, { from, background } = {}) {
     if (!win) build();
-    else { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } // it may be behind Cue or on another desktop
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus(); // it may be behind Cue or on another desktop
     const t = { id: nextId--, view: null, identity: 'vanish', url: url || startFile, title: 'Vanish', favicon: null, loading: false, playing: false };
     // A link from a page either brings its new tab to the front (Vanish's own setting, "go" by
     // default) or opens it behind. Opened behind a video that is playing, it waits silent until

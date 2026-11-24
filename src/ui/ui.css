@@ -746,3 +746,12 @@ code.addr { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; backgroun
 .welcomesites { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 12px; }
 .welcomesites label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 .sheet.welcome .choice.on { border-color: var(--accent); background: var(--agent-wash); }
+
+.recent-tabs { display: flex; align-items: center; gap: 4px; margin-bottom: 9px; }
+.recent-tabs > span { color: var(--muted); font-size: 10px; }
+.recent-tabs button { flex: 1; min-width: 0; padding: 4px; background: var(--raised); color: var(--ink); border: 0; border-radius: 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+body.rail .recent-tabs { display: none; }
+.ghead[draggable] { cursor: grab; }
+.ghead[draggable]:active { cursor: grabbing; }
+#activity.on-air { color: var(--onair); }
+#livebox > label { margin-bottom: 6px; }
