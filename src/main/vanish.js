@@ -300,7 +300,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     // Cue's own pages (Library, Bills, Boards) hold his history and his money; none of them opens
     // in here. The one exception is the dangerous-site warning, which Cue itself puts up.
     wc.on('will-navigate', (e, u) => { if (/^cue:/i.test(u)) { e.preventDefault(); say('Cue\u2019s own pages do not open in Vanish.'); } });
-    if (t.url === startFile) wc.once('did-finish-load', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
+    if (t.url === startFile) wc.once('did-stop-loading', () => { if (activeId === t.id) focusBar(); }); // the page takes focus when it lands
     protect(wc, t);
     whenWiped(() => { if (!wc.isDestroyed()) wc.loadURL(guardUrl(t.url)).catch(() => {}); });
     return wc;
@@ -334,7 +334,8 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     if (full && was && was !== t) leaveFull(liveContents(was.view));
     if (was && was !== t && finding) { stopFind(); liveContents(ui)?.send('vanish:find-result', { active: 0, total: 0, closed: true }); }
     const wc = ensureTabView(t);
-    activeId = id; layout(); state(); wc.focus();
+    activeId = id; layout(); state();
+    if (t.url === startFile) focusBar(); else wc.focus();
     if (t.calm) { t.calm = false; if (t.held) { t.held = false; wc.send('cue:media', 'play'); } }
   }
 
@@ -366,8 +367,15 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     ui = new WebContentsView({ webPreferences: { session: session(), preload: uiPreload, contextIsolation: true, sandbox: true } });
     ui.setBackgroundColor('#0B0B0D');
     win.contentView.addChildView(ui);
-    ui.webContents.loadFile(uiFile);
-    ui.webContents.on('did-finish-load', () => { state(); const a = byId(activeId); if (a && a.url === startFile) focusBar(); });
+    const bar = ui.webContents;
+    bar.once('did-stop-loading', () => {
+      if (liveContents(ui) !== bar) return;
+      state();
+      if (byId(activeId)?.url === startFile) focusBar();
+    });
+    // The address bar uses the same memory-only session as the page. A
+    // preceding window's wipe can cancel either navigation during reopening.
+    whenWiped(() => { if (!bar.isDestroyed()) bar.loadFile(uiFile).catch(() => {}); });
     ui.webContents.on('before-input-event', (e, input) => keys(e, input, true));
     win.on('resize', layout);
     // "Pause Vanish when I switch to another window": everything playing in here pauses when
