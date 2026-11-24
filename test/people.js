@@ -189,7 +189,16 @@ async function fresh(c) {
   c.setFolder(D.id); await sleep(150);
   const td = c.openTab({ url: `${base}/p/${DMARK}`, identity: D.id }); await loaded(td);
   check('lock: a short passcode is refused', !!c.setPasscode({ id: D.id, code: 'abc' }).error);
-  check('lock: a passcode is set', c.setPasscode({ id: D.id, code: 'dev-pass-1' }).ok && !c.isLocked(D.id));
+  const ui = (script) => c.ui().webContents.executeJavaScript(script, true);
+  const setup = c.command('folder.lock-now', { id: D.id });
+  const button = "[...document.querySelectorAll('#modal .lockbox button')].find(b => b.textContent === 'Set passcode and lock')";
+  check('lock: an unprotected folder opens its own setup control', setup.setup && await until(() => ui('!!(' + button + ')')));
+  await ui(`{ const b = ${button}; b.click(); }`);
+  check('lock: submitting an empty setup keeps the folder open', !c.isLocked(D.id) && !c.folderRows().find(r => r.id === D.id).hasLock);
+  await ui(`{ const b = ${button}; b.closest('.lockbox').querySelector('input[type=password]').value = 'dev-pass-1'; b.click(); }`);
+  check('lock: setting the passcode locks this folder immediately', await until(() => c.isLocked(D.id)));
+  check('lock: the chosen code opens it again', c.tryUnlock(D.id, 'dev-pass-1').ok && !c.isLocked(D.id));
+  c.setFolder(D.id); c.activate(td.id); await loaded(td);
   const onDisk = JSON.stringify(c.store.data.folders.find((f) => f.id === D.id).lock);
   check('lock: only a salt and a hash are kept, never the code', /"salt"/.test(onDisk) && /"hash"/.test(onDisk) && !onDisk.includes('dev-pass-1'));
   c.command('folder.agents', { id: D.id, on: true });

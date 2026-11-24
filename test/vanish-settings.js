@@ -172,7 +172,7 @@ module.exports = async function run(c) {
   for (const [k, mods] of [['Enter', [MOD]], ['1', [MOD, 'shift']], ['Right', [MOD, 'shift']], ['Left', [MOD, 'shift']], ['C', [MOD, 'shift']], ['D', [MOD]], ['I', [MOD, 'alt']], ['L', [MOD, 'shift']], ['2', process.platform === 'darwin' ? ['control'] : ['alt']]]) key(vwc, k, mods);
   await sleep(400);
   // ...and the menu items those keys belong to, as the accelerator would call them.
-  const labels = ['Cue This Tab', 'Bookmark This Page', 'Developer Tools', 'TAKE: Put Cued Tab On Air', 'Go Live / End Live', 'Next Cued Tab On Air', 'Previous Cued Tab On Air', 'On Air: Cue 1', 'On Air: Cue 2', `Space: ${otherSpace}`, 'Next Tab', 'Previous Tab', 'Tab 1'];
+  const labels = ['Cue This Tab', 'Bookmark This Page', 'Developer Tools', 'TAKE: Put Cued Tab On Air', 'Go Live / End Live', 'Next Cued Tab On Air', 'Previous Cued Tab On Air', 'On Air: Cue 1', 'On Air: Cue 2', `Space: ${otherSpace}`, 'Next Tab', 'Previous Tab', findItem(menu, it => it.accelerator === 'CmdOrCtrl+1').label];
   const found = labels.filter(press);
   await sleep(600);
   const during = snap();

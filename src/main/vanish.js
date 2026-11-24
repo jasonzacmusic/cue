@@ -11,7 +11,7 @@ const BAR = 86; // tab strip + address bar
 
 // prefs() is Cue's settings, but Vanish reads only its own vanish* keys: it has nothing to do with
 // how the main window's tabs open or play, and the main window's rules never reach in here.
-function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, drm, logo, onClosed, sounding }) {
+function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveInput, guardUrl, protect, prefs, drm, logo, onClosed, sounding, pageMute }) {
   let win = null; let ui = null; let activeId = null; let nextId = -1; let full = false; // full: a video has taken over the window
   let winFull = false; // he asked for full screen himself (the key, or "Open Vanish in full screen")
   const pref = (k) => (prefs() || {})[k];
@@ -161,7 +161,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
       case 'prev': step(-1); return true;
       case 'goto': { const t = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1]; if (t) activate(t.id); return true; } // Cmd+9 is always the last tab
       case 'play': if (wc) wc.send('cue:media', 'toggle'); return true;
-      case 'mute': if (a) { a.muted = !a.muted; wc?.setAudioMuted(a.muted); state(); } return true;
+      case 'mute': if (a) { a.muted = !a.muted; pageMute(wc, a.muted); state(); } return true;
       case 'find': openFind(); return true;
       case 'full': toggleFull(); return true;
       case 'leave':
@@ -240,7 +240,7 @@ function createVanish({ session, preload, uiPreload, uiFile, startFile, resolveI
     win.contentView.addChildView(view);
     const wc = view.webContents;
     wc.setVisualZoomLevelLimits(1, 5).catch(() => {}); // pinch to zoom, as in the main window
-    wc.setAudioMuted(!!t.muted);
+    pageMute(wc, t.muted);
     wc.once('destroyed', () => {
       if (t.view !== view) return;
       t.view = null; t.loading = false; t.playing = false; t.held = false;

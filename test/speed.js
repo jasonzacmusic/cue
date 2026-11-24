@@ -14,11 +14,13 @@ async function measure(c, url) {
   const t = c.openTab({ url: 'about:blank', identity: 'personal' }); await sleep(500);
   const wc = t.view.webContents;
   let requests = 0; let bytes = 0; const top = {};
-  wc.debugger.attach('1.3');
-  wc.debugger.on('message', (_e, m, p) => {
+  const attachedHere = !wc.debugger.isAttached();
+  if (attachedHere) wc.debugger.attach('1.3');
+  const measureTraffic = (_e, m, p) => {
     if (m === 'Network.requestWillBeSent') { requests++; const u = String(p.request.url).split('?')[0]; top[u] = (top[u] || 0) + 1; }
     if (m === 'Network.loadingFinished') bytes += p.encodedDataLength;
-  });
+  };
+  wc.debugger.on('message', measureTraffic);
   await wc.debugger.sendCommand('Network.enable');
   const start = Date.now();
   const done = new Promise((r) => wc.once('did-finish-load', r));
@@ -30,7 +32,8 @@ async function measure(c, url) {
   const m = c.app.getAppMetrics().find((x) => x.pid === pid);
   if (process.env.CUE_PAGES) console.log('[cue-speed] busiest', JSON.stringify(Object.entries(top).sort((x, y) => y[1] - x[1]).slice(0, 5)));
   const out = { requests, mb: +(bytes / 1048576).toFixed(1), seconds: +seconds.toFixed(1), memoryMB: m ? Math.round(m.memory.workingSetSize / 1024) : null };
-  try { wc.debugger.detach(); } catch {}
+  wc.debugger.off('message', measureTraffic);
+  if (attachedHere) { try { wc.debugger.detach(); } catch {} }
   c.closeTab(t.id); await sleep(800);
   return out;
 }

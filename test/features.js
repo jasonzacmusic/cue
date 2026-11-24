@@ -37,8 +37,8 @@ const PAGES = {
   '/fonts': `<title>Fonts</title><p style="font:700 40px Georgia">Hello there</p>`,
   '/oops': `<title>Oops</title><script>console.error('deliberate test error');fetch('/missing.js')</script><img src="http://127.0.0.1:1/x.png">`,
   '/audio': `<title>Audio</title><audio id=a loop src="/tone.wav"></audio><video id=v muted loop src="/tone.wav" style="display:none"></video><script>
-    const O=AudioContext.prototype.createScriptProcessor;AudioContext.prototype.createScriptProcessor=function(...a){const n=O.apply(this,a);window.__sp=n;return n}
-    window.peak=()=>{const n=window.__sp;const an=window.__an||(window.__an=(()=>{const x=n.context.createAnalyser();x.fftSize=8192;n.connect(x);return x})());
+    const O=AudioContext.prototype.createGain;AudioContext.prototype.createGain=function(...a){const n=O.apply(this,a);window.__out=n;return n}
+    window.peak=()=>{const n=window.__out;const an=window.__an||(window.__an=(()=>{const x=n.context.createAnalyser();x.fftSize=8192;n.connect(x);return x})());
       const d=new Float32Array(an.frequencyBinCount);an.getFloatFrequencyData(d);let b=0;for(let i=1;i<d.length;i++)if(d[i]>d[b])b=i;return b*n.context.sampleRate/an.fftSize}</script>`,
   '/note': `<title>Note</title><p>note</p>`,
   '/fav': `<title>Fav</title><link rel=icon href="/i.png"><p>named icon</p>`,
@@ -106,9 +106,11 @@ module.exports = async function run(c) {
 
   const ui = (code) => uwc.executeJavaScript(code, true);
   check('activity starts collapsed', await ui("document.querySelector('#livebox').hidden && document.querySelector('#downloads').hidden"));
+  check('the queue control is hidden off air', await ui("document.querySelector('#activity').hidden"));
+  c.command('live', { on: true }); await sleep(350);
   await ui("document.querySelector('#activity').click()");
-  check('activity shows both panels without going live', await ui("!document.querySelector('#livebox').hidden && !document.querySelector('#downloads').hidden") && !c.getState().live);
-  await ui("document.querySelector('#activity').click()");
+  check('Live lets you show both panels', await ui("!document.querySelector('#livebox').hidden && !document.querySelector('#downloads').hidden") && c.getState().live);
+  c.command('live', { on: false }); await sleep(200);
   const csv = require('../src/main/password-csv').passwordRows;
   const imported = csv('Title,URL,Username,Password,Notes\r\nExample,https://fixture.test/path,reader,"a,b""c",');
   check('browser export imports into the chosen folder', c.vault.importMany(c.openFolder(), imported) === 1 && c.vault.has(c.openFolder(), 'https://fixture.test', 'reader', 'a,b"c'));
@@ -459,7 +461,9 @@ module.exports = async function run(c) {
   awc.send('cue:music', 'transpose', -5); await sleep(1000);
   const pm5 = await awc.executeJavaScript('window.peak()');
   check('music: transpose down 5', Math.abs(pm5 - 330) < 20, pm5);
-  awc.send('cue:music', 'transpose', 0); await sleep(600);
+  awc.send('cue:music', 'speed', 0.8); await sleep(120);
+  awc.send('cue:music', 'reset'); await sleep(600);
+  check('music: reset restores the original tempo', await awc.executeJavaScript('document.getElementById("a").playbackRate === 1'));
   const p0 = await awc.executeJavaScript('window.peak()');
   check('music: back to original pitch', Math.abs(p0 - 440) < 20, p0);
   c.tabs.find((t) => t.id === au2.id).view.webContents.send('cue:media', 'pause');

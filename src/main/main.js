@@ -361,7 +361,25 @@ function wearIdentity(wc) {
   });
   attach();
 }
+// While the queue is live, only its program page can emit audio. Keep each
+// page's chosen mute setting independently so leaving Live restores it.
+let masterMuted = false;
+let stageAudio = null;
+const muteChoices = new WeakMap();
+function pageMute(wc, muted) {
+  if (!wc || wc.isDestroyed()) return;
+  muteChoices.set(wc, !!muted);
+  wc.setAudioMuted(masterMuted || (stageAudio !== null && stageAudio !== wc) || !!muted);
+}
+function routeStageAudio(program) {
+  stageAudio = program; // false = silent standby, null = ordinary browsing.
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.isDestroyed()) continue;
+    pageMute(wc, muteChoices.get(wc) ?? wc.isAudioMuted());
+  }
+}
 app.on('web-contents-created', (_e, wc) => {
+  if (masterMuted || stageAudio !== null) pageMute(wc, false);
   // The page's cross-origin iframes, remembered as they attach, so cue_attach can reach a file box in one.
   try { if (wc.getType() !== 'remote' && wc.getType() !== 'backgroundPage') attachKit.trackFrames(wc); } catch {}
   try { if (wc.getType() !== 'remote' && wc.getType() !== 'backgroundPage') wearIdentity(wc); } catch (e) { console.error('identity', e.message); }
@@ -566,21 +584,27 @@ function sessionFor(identity) {
     // main window's tabs, which is two windows' worth of things a Vanish page should not see.
     if (isVanish) {
       if (vanish) vanish.say('Vanish does not share your screen. Use Cue\u2019s main window for that call.');
-      callback(null); // null is Electron's refusal; the page hears "not allowed"
+      callback({});
       return;
     }
-    if (pendingShare) pendingShare({});
-    pendingShare = callback;
-    try { const x = byWC(webContents.fromFrame(request.frame)); if (x) x.holdAwake = true; } catch {}
-    desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
-      .catch(() => [])
+    if (pendingShare) pendingShare.callback({});
+    const stage = queueMode ? stageWin : null;
+    const offered = { callback, identity, stage, requestId: crypto.randomUUID(), sources: new Map(), tabs: new Set() };
+    pendingShare = offered;
+    desktopCapturer.getSources({ types: stage ? ['window'] : ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
       .then((sources) => {
+        if (pendingShare !== offered) return;
+        const currentStage = queueMode ? stageWin : null;
+        if (stage !== currentStage || stage?.isDestroyed() || isLocked(identity)) { pendingShare = null; callback({}); return; }
+        const selected = stage ? sources.filter(s => s.id === stage.getMediaSourceId()) : sources;
+        const choices = stage ? [] : tabs.filter(t => t.view && !t.private && t.identity === identity);
+        offered.sources = new Map(selected.map(s => [s.id, s]));
+        offered.tabs = new Set(choices.map(t => t.id));
         setOverlay(true);
-        sendEvent('share-picker', {
-          tabs: tabs.filter((t) => t.view && !t.private && t.identity === identity).map((t) => ({ id: t.id, title: t.title, url: t.url })),
-          sources: sources.map((s) => ({ id: s.id, name: s.name })),
-        });
-      });
+        sendEvent('share-picker', { requestId: offered.requestId, live: !!stage,
+          tabs: choices.map(t => ({ id: t.id, title: t.title, url: t.url })),
+          sources: selected.map(s => ({ id: s.id, name: s.name })) });
+      }).catch(() => { if (pendingShare === offered) { pendingShare = null; callback({}); } });
   });
 
   ses.on('will-download', (_e, item, fromWc) => {
@@ -1645,6 +1669,12 @@ function protectPage(wc, t, note) {
     // computer. Cue still opens those itself; this only stops a page from doing it.
     if (isMain ? refuseOpen(url, wc.getURL()) : /^(cue|file):/i.test(String(url)) && !/^cue:/i.test(wc.getURL())) { e.preventDefault(); if (note) note(`page tried to open ${String(url).slice(0, 80)}`); return; }
     if (!isMain) return;
+    if (queueMode && t.id === programId && t.host === 'stage' && /^https?:/.test(url)
+        && /^https?:/.test(t.url) && safeOrigin(url) !== safeOrigin(t.url)) {
+      e.preventDefault();
+      sendEvent('toast', 'Open that site off air, then add its tab to the queue if you want to share it.');
+      return;
+    }
     const warn = guardUrl(url, inVanish ? vanishDangerOk : dangerOk);
     if (warn !== url) {
       e.preventDefault();
@@ -1661,7 +1691,7 @@ function protectPage(wc, t, note) {
   };
   wc.on('will-navigate', (e, url) => guard(e, url, true));
   wc.on('will-frame-navigate', (e) => guard(e, e.url, e.isMainFrame));
-  wc.on('will-redirect', (e, url) => guard(e, url, true));
+  wc.on('will-redirect', (e, url, _inPlace, main) => guard(e, url, main ?? e.isMainFrame ?? true));
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (!isMain) return;
     if (t.httpsFrom) {
@@ -1744,7 +1774,8 @@ function wirePopup(win, getIdentity, agent, opener) {
 
 function wireTab(t) {
   const wc = t.view.webContents;
-  wc.setAudioMuted(t.muted);
+  pageMute(wc, t.muted);
+  if (queueMode && t.host === 'stage' && t.id === programId) routeStageAudio(wc);
   protectPage(wc, t, (what) => logTab(t, 'blocked', what));
   wc.on('page-title-updated', (_e, title) => {
     t.title = title; if (t.popout) t.popout.setTitle(`${t.mini ? 'Cue mini' : 'Cue'} \u00b7 ${title}`);
@@ -2402,6 +2433,7 @@ function openStage() {
     // closes this window itself, so there is nothing on it to need dragging.
     frame: false, movable: true,
   });
+  if (process.platform === 'darwin') stageWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   stageWin.setContentSize(s.stageWidth, s.stageHeight);
   // It opens behind him, not over him. The Stage is what OBS and Zoom capture;
   // he carries on working in Cue's own window and never has to put it back.
@@ -2525,6 +2557,7 @@ function setLive(on, stageClosed) {
     liveContents(stageStandby)?.close();
     if (!stageClosed && stageWin && !stageWin.isDestroyed()) stageWin.destroy();
     stageWin = null; stageStandby = null;
+    if (stageAudio !== null) routeStageAudio(null);
   }
   layout(); pushState();
 }
@@ -2554,17 +2587,21 @@ function enterQueueFromBrowser() {
 }
 
 function showQueue(action) {
-  if (!['enter', 'next', 'status'].includes(action)) throw new Error('Unknown live queue action.');
+  if (!['enter', 'next', 'status', 'leave'].includes(action)) throw new Error('Unknown live queue action.');
   const list = cueTabs().filter(mayShare);
-  if (action !== 'status') {
+  if (action === 'leave') { if (queueMode) setLive(false); }
+  else if (action !== 'status') {
     if (action === 'next' && !queueMode) throw new Error('Enter the live queue first.');
+    if (!queueMode) routeStageAudio(false);
     queueMode = true;
     if (!live) setLive(true);
     const at = list.findIndex((t) => t.id === programId);
     const next = at < 0 ? list[0] : list[(at + Number(action === 'next')) % list.length];
     if (next) {
       if (programId !== next.id || stageIds.length !== 1) take(next.id);
+      else routeStageAudio(liveContents(next.view) || false);
     } else {
+      routeStageAudio(false);
       for (const tab of stageTabs()) {
         liveContents(tab.view)?.send('cue:safe', false);
         moveView(tab, mainWin, 'main');
@@ -2664,6 +2701,8 @@ function take(id) {
   if (!mayShare(next)) { sendEvent('toast', `${next.title} is a private tab. It never goes on air.`); return; }
   if (next.id === programId && stageIds.length === 1) { sendEvent('toast', 'That tab is already on air.'); return; }
   const prev = byId(programId);
+  const desk = byId(activeId);
+  if (queueMode) routeStageAudio(false);
   for (const tab of stageTabs()) {
     if (tab === next || tab === prev) continue;
     liveContents(tab.view)?.send('cue:safe', false);
@@ -2679,12 +2718,13 @@ function take(id) {
   if (prev && prev !== next) {
     liveContents(prev.view)?.send('cue:safe', false);
     moveView(prev, mainWin, 'main');
-    activeId = prev.id;
+    activeId = queueMode && desk && desk !== next && desk.host === 'main' ? desk.id : prev.id;
   } else {
-    const other = spaceOrder().find((t) => t.id !== next.id);
+    const other = (queueMode && desk !== next && desk?.host === 'main' && desk) || spaceOrder().find((t) => t.id !== next.id);
     activeId = other ? other.id : activeId;
     if (other) ensureView(other);
   }
+  if (queueMode) routeStageAudio(next.view.webContents);
   if (!queueMode && next.obsScene) obs.setScene(next.obsScene);
   // The cue moves on by itself, so TAKE, TAKE, TAKE walks the class in order.
   const list = cueTabs();
@@ -2692,7 +2732,36 @@ function take(id) {
   cueNextId = at >= 0 ? (list[(at + 1) % list.length] || {}).id || null : (list[0] || {}).id || null;
   cueWake();
   layout(); pushState();
+  if (queueMode && process.platform === 'darwin') verifyStageCut(next, stageWin);
   sendEvent('toast', `${next.title} is on air${next.obsScene ? ` · OBS: ${next.obsScene}` : ''}.`);
+}
+
+// Sample once per cut. An occluded macOS window can report its old frame
+// even with healthy capture dimensions. The samples stay in memory.
+async function verifyStageCut(tab, stage) {
+  const wc = liveContents(tab.view);
+  const current = () => queueMode && programId === tab.id && stageWin === stage && !stage.isDestroyed() && !wc.isDestroyed();
+  if (!wc) return;
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    if (!current()) return;
+    const image = await wc.capturePage(undefined, { stayAwake: true });
+    if (image.isEmpty() || !current() || obs.status !== 'connected') return;
+    const source = 'Cue Live Queue Stage';
+    const settings = await obs.settings(source);
+    if (!current() || settings?.application !== 'com.jasonzac.cue' || settings.type !== 1 || Number(settings.window) !== stageWindowId()) return;
+    const reply = await obs.request('GetSourceScreenshot', { sourceName: source, imageFormat: 'png', imageWidth: 48, imageHeight: 27 });
+    if (!current() || !reply?.responseData?.imageData) return;
+    const reference = image.resize({ width: 48, height: 27 }).toBitmap();
+    const observed = require('electron').nativeImage.createFromDataURL(reply.responseData.imageData).toBitmap();
+    if (reference.length !== observed.length) return;
+    let difference = 0;
+    for (let i = 0; i < reference.length; i += 4) difference += Math.abs(reference[i + 1] - observed[i + 1]);
+    if (difference * 4 / reference.length < 24) return;
+    await obs.setSettings(source, { show_cursor: true });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    if (stageWin === stage) await obs.setSettings(source, { show_cursor: false });
+  } catch { /* The stage can close during a cut. */ }
 }
 
 function popOut(t) {
@@ -2900,7 +2969,7 @@ async function captureTab(t) {
   } finally { if (hidden && t.view === v) v.setVisible(false); }
 }
 
-function setMuted(t, m) { t.muted = m; liveContents(t.view)?.setAudioMuted(m); pushState(); persist(); }
+function setMuted(t, m) { t.muted = m; pageMute(liveContents(t.view), m); pushState(); persist(); }
 function setVolume(t, v) {
   t.volume = Math.max(0, Math.min(1, Number(v) || 0));
   liveContents(t.view)?.send('cue:volume', t.volume);
@@ -3037,7 +3106,10 @@ function startThumbs() {
 ipcMain.on('cue:tab-init', (e) => {
   const t = byWC(e.sender);
   const ytAds = settings().blockAds !== false && !(shield && shield.isAllowed('https://youtube.com/'));
-  e.returnValue = { ytAds, volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.host === 'stage' && settings().safeShare), hold: live, quiet: quietSite(e.sender.getURL() || (t && t.url) || '') };
+  e.returnValue = { ytAds, vanish: e.sender.session === session.fromPartition(identityOf('vanish').partition), volume: t ? t.volume : 1, originalSound: settings().originalSound, safe: !!(t && live && t.host === 'stage' && settings().safeShare), hold: live, quiet: quietSite(e.sender.getURL() || (t && t.url) || '') };
+});
+ipcMain.on('cue:vanish-share-denied', (e) => {
+  if (vanish && e.sender.session === session.fromPartition(identityOf('vanish').partition)) vanish.say('Vanish does not share your screen.');
 });
 ipcMain.on('cue:media-state', (e, playing) => { const t = byWC(e.sender); if (t) { t.playing = playing; pushState(); } });
 ipcMain.on('cue:dirty', (e) => { const t = byWC(e.sender); if (t) t.dirty = true; });
@@ -3055,7 +3127,9 @@ ipcMain.on('cue:scroll', (e, ratio) => {
 });
 
 ipcMain.on('cue:peek', (e, url) => { const t = byWC(e.sender); if (t) openPeek(url, t); });
-ipcMain.on('cue:music-state', (_e, st) => sendEvent('music-state', st));
+ipcMain.on('cue:music-state', (e, st) => {
+  if (e.sender === liveContents(byId(activeId)?.view)) sendEvent('music-state', st);
+});
 ipcMain.on('cue:note', (e, n) => {
   const t = byWC(e.sender);
   if (!t || !n || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || isLocked(t.identity)) return;
@@ -3169,13 +3243,18 @@ function folderCommand(cmd, a) {
     case 'folder.email': return say(setFolderEmail(a));
     case 'folder.agents': return say(setFolderAgents(a));
     case 'folder.share': return say(setShared(a));
-    case 'folder.lock-now': return lockFolder(a.id) ? { ok: true } : say({ error: 'That folder has no passcode yet. Set one in Settings, under Folders and accounts.' });
+    case 'folder.lock-now': {
+      if (!folderById(a.id)) return say({ error: 'That folder is no longer available.' });
+      if (lockFolder(a.id)) return { ok: true };
+      sendEvent('setup-folder-lock', a.id);
+      return { setup: true };
+    }
     case 'folder.remove': return removeFolder(a).then(say);
     case 'folder-menu': {
       const f = folderById(a.id);
       if (!f) return null;
       Menu.buildFromTemplate([
-        { label: hasLock(f.id) ? (isLocked(f.id) ? 'Locked' : 'Lock now') : 'Lock now (set a passcode first)', enabled: hasLock(f.id) && !isLocked(f.id), click: () => lockFolder(f.id) },
+        { label: hasLock(f.id) ? (isLocked(f.id) ? 'Locked' : 'Lock now') : 'Set passcode and lock…', enabled: !isLocked(f.id), click: () => folderCommand('folder.lock-now', { id: f.id }) },
         { type: 'separator' },
         { label: 'Folders and accounts…', click: () => sendEvent('open-settings', 'folders') },
       ]).popup({ window: mainWin });
@@ -3317,6 +3396,14 @@ function uiCommandRaw(cmd, a = {}) {
     case 'mini': miniPlay(t); break;
     case 'overlay': setOverlay(a.on); break;
     case 'history-record': { const f = folderById(openFolder()); if (f && !isLocked(f.id)) { f.historyOff = !a.on; store.save(); pushState(); } break; }
+    case 'master-mute':
+      masterMuted = !masterMuted;
+      settings().masterMuted = masterMuted;
+      routeStageAudio(stageAudio); store.save(); pushState();
+      break;
+    case 'copy-picture-menu':
+      if (t) Menu.buildFromTemplate(pictureChoices(t)).popup({ window: mainWin });
+      break;
     case 'activity-open': activityOpen = !!a.on; break;
     case 'group-order': {
       const f = folderById(openFolder());
@@ -3336,16 +3423,18 @@ function uiCommandRaw(cmd, a = {}) {
     case 'downloads-clear': { const keep = downloads.filter((x) => x.folder !== openFolder()); downloads.splice(0, downloads.length, ...keep); pushState(); break; }
     case 'obs-connect': obs.connect(settings().obs); break;
     case 'share-choose': {
-      const cb = pendingShare; pendingShare = null; setOverlay(false);
-      if (!cb) break;
-      if (a.tabId) { const st = byId(a.tabId); if (st && st.view) { cb({ video: st.view.webContents.mainFrame, audio: st.view.webContents.mainFrame }); break; } }
-      if (a.sourceId) {
-        desktopCapturer.getSources({ types: ['screen', 'window'] }).then((srcs) => {
-          const s = srcs.find((x) => x.id === a.sourceId); cb(s ? { video: s } : {});
-        }).catch(() => cb({}));
-        break;
-      }
-      cb({});
+      const offer = pendingShare;
+      if (!offer || a.requestId !== offer.requestId) break;
+      pendingShare = null; setOverlay(false);
+      const stage = queueMode ? stageWin : null;
+      if (offer.stage !== stage || stage?.isDestroyed() || isLocked(offer.identity)) { offer.callback({}); break; }
+      const source = offer.sources.get(a.sourceId);
+      const tab = offer.tabs.has(a.tabId) && byId(a.tabId);
+      if (source && (!stage || source.id === stage.getMediaSourceId())) offer.callback({ video: source });
+      else if (!stage && tab?.view && tab.identity === offer.identity && !tab.private) {
+        const frame = liveContents(tab.view)?.mainFrame;
+        offer.callback(frame ? { video: frame, audio: frame } : {});
+      } else offer.callback({});
       break;
     }
     case 'side-width': settings().sideWidth = a.w; store.save(); layout(); pushState(); break;
@@ -4278,6 +4367,19 @@ async function runTool(name, t) {
       if (f) { copy(f); sendEvent('toast', `Copied: ${f}`); }
     } else if (name === 'ruler') {
       await wc.executeJavaScript(tools.RULER, true);
+    } else if (['copy-visible', 'copy-full', 'copy-area', 'copy-section'].includes(name)) {
+      const mode = name.slice(5);
+      let clip;
+      if (mode === 'area' || mode === 'section') {
+        clip = await wc.executeJavaScriptInIsolatedWorld(1001, [{ code: tools.pickScreenshot(mode) }], true);
+        if (!clip) return;
+      }
+      if (t.id !== activeId || t.host !== 'main' || isLocked(t.identity)) return;
+      const image = mode === 'visible' ? await wc.capturePage() : await capture.pageImage(wc, clip);
+      if (image.isEmpty()) throw new Error('The page did not return a picture.');
+      if (t.id !== activeId || wc.isDestroyed() || isLocked(t.identity)) return;
+      clipboard.writeImage(image);
+      sendEvent('toast', 'Screenshot copied.');
     } else if (name === 'fullpage') {
       const r = await capture.fullPage(wc, t.title);
       sendEvent('toast', `Page saved in Cue Captures (${r.width} × ${r.height}).`); capture.reveal(r.file);
@@ -4726,6 +4828,7 @@ function buildMenu() {
         { label: 'Bring This Site\u2019s Sign-in Over From Chrome…', visible: canCarryFromChrome(), click: () => carrySignIn(byId(activeId)) },
         { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: mainOnly(() => reopenClosed()) },
         { label: 'Open Location', accelerator: 'CmdOrCtrl+L', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('focus-omnibox'); }) },
+        { label: 'Downloads', click: mainOnly(() => sendEvent('open-downloads')) },
         { label: 'Find Anything', accelerator: 'CmdOrCtrl+K', click: mainOnly(() => { uiView.webContents.focus(); sendEvent('palette-open'); }) },
         { label: 'Pop Out Tab', accelerator: 'CmdOrCtrl+Shift+P', click: cmd('popout') },
         { type: 'separator' },
@@ -4809,7 +4912,7 @@ function buildMenu() {
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
         { label: 'Mini Player (keeps playing while you work)', accelerator: MAC ? 'Control+Cmd+M' : 'Ctrl+Alt+M', click: cmd('mini') },
         { label: 'Picture in Picture', accelerator: 'CmdOrCtrl+Alt+P', click: () => { if (vanish.focused()) { vanish.pictureInPicture(); return; } const t = byId(activeId); if (t && t.view) t.view.webContents.executeJavaScript(PICTURE_IN_PICTURE, true).catch(() => {}); } },
-        ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: mainOnly(() => { const o = spaceOrder(); const x = n === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); }) })),
+        ...quickKeys().filter(quickEmpty).map(({ key: n }) => ({ label: `Tab ${n}`, accelerator: `CmdOrCtrl+${n}`, visible: false, click: mainOnly(() => { const o = spaceOrder(); const x = Number(n) === 9 ? o[o.length - 1] : o[n - 1]; if (x) activate(x.id); }) })),
       ],
     },
     {
@@ -4842,12 +4945,19 @@ function vanishMenu() {
   }));
 }
 
+function pictureChoices(tab) {
+  return [['Visible page', 'visible'], ['Full page', 'full'], ['Drag an area…', 'area'], ['Choose a section…', 'section']]
+    .map(([label, mode]) => ({ label, click: () => { if (tab && tab.id === activeId && !isLocked(tab.identity)) runTool('copy-' + mode, tab); } }));
+}
+
 function toolMenu(cmd) {
   const tool = (label, name, accelerator) => ({ label, accelerator, click: cmd('tool', { name }) });
   return [
     { label: 'AI Side Panel', accelerator: 'CmdOrCtrl+J', click: cmd('ai') },
     { label: 'Ask AI About This Page', accelerator: 'CmdOrCtrl+Shift+J', click: cmd('ai-ask') },
     { type: 'separator' },
+    { label: 'Copy Screenshot…', accelerator: 'CmdOrCtrl+Alt+Shift+C', click: cmd('copy-picture-menu') },
+    { label: 'Mute or Unmute Cue', accelerator: 'CmdOrCtrl+Alt+Shift+M', click: () => uiCommand('master-mute') },
     ...(kit('music') ? [{ label: 'Music Bar', accelerator: 'CmdOrCtrl+Shift+M', click: cmd('strip') }] : []),
     ...(kit('video') ? [
       tool('Save Whole Page as a Picture', 'fullpage', 'CmdOrCtrl+Shift+S'),
@@ -4858,7 +4968,7 @@ function toolMenu(cmd) {
     ] : []),
     ...(kit('designer') ? [
       { type: 'separator' },
-      tool('Pick a Colour', 'colour', 'CmdOrCtrl+Shift+C'), tool('Find a Font', 'font'), tool('Ruler', 'ruler'), tool('Boards', 'boards', 'CmdOrCtrl+Shift+B'),
+      tool('Pick a Colour', 'colour', 'CmdOrCtrl+Alt+Shift+I'), tool('Find a Font', 'font'), tool('Ruler', 'ruler'), tool('Boards', 'boards', 'CmdOrCtrl+Shift+B'),
     ] : []),
     ...(kit('creator') ? [
       { type: 'separator' },
@@ -5353,6 +5463,7 @@ app.whenReady().then(async () => {
     Object.assign(store.data, { financeNamed: true, tidyDefaults: true, quietDefaults: true, stripDefaults: true, groupsRepaired: true, welcome: 'pending' });
   }
   runMigrations();
+  masterMuted = !!settings().masterMuted;
   store.data.settings = { ...{ sideWidth: 248, sideHidden: false, aiWidth: 440, autoGroup: true, onePlayer: false, syncScroll: false, syncPlay: false, originalSound: false, safeShare: true, stageWidth: 1920, stageHeight: 1080, defaultIdentity: 'personal', agentPort: false, sleepMinutes: 15, archiveDays: 0, tempClear: 'quit', linksJustForNow: false, cacheCapMB: 1024, lowDiskGB: 5, tidyInstallers: true, githubUser: '', blockAds: true, warnDangerous: true, httpsFirst: true, hideRealIP: true, autoUpdate: true, adsAllowed: [], newTabPlace: 'next', videoSwitch: 'both', vanishOnePlayer: false, vanishNewTab: 'go', vanishNewTabPlace: 'next', vanishPauseOnBlur: false, vanishHideFromCapture: true, vanishFullScreen: false, showDownloads: true, quietSites: [], muteSites: [], openOn: 'last', homeApp: '', agentSites: { whatsapp: false, gmail: false }, alwaysPinned: [], everyday: [] }, ...store.data.settings };
   if (!Array.isArray(store.data.settings.adsAllowed)) store.data.settings.adsAllowed = [];
   // Teacher (on air, OBS) and Business (bills) are one person's tools; a plain install starts
@@ -5431,7 +5542,7 @@ app.whenReady().then(async () => {
   extDir = path.join(app.getPath('userData'), 'extensions');
   lib = new Library(app.getPath('userData'));
   vanish = createVanish({
-    drm: () => drmReady,
+    drm: () => drmReady, pageMute,
     session: () => sessionFor('vanish'), preload: TAB_PRELOAD, uiPreload: path.join(ROOT, 'preload', 'vanish.js'),
     uiFile: path.join(ROOT, 'ui', 'vanish.html'), startFile: pathToFileURL(path.join(ROOT, 'ui', 'vanish-start.html')).href, resolveInput, guardUrl: (u) => guardUrl(u, vanishDangerOk), protect: protectPage, prefs: () => settings(),
     sounding: SOUNDING,

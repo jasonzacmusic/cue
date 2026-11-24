@@ -11,7 +11,17 @@ function install(init) {
   // ---- volume: scale whatever volume the page asks for by the tab's volume
   const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
   const pageVol = new WeakMap();
-  const seen = new Set();
+  // Pages can create a new audio element for every message or clip.
+  const tracked = new WeakMap(), references = new Set();
+  const collected = new FinalizationRegistry(ref => references.delete(ref));
+  const seen = {
+    add(element) {
+      if (tracked.has(element)) return;
+      const ref = new WeakRef(element); tracked.set(element, ref);
+      references.add(ref); collected.register(element, ref);
+    },
+    *[Symbol.iterator]() { for (const ref of references) { const el = ref.deref(); if (el) yield el; } },
+  };
   const apply = (el) => {
     if (!pageVol.has(el)) pageVol.set(el, desc.get.call(el));
     desc.set.call(el, clamp(pageVol.get(el) * tabVol));
@@ -21,6 +31,23 @@ function install(init) {
     get() { return pageVol.has(this) ? pageVol.get(this) : desc.get.call(this); },
     set(v) { pageVol.set(this, v); desc.set.call(this, clamp(v * tabVol)); },
   });
+  // Spotify's public preview CDN serves anonymous CORS audio. Choose that
+  // standard mode before first playback so a later pitch change needs no reload.
+  if (location.hostname === 'open.spotify.com') {
+    const src = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+    const prepare = (element, url) => {
+      if (element.crossOrigin != null || !/^https:\/\/p\.scdn\.co\/mp3-preview\//.test(url)) return;
+      element.crossOrigin = 'anonymous';
+      const fallback = () => {
+        element.removeEventListener('loadedmetadata', cleanup);
+        if (element.src === url && element.crossOrigin === 'anonymous') { element.removeAttribute('crossorigin'); element.load(); }
+      };
+      const cleanup = () => element.removeEventListener('error', fallback);
+      element.addEventListener('error', fallback, { once: true });
+      element.addEventListener('loadedmetadata', cleanup, { once: true });
+    };
+    Object.defineProperty(HTMLMediaElement.prototype, 'src', { ...src, set(url) { prepare(this, String(url)); src.set.call(this, url); } });
+  }
   const origPlay = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { seen.add(this); apply(this); return origPlay.apply(this, arguments); };
   // A film that starts by itself (autoplay, or one the page adds later) never calls play(),
@@ -36,7 +63,8 @@ function install(init) {
     if (typeof AudioDestinationNode !== 'undefined' && dest instanceof AudioDestinationNode) {
       const ctx = dest.context;
       let g = gains.get(ctx);
-      if (!g) { g = ctx.createGain(); g.gain.value = tabVol; origConnect.call(g, dest); gains.set(ctx, g); }
+      if (!g) { g = ctx.createGain(); g.gain.value = tabVol; origConnect.call(g, dest); gains.set(ctx, g);
+        ctx.addEventListener('statechange', () => { if (ctx.state === 'closed') gains.delete(ctx); }); }
       origConnect.call(this, g, ...rest);
       return dest;
     }
@@ -50,6 +78,10 @@ function install(init) {
 
   // ---- original sound: no echo cancel, noise cut or auto-volume on the mic
   const md = navigator.mediaDevices;
+  if (init.vanish && md?.getDisplayMedia) md.getDisplayMedia = async () => {
+    document.dispatchEvent(new Event(init.key + 'display-denied'));
+    throw new DOMException('Screen sharing is unavailable in Vanish.', 'NotAllowedError');
+  };
   if (md && md.getUserMedia) {
     const origGUM = md.getUserMedia.bind(md);
     md.getUserMedia = (c) => {
@@ -124,18 +156,22 @@ function install(init) {
   }
 
   // ---- music kit: speed, A-B loop and transpose on whatever video or audio is playing
-  const main = () => media().filter((e) => e.duration > 0).sort((a, b) => ((b.videoWidth || 0) * (b.videoHeight || 0)) - ((a.videoWidth || 0) * (a.videoHeight || 0)) || (b.paused ? -1 : 1))[0];
-  const loop = { a: null, b: null, on: false, timer: 0 };
+  const main = () => media().filter(e => e.readyState > 0)
+    .sort((a, b) => Number(a.paused) - Number(b.paused) || Number(a.muted) - Number(b.muted)
+      || (b.videoWidth || 0) - (a.videoWidth || 0))[0];
+  const loop = { a: null, b: null, on: false, timer: 0, player: null, source: '' };
+  const clearLoop = () => { clearInterval(loop.timer); Object.assign(loop, { a:null, b:null, on:false, timer:0 }); };
   const checkLoop = () => {
-    const e = main();
-    if (e && loop.on && loop.a != null && loop.b != null && e.currentTime >= loop.b) e.currentTime = loop.a;
+    const e = loop.player;
+    if (!e || e.currentSrc !== loop.source) { clearLoop(); return; }
+    if (!e.paused && e.currentTime >= loop.b) e.currentTime = loop.a;
   };
-  let semis = 0;
   const shifters = new WeakMap();
   // Two crossfaded read heads over a short delay line: steady pitch, tempo untouched.
-  const makeShifter = (el) => {
-    const ctx = new AudioContext();
-    const src = ctx.createMediaElementSource(el);
+  const makeShifter = (src) => {
+    const ctx = src.context;
+    const output = ctx.createGain();
+    origConnect.call(output, ctx.destination);
     const node = ctx.createScriptProcessor(4096, 2, 2);
     const size = 8192; const grain = 3072;
     const buf = [new Float32Array(size), new Float32Array(size)];
@@ -165,9 +201,82 @@ function install(init) {
         if (ch === 1) { w = wr; phase = ph; }
       }
     };
-    src.connect(node); node.connect(ctx.destination);
+    s.semis = 0;
+    s.setPitch = (value) => {
+      if (s.semis === value) return;
+      src.disconnect(); node.disconnect();
+      if (value === 0) src.connect(output);
+      else { src.connect(node); node.connect(output); }
+      s.semis = value; s.ratio = 2 ** (value / 12);
+      ctx.resume().catch(() => {});
+    };
     return s;
   };
+
+  function mediaShifter(element) {
+    const ctx = new AudioContext();
+    try { return makeShifter(ctx.createMediaElementSource(element)); }
+    catch (error) { ctx.close().catch(() => {}); throw error; }
+  }
+  function synthMusic(op, value) {
+    const buses = [...gains.values()].filter(gain => gain.context.state === 'running' || shifters.has(gain));
+    if (!buses.length) return { none: true, status: op === 'status' };
+    let error;
+    if (op === 'transpose' || op === 'reset') {
+      const pitch = op === 'reset' ? 0 : Math.max(-12, Math.min(12, Math.round(value)));
+      for (const bus of buses) {
+        let shifter = shifters.get(bus);
+        if (!shifter && pitch) { shifter = makeShifter(bus); shifters.set(bus, shifter); }
+        shifter?.setPitch(pitch);
+      }
+    } else if (['speed', 'a', 'b', 'loop'].includes(op)) error = 'This live instrument has no playback timeline.';
+    return { speed: 1, semis: shifters.get(buses[0])?.semis || 0, error };
+  }
+
+  // Some public previews allow anonymous CORS but their player never requests
+  // it. Ask the media server before switching the player to that mode.
+  let pitchRequest = 0, pitchReset = 0;
+  const upgrades = new WeakMap();
+  async function anonymousPlayback(e, url, reset) {
+    const response = await fetch(url, { method: 'HEAD', mode: 'cors', credentials: 'omit',
+      signal: AbortSignal.timeout(4000) });
+    if (!response.ok || reset !== pitchReset || e.currentSrc !== url || e.mediaKeys) return false;
+    const position = e.currentTime, playing = !e.paused, speed = e.playbackRate;
+    async function reload(mode) {
+      const ready = new Promise((resolve) => {
+        const finish = (ok) => { clearTimeout(timer); e.removeEventListener('loadedmetadata', yes); e.removeEventListener('error', no); resolve(ok); };
+        const yes = () => finish(true), no = () => finish(false);
+        const timer = setTimeout(no, 5000);
+        e.addEventListener('loadedmetadata', yes); e.addEventListener('error', no);
+      });
+      if (mode) e.crossOrigin = mode; else e.removeAttribute('crossorigin');
+      e.load();
+      if (!await ready || e.currentSrc !== url) return false;
+      e.currentTime = position;
+      if (playing) await e.play();
+      e.defaultPlaybackRate = speed; e.playbackRate = speed;
+      // Some players apply their default rate in a task after their play event.
+      setTimeout(() => {
+        if (e.currentSrc === url && e.defaultPlaybackRate === speed && e.playbackRate === 1) e.playbackRate = speed;
+      }, 250);
+      return true;
+    }
+    if (await reload('anonymous').catch(() => false)) return true;
+    if (e.currentSrc === url || e.src === url) await reload(null);
+    return false;
+  }
+  function preparePitch(e, value, ticket) {
+    let pending = upgrades.get(e);
+    if (!pending) {
+      pending = anonymousPlayback(e, e.currentSrc, pitchReset).catch(() => false);
+      upgrades.set(e, pending); pending.finally(() => upgrades.delete(e));
+    }
+    pending.then(ok => {
+      if (ticket !== pitchRequest || main() !== e) return;
+      const state = ok && e.crossOrigin != null ? api.music('transpose', value) : { speed: e.playbackRate, error: 'This player restricts pitch processing.' };
+      document.dispatchEvent(new CustomEvent(init.key + 'm', { detail: JSON.stringify(state) }));
+    });
+  }
 
   // These are Cue's hooks, not the page's. A website must not be able to un-blur
   // Safe-share, switch its own notifications back on in the middle of a class, or
@@ -177,22 +286,42 @@ function install(init) {
       setHold(on) { held = !!on; },
       setQuiet(on) { quiet = !!on; },
       music(op, v) {
+        if (op === 'transpose' || op === 'reset') pitchRequest++;
+        if (op === 'reset') pitchReset++;
         const e = main();
-        if (!e) return { none: true };
-        if (op === 'speed') { e.preservesPitch = true; e.playbackRate = Math.max(0.25, Math.min(2, v)); }
-        if (op === 'a') { loop.a = e.currentTime; if (loop.b != null && loop.b <= loop.a) loop.b = null; }
-        if (op === 'b') { loop.b = e.currentTime; if (loop.a == null) loop.a = 0; if (loop.b > loop.a) loop.on = true; }
-        if (op === 'loop') loop.on = !!v && loop.a != null && loop.b != null;
-        if (op === 'clear') { loop.a = null; loop.b = null; loop.on = false; }
-        if (op === 'transpose') {
-          semis = Math.max(-12, Math.min(12, Math.round(v)));
-          let s = shifters.get(e);
-          if (!s) { s = makeShifter(e); shifters.set(e, s); }
-          s.ratio = 2 ** (semis / 12);
+        if (!e) return synthMusic(op, v);
+        if (loop.player !== e || loop.source !== e.currentSrc) {
+          clearLoop(); loop.player = e; loop.source = e.currentSrc;
         }
-        clearInterval(loop.timer);
-        if (loop.on) loop.timer = setInterval(checkLoop, 40);
-        return { speed: e.playbackRate, a: loop.a, b: loop.b, loop: loop.on, semis };
+        let error;
+        if (op === 'reset') { clearLoop(); shifters.get(e)?.setPitch(0); e.preservesPitch = true; e.defaultPlaybackRate = e.playbackRate = 1; }
+        if (op === 'speed') { e.preservesPitch = true; e.defaultPlaybackRate = e.playbackRate = Math.max(0.25, Math.min(2, v)); }
+        if (['a', 'b', 'loop'].includes(op) && !e.seekable.length) error = 'This player has no seekable passage to loop.';
+        else if (op === 'a') { loop.a = e.currentTime; if (loop.b <= loop.a) { loop.b = null; loop.on = false; } }
+        else if (op === 'b') {
+          if (loop.a == null) loop.a = 0;
+          if (e.currentTime > loop.a + 0.05) { loop.b = e.currentTime; loop.on = true; }
+          else error = 'Play past the loop start, then set B.';
+        }
+        if (op === 'loop' && !error) loop.on = !!v && loop.a != null && loop.b != null;
+        if (op === 'clear') clearLoop();
+        if (op === 'transpose') {
+          const value = Math.max(-12, Math.min(12, Math.round(v)));
+          let shifter = shifters.get(e);
+          if (e.mediaKeys) {
+            error = 'This player restricts pitch processing. Its original audio is preserved.';
+          } else if (!shifter && value && !e.crossOrigin && /^https?:/.test(e.currentSrc) && new URL(e.currentSrc).origin !== location.origin) {
+            preparePitch(e, value, pitchRequest);
+          } else if (value || shifter) {
+            try {
+              if (!shifter) { shifter = mediaShifter(e); shifters.set(e, shifter); }
+              shifter.setPitch(value);
+            } catch { error = 'This player manages its own audio processing.'; }
+          }
+        }
+        if (loop.on && !loop.timer) loop.timer = setInterval(checkLoop, 40);
+        if (!loop.on && loop.timer) { clearInterval(loop.timer); loop.timer = 0; }
+        return { speed: e.playbackRate, a: loop.a, b: loop.b, loop: loop.on, semis: shifters.get(e)?.semis || 0, error };
       },
       setVolume(v) { tabVol = clamp(v); media().forEach(apply); gains.forEach((g) => { g.gain.value = tabVol; }); },
       media(cmd) {
@@ -330,6 +459,7 @@ const call = (name, ...args) => contextBridge.executeInMainWorld({
   func: (k, n, a) => (window[k] ? window[k].call(k, n, ...a) : null), args: [KEY, name, args],
 });
 
+if (init.vanish) document.addEventListener(KEY + 'display-denied', () => ipcRenderer.send('cue:vanish-share-denied'));
 ipcRenderer.on('cue:volume', (_e, v) => call('setVolume', v));
 ipcRenderer.on('cue:media', (_e, cmd) => {
   linkQuiet = Date.now() + 500;
@@ -372,6 +502,9 @@ for (const type of ['play', 'pause']) {
 ipcRenderer.on('cue:hold', (_e, on) => call('setHold', on));
 ipcRenderer.on('cue:quiet', (_e, on) => call('setQuiet', on));
 ipcRenderer.on('cue:music', (_e, op, v) => ipcRenderer.send('cue:music-state', call('music', op, v)));
+document.addEventListener(`${KEY}m`, e => {
+  try { ipcRenderer.send('cue:music-state', JSON.parse(e.detail)); } catch {}
+});
 document.addEventListener(`${KEY}n`, (e) => {
   try { const n = JSON.parse(e.detail); ipcRenderer.send('cue:note', n); } catch {}
 });

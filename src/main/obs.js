@@ -68,12 +68,33 @@ class OBS {
     const sceneName = 'Cue Live Queue', source = 'Cue Live Queue Stage';
     const items = (await this.request('GetSceneItemList', { sceneName }))?.responseData?.sceneItems;
     if (!items) return; // OBS installations without the dedicated rig keep their selected scene.
-    const images = items.filter((i) => i.sceneItemEnabled
-      && !['coreaudio_input_capture', 'coreaudio_output_capture'].includes(i.inputKind));
+    const enabled = items.filter((item) => item.sceneItemEnabled);
+    const allowed = new Map([[source, 'screen_capture'], ['Face Circle — DSLR', 'av_capture_input_v2'],
+      ['Face Circle — Gold Ring', 'image_source']]);
+    const stage = enabled.find((item) => item.sourceName === source);
     const settings = await this.settings(source);
-    if (images.length !== 1 || images[0].sourceName !== source || images[0].inputKind !== 'screen_capture'
+    if (!stage || enabled.some((item) => allowed.get(item.sourceName) !== item.inputKind || !allowed.has(item.sourceName))
         || settings?.type !== 1 || Number(settings.window) !== window || settings.application !== 'com.jasonzac.cue') {
-      throw new Error('Check the Cue Live Queue Stage source in OBS.');
+      throw new Error('Check the sources in the OBS Cue Live Queue scene.');
+    }
+    const target = { sceneName, sceneItemId: stage.sceneItemId };
+    // ScreenCaptureKit can accept the new window ID before its window list catches up.
+    // Resending identical settings is ignored by OBS. Restart the window stream only,
+    // preserving the window ID, and restore its cursor setting immediately afterward.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (!stillLive()) return;
+      const size = (await this.request('GetSceneItemTransform', target))?.responseData?.sceneItemTransform;
+      if (size?.sourceWidth > 0 && size?.sourceHeight > 0) break;
+      if (attempt === 11) throw new Error('OBS has no frames from Cue Stage. Press the queue pedal to reconnect it.');
+      if (attempt === 2 || attempt === 6) {
+        const windows = await this.propertyItems(source, 'window');
+        if (windows.some((w) => Number(w.itemValue) === window && w.itemName.includes('Cue Stage')) && stillLive()) {
+          await this.setSettings(source, { show_cursor: true });
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await this.setSettings(source, { show_cursor: false });
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
     const studio = (await this.request('GetStudioModeEnabled'))?.responseData?.studioModeEnabled;
     if (!stillLive()) return;

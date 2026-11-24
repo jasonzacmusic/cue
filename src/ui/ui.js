@@ -29,6 +29,9 @@ const ICONS = {
   settings: ICON('<path d="M3 4.500h6M12 4.500h1M3 11.500h1M7 11.500h6"/><circle cx="10.500" cy="4.500" r="1.500"/><circle cx="5.500" cy="11.500" r="1.500"/>'),
   hide: ICON('<rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/>'),
 };
+$('#copyshot').innerHTML = ICON('<rect x="1.5" y="4" width="13" height="10" rx="2"/><path d="m4.5 4 1-2h5l1 2"/><circle cx="8" cy="9" r="2.5"/>');
+$('#copyshot').onclick = () => send('copy-picture-menu');
+$('#mastermute').onclick = () => send('master-mute');
 $('#newtab').innerHTML = ICONS.plus;
 $('#sidehide').innerHTML = ICONS.hide;
 $('#findany').innerHTML = ICONS.find;
@@ -534,6 +537,7 @@ function renderExtras() {
   document.querySelectorAll('[data-m],.st-label').forEach((x) => { x.hidden = !k.music; });
   ['m-speed', 'm-semi'].forEach((i) => { $(`#${i}`).hidden = !k.music; });
   document.querySelectorAll('[data-t]').forEach((x) => { x.hidden = !k.video; });
+  $('.metro-controls').hidden = !k.music;
   $('#strip').hidden = !S.strip;
   $('#musicbtn').classList.toggle('on', !!S.strip);
   $('#aihead').hidden = !S.ai;
@@ -1058,8 +1062,17 @@ function renderBar() {
   $('#syncscroll').classList.toggle('on', !!S.settings.syncScroll);
   $('#syncplay').classList.toggle('on', !!S.settings.syncPlay);
   const activity = $('#activity');
-  activity.textContent = (S.settings.kits.teacher || S.live ? 'Queue' : 'Downloads') + (activityOpen ? ' ▴' : ' ▾');
-  activity.setAttribute('aria-label', S.settings.kits.teacher || S.live ? 'Live and downloads' : 'Downloads');
+  activity.hidden = !S.live && !activityOpen && !S.downloads.some(d => d.state === 'progressing');
+  activity.textContent = (S.live ? 'Queue ' : 'Downloads ') + (activityOpen ? '▴' : '▾');
+  activity.setAttribute('aria-label', S.live ? 'Live queue and downloads' : 'Downloads');
+  const mute = $('#mastermute'), muted = !!S.settings.masterMuted;
+  if (mute.dataset.muted !== String(muted)) {
+    mute.dataset.muted = String(muted);
+    mute.setAttribute('aria-pressed', String(muted));
+    mute.title = muted ? 'Unmute Cue' : 'Mute all Cue audio';
+    mute.setAttribute('aria-label', mute.title);
+    mute.innerHTML = ICON('<path d="M2 6h3l4-3v10l-4-3H2z"/>' + (muted ? '<path d="m11 6 4 4m0-4-4 4"/>' : '<path d="M11.5 5.5q2 2.5 0 5"/>'));
+  }
   activity.classList.toggle('on-air', S.live);
   activity.setAttribute('aria-expanded', String(activityOpen));
   $('#livetoggle').checked = S.live;
@@ -1136,7 +1149,7 @@ function renderLive() {
   const box = $('#livebox');
   // Always there, always ready. Off air it is a landing strip: drop a tab on it
   // and that tab goes up, which is the whole gesture — no switch to find first.
-  box.hidden = !activityOpen || (S.settings.kits.teacher === false && !S.live);
+  box.hidden = !activityOpen || !S.live;
   if (box.hidden) { $('#lb-title').textContent = ''; $('#lb-thumb').removeAttribute('src'); $('#lb-cue').replaceChildren(); return; } // the Teacher kit off takes the on-air box with it
   box.classList.toggle('off', !S.live);
   const p = S.tabs.find((t) => t.id === S.programId);
@@ -1226,7 +1239,7 @@ function renderAI() {
 
 function renderDownloads() {
   const box = $('#downloads');
-  const show = activityOpen && S.settings.showDownloads !== false;
+  const show = activityOpen && (!S.live || S.settings.showDownloads !== false);
   box.hidden = !show;
   box.replaceChildren();
   if (!show) return;
@@ -1612,6 +1625,19 @@ async function stopRecording() {
 
 // ---------------------------------------------------------------- music bar
 const M = { speed: 100, semi: 0, loop: false };
+function showMusic(data) {
+  M.loop = !!data.loop; M.speed = Math.round((data.speed || 1) * 100); M.semi = data.semis || 0;
+  $('#m-speed').textContent = M.speed + '%';
+  $('#m-semi').textContent = M.semi > 0 ? '+' + M.semi : String(M.semi);
+  $('#m-loop').textContent = M.loop ? 'On' : 'Off';
+  $('#m-loop').classList.toggle('on', M.loop);
+  $('#m-loop').disabled = data.a == null || data.b == null;
+  for (const point of ['a', 'b']) {
+    const button = document.querySelector('[data-m="' + point + '"]');
+    button.textContent = data[point] == null ? 'Set ' + point.toUpperCase() : point.toUpperCase() + ' ' + data[point].toFixed(1) + 's';
+    button.title = point === 'a' ? 'Set the loop start at the current playhead' : 'Set the loop end and repeat this passage';
+  }
+}
 function music(op, value) { send('music', { op, value }); }
 document.querySelectorAll('[data-m]').forEach((b) => {
   b.onclick = () => {
@@ -1705,8 +1731,8 @@ function openModal(build) {
   m.append(sheet); m.hidden = false; overlay(true);
   m.onclick = (e) => { if (e.target === m) closeModal(); };
 }
-function closeModal() { const m = $('#modal'); if (m.hidden) return; m.hidden = true; m.innerHTML = ''; overlay(false); }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) { if (sharePending) { send('share-choose', {}); sharePending = false; } closeModal(); } });
+function closeModal() { const m = $('#modal'); if (m.hidden) return; if (sharePending) { send('share-choose', { requestId: sharePending }); sharePending = null; } m.hidden = true; m.innerHTML = ''; overlay(false); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) { closeModal(); } });
 
 // ---------------------------------------------------------------- settings
 // Settings is a list of rooms on the left and one room at a time on the right, sized to fit a
@@ -1808,7 +1834,7 @@ function amount(input, unit) { const w = el('span', 'amount'); w.append(input, e
 const folderName = (id) => ((S.identities || {})[id] || {}).name || id;
 
 let settingsRoom = 'tabs';
-function settingsRooms() {
+function settingsRooms(lockTarget) {
   const s = S.settings;
   const key = (n) => (MAC_KEYS ? `Command-${n}` : `Ctrl-${n}`);
   return [
@@ -1965,6 +1991,7 @@ function settingsRooms() {
             // passcode; off asks for the current one. Nothing changes until the passcode is typed.
             const lockBox = el('div', 'lockbox');
             const lockRow = el('span', 'btnline');
+            const setupAndLock = f.id === lockTarget && !f.hasLock;
             const showLock = (mode) => {
               lockRow.textContent = '';
               if (!mode) { lockRow.style.display = 'none'; return; }
@@ -1975,10 +2002,17 @@ function settingsRooms() {
               const nw = el('input'); nw.type = 'password'; nw.autocomplete = 'new-password'; nw.className = 'short'; nw.placeholder = 'New passcode'; nw.setAttribute('aria-label', 'New passcode');
               const go = el('button', 'btn', mode === 'off' ? 'Turn off' : mode === 'change' ? 'Change' : 'Turn on'); go.type = 'button';
               const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button';
-              cancel.onclick = () => { sw.checked = !!f.hasLock; showLock(f.hasLock ? 'set' : null); told(''); };
+              if (setupAndLock && mode === 'on') go.textContent = 'Set passcode and lock';
+              cancel.onclick = () => { if (setupAndLock) { closeModal(); return; } sw.checked = !!f.hasLock; showLock(f.hasLock ? 'set' : null); told(''); };
               go.onclick = async () => {
                 const args = mode === 'on' ? { id: f.id, current: '', code: pw.value } : mode === 'off' ? { id: f.id, current: pw.value, code: '' } : { id: f.id, current: pw.value, code: nw.value };
+                if (mode !== 'off' && args.code.length < 4) { told('Use at least four characters.', true); return; }
                 const r = await act('folder-passcode', args, told);
+                if (r?.ok && setupAndLock) {
+                  closeModal();
+                  await ask('folder.lock-now', { id: f.id });
+                  return;
+                }
                 if (r && r.ok) await draw();
               };
               pw.onkeydown = (e) => { if (e.key === 'Enter' && mode !== 'change') go.click(); };
@@ -1998,7 +2032,8 @@ function settingsRooms() {
               (on) => showLock(on ? (f.hasLock ? 'set' : 'on') : (f.hasLock ? 'off' : null)));
             const sw = swRow.querySelector('input');
             lockBox.append(swRow, lockRow);
-            showLock(f.hasLock ? 'set' : null);
+            if (setupAndLock) { sw.checked = true; showLock('on'); }
+            else showLock(f.hasLock ? 'set' : null);
             card.append(lockBox);
 
             // ---- sharing sign-ins: only shown for a pair that is on, or when asked for
@@ -2116,7 +2151,7 @@ function settingsRooms() {
       build: (p) => {
         toggles(p, ...Object.entries(S.kits).map(([k, v]) => toggle(`kit.${k}`, s.kits[k], v.name, v.what)));
         toggles(p,
-          toggle('showDownloads', s.showDownloads !== false, 'Show downloads under the toolbar’s Live or Downloads button', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
+          toggle('showDownloads', s.showDownloads !== false, 'Show downloads in the live queue panel', 'Off hides the list at the bottom of the sidebar. Files still download to your Downloads folder.'),
           toggle('sideHidden', s.sideHidden, 'Sidebar hidden until you reach for it', keysFor('The whole sidebar slides away (⌘\\).') + ' Move the pointer to the left edge and it comes back.'));
       } },
 
@@ -2322,8 +2357,8 @@ const matches = (words, q) => {
   return q.every((w) => wordStart(words.main, w)) || (q.length > 0 && words.help.includes(q.join(' ')));
 };
 
-function openSettings(startAt) {
-  const rooms = settingsRooms();
+function openSettings(startAt, lockTarget) {
+  const rooms = settingsRooms(lockTarget);
   rooms.push({ id: 'setup', name: 'Starting setup', line: 'Plain, or one organisation’s own apps and Spaces on top.', build: startingSetupRoom });
   // A kit that is off takes its room with it.
   { const k = (S.settings && S.settings.kits) || {}; for (const [room, kit] of [['live', 'teacher']]) { const i = rooms.findIndex((r) => r.id === room); if (i >= 0 && k[kit] === false) rooms.splice(i, 1); } }
@@ -2556,23 +2591,31 @@ function unlockSheet(d) {
   });
 }
 
-let sharePending = false;
+let sharePending = null;
 function sharePicker(d) {
-  sharePending = true;
   closeModal();
+  sharePending = d.requestId;
   openModal((sh) => {
     sh.append(el('h2', '', 'Share from Cue'));
-    sh.append(el('div', 'note', 'A page wants to share your screen. Pick a Cue tab to share just that tab with its sound, or a whole window or screen.'));
+    sh.append(el('div', 'note', d.live ? (d.sources.length ? 'Share the current Cue Stage. Pedal cuts follow the live queue.' : 'Cue Stage is unavailable for sharing.') : 'A page wants to share your screen. Pick a Cue tab to share just that tab with its sound, or a whole window or screen.'));
     const c = el('div', 'choices');
-    for (const t of d.tabs) { const b = el('button', 'choice', `${esc(t.title)}<small>${esc(t.url)}</small>`); b.onclick = () => { sharePending = false; send('share-choose', { tabId: t.id }); closeModal(); }; c.append(b); }
-    for (const s of d.sources) { const b = el('button', 'choice', `${esc(s.name)}<small>${s.id.startsWith('screen') ? 'Whole screen' : 'Window'}</small>`); b.onclick = () => { sharePending = false; send('share-choose', { sourceId: s.id }); closeModal(); }; c.append(b); }
+    for (const t of d.tabs) { const b = el('button', 'choice', `${esc(t.title)}<small>${esc(t.url)}</small>`); b.onclick = () => { sharePending = null; send('share-choose', { requestId: d.requestId, tabId: t.id }); closeModal(); }; c.append(b); }
+    for (const s of d.sources) { const b = el('button', 'choice', `${esc(s.name)}<small>${s.id.startsWith('screen') ? 'Whole screen' : 'Window'}</small>`); b.onclick = () => { sharePending = null; send('share-choose', { requestId: d.requestId, sourceId: s.id }); closeModal(); }; c.append(b); }
     sh.append(c);
-    const foot = el('div', 'foot'); const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { sharePending = false; send('share-choose', {}); closeModal(); }; foot.append(cancel); sh.append(foot);
+    const foot = el('div', 'foot'); const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { closeModal(); }; foot.append(cancel); sh.append(foot);
   });
 }
 
 // ---------------------------------------------------------------- wiring
-window.cue.onState((s) => { S = s; render(); });
+window.cue.onState((s) => {
+  if (S?.live && !s.live && activityOpen) { activityOpen = false; send('activity-open', { on: false }); }
+  const refreshMusic = s.strip && (!S?.strip || S.activeId !== s.activeId);
+  S = s; render();
+  if (refreshMusic) { showMusic({}); music('status'); }
+  if (!s.strip || !s.settings.kits.music || s.live) metronome.stop();
+  $('#metro-play').disabled = !!s.live;
+  $('#metro-play').title = s.live ? 'Metronome is off while sharing the live queue' : 'Start or stop the metronome';
+});
 window.cue.onEvent((name, data) => {
   if (name === 'toast') toast(data);
   // The count climbs while the page loads, so it is nudged straight onto the
@@ -2607,13 +2650,19 @@ window.cue.onEvent((name, data) => {
   else if (name === 'rec-start') startRecording();
   else if (name === 'rec-stop') stopRecording();
   else if (name === 'open-settings') openSettings(typeof data === 'string' ? data : undefined);
+  else if (name === 'open-downloads') {
+    activityOpen = true; send('activity-open', { on: true });
+    if (S.settings.sideHidden) send('setting', { key: 'sideHidden', value: false });
+    if (document.body.classList.contains('rail')) send('side-width', { w: 260 });
+    render();
+  }
+  else if (name === 'setup-folder-lock') openSettings('folders', data);
   else if (name === 'unlock') unlockSheet(data);
   else if (name === 'welcome') welcomeSheet(data);
   else if (name === 'music-state' && data) {
-    if (data.none) { toast('No video or audio on this page yet.'); return; }
-    M.loop = !!data.loop; M.speed = Math.round(data.speed * 100); $('#m-speed').textContent = `${M.speed}%`;
-    $('#m-loop').textContent = data.loop ? 'On' : (data.a != null ? 'Set' : 'Off');
-    $('#m-loop').classList.toggle('on', !!data.loop);
+    showMusic(data);
+    if (data.error) toast(data.error);
+    else if (data.none && !data.status) toast('This tab has no controllable audio or video player.');
   }
 });
 window.addEventListener('resize', () => { if (!$('#suggest').hidden) showSuggest(); });

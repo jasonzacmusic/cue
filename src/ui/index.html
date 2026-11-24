@@ -78,17 +78,25 @@
     <span id="peektitle"></span><button id="peekkeep" class="btn">Open as tab</button><button id="peekclose" class="icon" aria-label="Close Peek">×</button>
   </div>
   <button id="recbtn" class="rec nodrag" hidden>● Stop recording</button>
+  <button id="copyshot" class="icon nodrag" title="Copy screenshot" aria-label="Copy screenshot"></button>
+  <button id="mastermute" class="icon nodrag" aria-label="Mute Cue" aria-pressed="false"></button>
   <button id="musicbtn" class="icon nodrag" title="Music bar: loop, transpose, speed (⇧⌘M)" aria-label="Music bar">♪</button>
   <button id="aibtn" class="icon nodrag" title="AI side panel (⌘J)" aria-label="AI side panel">✦</button>
 <label class="live nodrag" title="Live class (⇧⌘L)"><input type="checkbox" id="livetoggle"> Live</label>
-  <button id="activity" class="btn nodrag" aria-expanded="false" aria-controls="livebox downloads">Live ▾</button>
+  <button id="activity" class="btn nodrag" hidden aria-expanded="false" aria-controls="livebox downloads">Live ▾</button>
   <button id="take" class="take nodrag" title="Put the cued tab on air (⌘↩)" hidden>TAKE</button>
 </header>
 
 <div id="strip" class="strip" hidden>
   <span class="st-label">Speed</span><button data-m="speed-">−</button><output id="m-speed">100%</output><button data-m="speed+">+</button>
   <span class="st-label">Transpose</span><button data-m="semi-">−</button><output id="m-semi">0</output><button data-m="semi+">+</button>
-  <span class="st-label">Loop</span><button data-m="a">Set A</button><button data-m="b">Set B</button><button data-m="loop" id="m-loop">Off</button><button data-m="clear">Clear</button>
+  <span class="st-label">Loop</span><button data-m="a">Set A</button><button data-m="b">Set B</button><button data-m="loop" id="m-loop">Off</button><button data-m="clear" title="Clear both loop points">Clear</button>
+  <button data-m="reset" title="Restore original speed and pitch and clear the loop">Reset</button>
+  <span class="metro-controls">
+    <button id="metro-play" aria-pressed="false" title="Start metronome">Metronome</button>
+    <input id="metro-bpm" type="number" min="30" max="300" step="1" value="100" aria-label="Metronome tempo in beats per minute">
+    <button id="metro-tap" title="Tap several beats to set the tempo">Tap</button>
+  </span>
   <span class="st-gap"></span>
   <button data-t="mark">Mark time</button><button data-t="frame">Grab frame</button>
 </div>
@@ -109,6 +117,7 @@
 <div id="suggest" class="suggest" hidden></div>
 <div id="modal" class="modal" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="metronome.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

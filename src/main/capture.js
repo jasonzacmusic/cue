@@ -1,7 +1,7 @@
 // Capture tools: whole-page pictures, short GIFs and saving tab recordings.
 const fs = require('fs');
 const path = require('path');
-const { app, shell } = require('electron');
+const { app, shell, nativeImage } = require('electron');
 
 function capturesDir() {
   const d = path.join(app.getPath('downloads'), 'Cue Captures');
@@ -20,18 +20,24 @@ function nameFor(title, ext) {
 }
 
 // Chromium draws the whole page in one go, however long it is (up to its 16,000 px picture limit).
-async function fullPage(wc, title) {
+async function pageImage(wc, clip) {
   const dbg = wc.debugger; const mine = !dbg.isAttached();
   if (mine) dbg.attach('1.3');
   try {
     const m = await dbg.sendCommand('Page.getLayoutMetrics');
     const size = m.cssContentSize || m.contentSize;
-    const width = Math.ceil(size.width); const height = Math.min(Math.ceil(size.height), 16000);
-    const r = await dbg.sendCommand('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
-    const file = nameFor(title, 'png');
-    fs.writeFileSync(file, Buffer.from(r.data, 'base64'));
-    return { file, width, height };
+    const rect = clip || { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height) };
+    const scale = Math.min(1, 16000 / Math.max(rect.width, rect.height), Math.sqrt(24000000 / (rect.width * rect.height)));
+    const result = await dbg.sendCommand('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { ...rect, scale } });
+    return nativeImage.createFromBuffer(Buffer.from(result.data, 'base64'));
   } finally { if (mine) { try { dbg.detach(); } catch {} } }
+}
+
+async function fullPage(wc, title) {
+  const image = await pageImage(wc);
+  const file = nameFor(title, 'png');
+  fs.writeFileSync(file, image.toPNG());
+  return { file, ...image.getSize() };
 }
 
 async function gif(wc, title, { seconds = 6, fps = 10, width = 480, onDone } = {}) {
@@ -71,4 +77,4 @@ function saveRecording(title, buffer, ext) {
 
 const reveal = (file) => { if (!process.env.CUE_TEST) shell.showItemInFolder(file); };
 
-module.exports = { fullPage, gif, saveRecording, reveal, nameFor };
+module.exports = { fullPage, pageImage, gif, saveRecording, reveal, nameFor };

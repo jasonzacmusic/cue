@@ -121,4 +121,42 @@ function pixelHex(image, x, y) {
   return '#' + [b[i + 2], b[i + 1], b[i]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
-module.exports = { PICK_POINT, FONT_FINDER, RULER, rectAt, GRAB_FRAME, VIDEO_TIME, stamp, palette, pixelHex };
+function pickScreenshot(mode) {
+  const section = mode === 'section';
+  return `new Promise((resolve) => { ${shell}
+    const section = ${section};
+    tip.textContent = section ? 'Click a section · Esc to cancel' : 'Drag an area · Esc to cancel';
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;pointer-events:none;outline:2px solid #59acff;background:rgba(90,170,255,.15)';
+    root.append(box);
+    let start, rect;
+    function update(e) {
+      place(e);
+      if (section) {
+        host.style.pointerEvents = 'none';
+        const target = document.elementFromPoint(e.clientX, e.clientY);
+        host.style.pointerEvents = '';
+        if (!target) return;
+        rect = (target.closest('section,article,figure,video,canvas,table,[role=region],li') || target).getBoundingClientRect();
+      } else if (start) {
+        rect = new DOMRect(Math.min(e.clientX,start.x), Math.min(e.clientY,start.y), Math.abs(e.clientX-start.x), Math.abs(e.clientY-start.y));
+      }
+      if (rect) Object.assign(box.style, { left: rect.x+'px', top: rect.y+'px', width: rect.width+'px', height: rect.height+'px' });
+    }
+    host.style.touchAction = 'none';
+    host.onpointerdown = (e) => { if (e.button !== 0) return; e.preventDefault(); start = {x:e.clientX,y:e.clientY}; host.setPointerCapture(e.pointerId); update(e); };
+    host.onpointermove = update;
+    host.onpointerup = (e) => {
+      if (!start) return;
+      e.preventDefault(); update(e);
+      if (!rect || rect.width < 2 || rect.height < 2) { start = null; return; }
+      const result = {x:Math.max(0,rect.x+scrollX), y:Math.max(0,rect.y+scrollY), width:rect.width, height:rect.height};
+      host.onclick = (click) => { click.preventDefault(); click.stopPropagation(); };
+      host.style.visibility = 'hidden';
+      requestAnimationFrame(() => requestAnimationFrame(() => finish(result)));
+    };
+    host.onpointercancel = () => finish(null);
+  })`;
+}
+
+module.exports = { pickScreenshot, PICK_POINT, FONT_FINDER, RULER, rectAt, GRAB_FRAME, VIDEO_TIME, stamp, palette, pixelHex };

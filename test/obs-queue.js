@@ -6,11 +6,12 @@ const { OBS } = require('../src/main/obs');
 function rig(studio = false) {
   const obs = new OBS();
   const stage = { sourceName: 'Cue Live Queue Stage', sceneItemEnabled: true, inputKind: 'screen_capture' };
-  const inputs = [stage, { sourceName: 'Microphone', sceneItemEnabled: true, inputKind: 'coreaudio_input_capture' }];
+  const inputs = [stage, { sourceName: 'Face Circle — DSLR', sceneItemEnabled: true, inputKind: 'av_capture_input_v2' }];
   const settings = { type: 1, window: 81, application: 'com.jasonzac.cue' };
   const switches = [];
   obs.request = async (command, data) => {
     if (command === 'GetSceneItemList') return { responseData: { sceneItems: inputs } };
+    if (command === 'GetSceneItemTransform') return { responseData: { sceneItemTransform: { sourceWidth: 3840, sourceHeight: 2160 } } };
     if (command === 'GetInputSettings') return { responseData: { inputSettings: settings } };
     if (command === 'GetStudioModeEnabled') return { responseData: { studioModeEnabled: studio } };
     switches.push([command, data.sceneName]);

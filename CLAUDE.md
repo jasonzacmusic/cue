@@ -4,6 +4,10 @@ Cue is Nathaniel School of Music's free, open-source browser, built on Electron 
 Owner: Jason Zac, a non-coder who works by voice. GitHub (`main`) is the source of truth.
 `AGENTS.md` points here so Codex reads the same file.
 
+## 0.7.11 — Stage privacy, practice tools and folder locking
+
+Queue cuts preserve the private tab in front. Only the staged tab can play browser audio during a live queue. The rig uses the Stage window plus the original bottom-right masked DSLR and ring. OBS checks the capture after Stage restarts and cuts. First-time Lock now opens passcode setup for that folder. Music adds tap tempo, reset and a browser-wide mute. Screenshots can copy the page, viewport, selected area or section to the clipboard.
+
 ## 0.7.9 — OBS preview and notification counts
 
 Live selects the configured local Cue Live Queue scene after verifying its only enabled visual is the current Cue Stage window. Stage tabs keep rendering when another window covers them. The bell counts the active folder’s unread alert entries. Each site needs notification permission in that folder. The tab menu can change that choice. Tab title counts and outstanding bills remain available separately.
