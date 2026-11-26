@@ -2,7 +2,7 @@
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 if (process.env.CUE_TEST && !process.env.CUE_REAL_SCREEN) require('../../test/hidden-windows');
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, nativeImage, protocol, net, webContents, screen, powerMonitor, systemPreferences,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, nativeImage, protocol, net, webContents, screen, powerMonitor, systemPreferences, safeStorage,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -19,6 +19,8 @@ const { Library } = require('./db');
 const { Vault } = require('./vault');
 const bills = require('./bills');
 const { askLocal } = require('./local-assistant');
+const mcpConnect = require('./mcp-connect');
+const tabAgent = require('./tab-agent');
 const { homepageKey } = require('./homepage');
 const tools = require('./page-tools');
 const capture = require('./capture');
@@ -101,11 +103,28 @@ const KITS = {
   video: { name: 'Video', what: 'Page capture, tab recording, GIFs, timestamps, frame grabs' },
   business: { name: 'Business', what: 'Recognize bills on billing pages' },
 };
-// The panel is for the two tools he actually works with, not their consumer chats: Claude Code and
-// Codex, the same pair he keeps in Chrome. It opens in whichever folder is open, so it arrives
-// already signed in instead of asking him to log in again inside a panel.
-const AI_HOME = { claudecode: 'https://claude.ai/code', codex: 'https://chatgpt.com/codex' };
-const AI_NAMES = { claudecode: 'Claude Code', codex: 'Codex' };
+// AI side panel modes: all Gemini modes plus Claude and ChatGPT/Codex.
+// Opens in whichever folder is active so every tool uses that account's sign-in.
+const AI_HOME = {
+  gemini: 'https://gemini.google.com/app',
+  aistudio: 'https://aistudio.google.com',
+  notebooklm: 'https://notebooklm.google.com',
+  jules: 'https://jules.google.com',
+  claudecode: 'https://claude.ai/code',
+  claude: 'https://claude.ai',
+  codex: 'https://chatgpt.com/codex',
+  chatgpt: 'https://chatgpt.com',
+};
+const AI_NAMES = {
+  gemini: 'Gemini',
+  aistudio: 'AI Studio',
+  notebooklm: 'NotebookLM',
+  jules: 'Jules',
+  claudecode: 'Claude Code',
+  claude: 'Claude',
+  codex: 'Codex',
+  chatgpt: 'ChatGPT',
+};
 // Links that belong to another app on the computer. These open straight away; anything else asks first.
 const EXTERNAL = /^(mailto|tel|sms|facetime|zoommtg|zoomus|msteams|slack|spotify|whatsapp|webcal|obsproject):/i;
 // The organisation's own password vault, only with its starting setup on (see teamImportOffered).
@@ -3054,7 +3073,13 @@ function tabMenuItems(t) {
         }
       }
       pushState(); persist(); } },
+    { label: 'Drive this tab with AI…', enabled: !t.private && t.identity !== 'vanish' && t.id !== programId && /^https?:/.test(t.url || ''), click: () => { activate(t.id); askAboutPage(undefined, '', t.id); } },
     { label: 'Let AI agents use this tab', type: 'checkbox', checked: t.aiAllowed || t.agent, enabled: !t.agent, click: () => { t.aiAllowed = !t.aiAllowed; pushState(); persist(); } },
+    { label: 'Copy tab prompt for external AI', enabled: !t.private && t.identity !== 'vanish' && /^https?:/.test(t.url || ''), click: () => {
+      if (!t.agent && !t.aiAllowed) { t.aiAllowed = true; pushState(); persist(); }
+      clipboard.writeText(`Use Cue tab #${t.id} ("${tabName(t)}" — ${t.url}) and `);
+      sendEvent('toast', `Tab #${t.id} handed to AI and prompt copied.`);
+    } },
     { label: 'Move to group', submenu: [{ label: 'Automatic', type: 'radio', checked: !t.groupOverride, click: () => { t.groupOverride = null; pushState(); persist(); } }, ...groupList().map((g) => ({ label: g.name, type: 'radio', checked: t.groupOverride === g.id, click: () => { t.groupOverride = g.id; pushState(); persist(); } }))] },
     { type: 'separator' },
     { label: 'Close tab', click: () => closeTab(t.id) },
@@ -3725,7 +3750,8 @@ function uiCommandRaw(cmd, a = {}) {
     case 'ai': toggleAI(a.which); break;
     // One click on the AI badge in the sidebar, the same thing the right-click menu does.
     case 'ai-tab': { const x = byId(a.id); if (x && !x.agent && x.identity !== 'vanish' && !x.private && !isLocked(x.identity)) { x.aiAllowed = !x.aiAllowed; pushState(); persist(); } break; }
-    case 'ai-ask': askAboutPage(a.which); break;
+    case 'ai-ask': askAboutPage(a.which, a.question || '', a.id); break;
+    case 'ai-send-tab': sendTabToAiPanel(); break;
     case 'strip-height': {
       const height = Number(a.height);
       if (stripOpen && Number.isInteger(height) && height >= 44 && height <= 600 && height !== stripHeight) {
@@ -3882,6 +3908,35 @@ async function uiInvoke(cmd, a = {}) {
   if (cmd.startsWith('space.')) return spaceCommand(cmd, a);
   if (cmd === 'ask-local-run') return askTab(a);
   if (cmd === 'ask-local-click') return confirmAssistant(a);
+  if (cmd === 'tab-drive-start') return driveTab(a);
+  if (cmd === 'tab-drive-stop') return stopDriveTab();
+  if (cmd === 'ai-providers') {
+    const providers = await tabAgent.detectProviders({ hasGeminiKey: hasGeminiKey() });
+    return { providers, hasGeminiKey: hasGeminiKey(), geminiModel: settings().geminiModel || 'gemini-2.5-flash', models: tabAgent.GEMINI_MODELS };
+  }
+  if (cmd === 'ai-gemini-key') {
+    if (a.model && tabAgent.GEMINI_MODELS.some((m) => m.id === a.model)) setSetting('geminiModel', a.model);
+    if (typeof a.key === 'string') setGeminiKey(a.key);
+    return { ok: true, hasGeminiKey: hasGeminiKey(), geminiModel: settings().geminiModel || 'gemini-2.5-flash' };
+  }
+  if (cmd === 'mcp-clients') return { clients: mcpConnect.listClients() };
+  if (cmd === 'mcp-connect') {
+    if (!doorOpen) {
+      doorOpen = true;
+      if (settings().agentPort === false) { settings().agentPort = true; }
+      setSetting('aiDoor', true);
+      await openAgentPort();
+      pushState();
+    } else if (!agentServer) {
+      await openAgentPort();
+    }
+    const r = mcpConnect.connectClient(String(a.id || ''), { bridgePath: agentBridgePath(), tokenFile: agentTokenFile() });
+    return { ...r, clients: mcpConnect.listClients() };
+  }
+  if (cmd === 'mcp-disconnect') {
+    const r = mcpConnect.disconnectClient(String(a.id || ''));
+    return { ...r, clients: mcpConnect.listClients() };
+  }
   if (cmd === 'tidy-dupes') return { ok: true, said: tidyDupes() };
   if (cmd === 'temp.clear') return { ok: true, n: clearTemp({ folder: openFolder() }) };
   if (cmd === 'team-vault') return teamSite() ? loadTeamVault(teamSite(), { into: [openFolder()] }) : { signedIn: false };
@@ -4243,20 +4298,120 @@ function openAI(which, url) {
   aiView.webContents.loadURL(url || AI_HOME[store.data.aiWhich]).catch(() => {});
   layout(); pushState();
 }
+function aiKeysFile() { return path.join(app.getPath('userData'), 'ai-keys.json'); }
+function readAiKeys() {
+  try { return JSON.parse(fs.readFileSync(aiKeysFile(), 'utf8')) || {}; } catch { return {}; }
+}
+function hasGeminiKey() {
+  const k = readAiKeys();
+  return !!(k.geminiEnc || k.geminiPlain);
+}
+function getGeminiKey() {
+  const k = readAiKeys();
+  if (k.geminiEnc && safeStorage.isEncryptionAvailable()) {
+    try { return safeStorage.decryptString(Buffer.from(k.geminiEnc, 'base64')); } catch { return ''; }
+  }
+  return typeof k.geminiPlain === 'string' ? k.geminiPlain : '';
+}
+function setGeminiKey(raw) {
+  const key = String(raw || '').trim();
+  const data = readAiKeys();
+  delete data.geminiEnc; delete data.geminiPlain;
+  if (key) {
+    if (safeStorage.isEncryptionAvailable()) data.geminiEnc = safeStorage.encryptString(key).toString('base64');
+    else data.geminiPlain = key;
+  }
+  const tmp = aiKeysFile() + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, aiKeysFile());
+}
+
+function defaultAgentProvider() {
+  const w = aiWhich();
+  if (w === 'codex' || w === 'chatgpt') return 'codex';
+  if (w === 'claudecode' || w === 'claude') return 'claudecode';
+  if (hasGeminiKey()) return 'gemini-api';
+  if (mcpConnect.findExe('gemini')) return 'gemini-cli';
+  return 'gemini-api';
+}
+
+async function sendTabToAiPanel() {
+  const t = byId(activeId);
+  const wc = liveContents(t?.view);
+  if (!wc || !t || t.private || t.identity === 'vanish' || t.id === programId || !/^https?:/.test(wc.getURL())) {
+    sendEvent('toast', 'Open a normal web tab first to send it to the AI panel.');
+    return;
+  }
+  if (!aiView) openAI(aiWhich());
+  try {
+    const info = await wc.executeJavaScript(`(() => {
+      const sel = (getSelection()?.toString() || '').trim();
+      const body = (document.body?.innerText || '').trim();
+      return { title: document.title || '', url: location.href, text: (sel || body).slice(0, 16000), selected: !!sel };
+    })()`, true);
+    const payload = `Page: ${info.title}\nURL: ${info.url}\n\n${info.text}`;
+    clipboard.writeText(payload);
+    const awc = liveContents(aiView);
+    let inserted = false;
+    if (awc && !awc.isLoading()) {
+      const focused = await awc.executeJavaScript(`(() => {
+        const selectors = [
+          'rich-textarea .ql-editor[contenteditable="true"]',
+          'div.ProseMirror[contenteditable="true"]',
+          '#prompt-textarea',
+          'textarea[placeholder*="Enter"]',
+          'textarea[placeholder*="Ask"]',
+          'textarea[aria-label]',
+          'textarea',
+          '[contenteditable="true"][role="textbox"]'
+        ];
+        for (const s of selectors) {
+          const el = document.querySelector(s);
+          if (el && el.getClientRects().length) { el.focus(); return true; }
+        }
+        return false;
+      })()`, true).catch(() => false);
+      if (focused) {
+        await awc.insertText(payload).catch(() => {});
+        inserted = true;
+      }
+    }
+    const name = AI_NAMES[aiWhich()] || 'AI';
+    sendEvent('toast', inserted ? `Sent tab to ${name} (also copied).` : `Tab copied — press ${MAC ? '⌘V' : 'Ctrl+V'} to paste into ${name}.`);
+  } catch {
+    sendEvent('toast', 'Could not read that tab.');
+  }
+}
+
 let pendingAssistant = null;
+let activeDrive = null;
+function stopDriveTab() {
+  if (!activeDrive) return { ok: true, stopped: false };
+  const d = activeDrive;
+  activeDrive = null;
+  try { d.abort.abort(); } catch {}
+  try { if (d.srv && d.tok) d.srv.revokeScopedToken(d.tok); } catch {}
+  const t = byId(d.tabId);
+  if (t) { t.aiBusy = false; pushState(); }
+  return { ok: true, stopped: true };
+}
+function canDriveTab(t) {
+  return !!t && t.host === 'main' && !t.private && t.identity !== 'vanish' && t.id !== programId && !cueIds.includes(t.id) && !isLocked(t.identity) && /^https?:/.test(liveContents(t.view)?.getURL() || t.url || '');
+}
 function assistantTab(id) {
   const t = byId(id), wc = liveContents(t?.view);
   if (!wc || t.id !== activeId || t.host !== 'main' || t.private || t.id === programId || cueIds.includes(t.id) ||
       aiPaused() || !agentsMay(t.identity) || !/^https?:/.test(wc.getURL())) throw Error('Choose an off-air web tab in a folder enabled for AI agents.');
   return wc;
 }
-function askAboutPage(which, question = '') {
-  try { assistantTab(activeId); } catch (err) { sendEvent('toast', err.message); return; }
+function askAboutPage(which, question = '', tabId = activeId) {
+  const t = byId(tabId);
+  if (!canDriveTab(t)) { sendEvent('toast', 'Choose a normal off-air web tab first.'); return; }
   pendingAssistant = null;
-  sendEvent('ask-local', { id:activeId, which:which || aiWhich(), title:tabName(byId(activeId)), question });
+  sendEvent('ask-local', { id: t.id, which: which || defaultAgentProvider(), title: tabName(t), url: liveContents(t.view)?.getURL() || t.url || '', question, running: !!activeDrive });
 }
-async function askTab({ id, which, question }) {
-  if (!['codex','claudecode'].includes(which) || typeof question !== 'string' || !question.trim()) throw Error('Choose an assistant and enter a question.');
+async function askTab({ id, which, question, model }) {
+  if (!['codex', 'claudecode', 'gemini-cli', 'gemini-api'].includes(which) || typeof question !== 'string' || !question.trim()) throw Error('Choose an assistant and enter a question.');
   const wc = assistantTab(id), url = wc.getURL(), doc = crypto.randomUUID();
   const page = await wc.executeJavaScriptInIsolatedWorld(1002,[{code:`(() => {
     const controls = [...document.querySelectorAll('button,a[href],[role=button],summary')].filter(e => e.getClientRects().length && !e.disabled).slice(0,80);
@@ -4265,12 +4420,65 @@ async function askTab({ id, which, question }) {
       controls:controls.map((e,i)=>({ i,label:(e.getAttribute('aria-label') || e.innerText || e.title || '').trim().slice(0,100) })) };
   })()`}]);
   if (wc !== assistantTab(id) || wc.getURL() !== url) throw Error('The tab changed. Ask again.');
-  store.data.aiWhich = which; store.save();
-  const answer = await askLocal(which, question.slice(0,3000), page);
+  if (AI_HOME[which]) { store.data.aiWhich = which; store.save(); }
+  const answer = which === 'gemini-api'
+    ? await tabAgent.askGeminiApi({ apiKey: getGeminiKey(), model: model || settings().geminiModel || 'gemini-2.5-flash', question: question.slice(0, 3000), page })
+    : await askLocal(which, question.slice(0, 3000), page);
   if (wc !== assistantTab(id) || wc.getURL() !== url) throw Error('The tab changed. Ask again.');
   const item = page.controls[answer.control];
   pendingAssistant = item?.label ? { id,wc,url,doc,index:item.i,label:item.label } : null;
   return { answer:answer.answer.slice(0,12000), label:pendingAssistant?.label, doc };
+}
+async function driveTab({ id, which, goal, model }) {
+  if (!['codex', 'claudecode', 'gemini-cli', 'gemini-api'].includes(which)) throw new Error('Choose Gemini, Claude, or Codex.');
+  if (typeof goal !== 'string' || !goal.trim()) throw new Error('Describe what you want AI to do in this tab.');
+  const t = byId(Number(id));
+  if (!canDriveTab(t)) throw new Error('This tab cannot be driven by AI (private, Vanish, locked, or On Air tabs stay off-limits).');
+  if (activeDrive) stopDriveTab();
+  const srv = agentServer || await openAgentPort();
+  if (!srv) throw new Error('Cue could not open its local AI bridge port.');
+  const abort = new AbortController();
+  const runId = crypto.randomUUID();
+  const emit = (ev) => sendEvent('tab-agent-event', { runId, tabId: t.id, ...ev });
+  const agentName = which === 'codex' ? 'Codex (Tab)' : which === 'claudecode' ? 'Claude (Tab)' : which === 'gemini-cli' ? 'Gemini CLI (Tab)' : 'Gemini (Tab)';
+  const tok = srv.issueScopedToken(t.id, {
+    agentName,
+    ttlMs: 300000,
+    onTool: ({ tool, args }) => emit({ kind: 'step', text: tabAgent.summarizeCall(tool, args) }),
+  });
+  activeDrive = { runId, tabId: t.id, abort, srv, tok };
+  t.aiBusy = true; pushState();
+  const tabTitle = tabName(t);
+  const tabUrl = liveContents(t.view)?.getURL() || t.url || '';
+  try {
+    const out = which === 'gemini-api'
+      ? await tabAgent.driveWithGeminiApi({
+          apiKey: getGeminiKey(),
+          model: model || settings().geminiModel || 'gemini-2.5-flash',
+          goal: goal.trim().slice(0, 4000),
+          tabId: t.id, tabTitle, tabUrl,
+          portUrl: srv.portUrl, scopedToken: tok,
+          onStep: emit, signal: abort.signal,
+        })
+      : await tabAgent.driveWithCli({
+          provider: which,
+          model: model || 'auto',
+          goal: goal.trim().slice(0, 4000),
+          tabId: t.id, tabTitle, tabUrl,
+          portUrl: srv.portUrl, scopedToken: tok,
+          bridgePath: agentBridgePath(),
+          onStep: emit, signal: abort.signal,
+        });
+    emit({ kind: 'done', text: out.answer });
+    return { ok: true, runId, answer: String(out.answer || 'Done.').slice(0, 12000) };
+  } catch (err) {
+    emit({ kind: 'error', text: err.message });
+    throw err;
+  } finally {
+    try { srv.revokeScopedToken(tok); } catch {}
+    if (activeDrive && activeDrive.runId === runId) activeDrive = null;
+    if (byId(t.id)) { t.aiBusy = false; pushState(); }
+  }
 }
 async function confirmAssistant({id,doc}) {
   const p = pendingAssistant; pendingAssistant = null;
@@ -4813,12 +5021,14 @@ async function runTool(name, t, boardId) {
 }
 
 // ---------------------------------------------------------------- AI port
-function agentSetupText() {
+function agentBridgePath() {
   // In the installed app the bridge sits outside the archive, in app.asar.unpacked, so node can run it.
-  const bridge = !app.isPackaged ? path.join(ROOT, '..', 'bin', 'cue-mcp.js')
+  return !app.isPackaged ? path.join(ROOT, '..', 'bin', 'cue-mcp.js')
     : [path.join(process.resourcesPath, 'app.asar.unpacked', 'bin', 'cue-mcp.js'), path.join(process.resourcesPath, 'app', 'bin', 'cue-mcp.js')].find((f) => fs.existsSync(f))
       || path.join(process.resourcesPath, 'app.asar.unpacked', 'bin', 'cue-mcp.js');
-  return `Cue AI port: http://127.0.0.1:${AGENT_PORT}\nToken file: ${agentTokenFile()}\nMCP bridge: node "${bridge}"`;
+}
+function agentSetupText() {
+  return `Cue AI port: http://127.0.0.1:${AGENT_PORT}\nToken file: ${agentTokenFile()}\nMCP bridge: ${mcpConnect.resolveNodeBin()} "${agentBridgePath()}"`;
 }
 function agentTokenFile() { return path.join(app.getPath('userData'), 'agent-port.json'); }
 
@@ -5118,15 +5328,20 @@ const agentApi = {
     tabs: sidebarOrder().filter((t) => t.identity !== 'vanish' && !t.agent).length,
   }),
   log: logAgent,
+  canDriveScoped: (t) => canDriveTab(t),
 };
 
 // The AI port, opened once per launch at most.
 let portUp = false;
+let agentServer = null;
+let agentServerPromise = null;
 function openAgentPort() {
-  if (portUp) return;
+  if (agentServerPromise) return agentServerPromise;
   portUp = true;
-  startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
-    .catch((e) => { portUp = false; logAgent({ tool: 'port', error: e.message }); });
+  agentServerPromise = startAgentPort({ port: AGENT_PORT, tokenFile: agentTokenFile(), api: agentApi })
+    .then((srv) => { agentServer = srv; return srv; })
+    .catch((e) => { portUp = false; agentServerPromise = null; logAgent({ tool: 'port', error: e.message }); return null; });
+  return agentServerPromise;
 }
 
 function hiddenFromAI(t) { return t.private || t.id === programId; }
@@ -5370,8 +5585,9 @@ function pictureChoices(tab) {
 function toolMenu(cmd) {
   const tool = (label, name, accelerator) => ({ label, accelerator, click: cmd('tool', { name }) });
   return [
-    { label: 'AI Side Panel', accelerator: 'CmdOrCtrl+J', click: cmd('ai') },
-    { label: 'Ask AI About This Page', accelerator: 'CmdOrCtrl+Shift+J', click: cmd('ai-ask') },
+    { label: 'AI Side Panel (Gemini / Claude / Codex)', accelerator: 'CmdOrCtrl+J', click: cmd('ai') },
+    { label: 'Drive This Tab with AI…', accelerator: 'CmdOrCtrl+Shift+J', click: cmd('ai-ask') },
+    { label: 'Send Current Tab to AI Panel', click: cmd('ai-send-tab') },
     { type: 'separator' },
     { label: 'Copy Screenshot…', accelerator: 'CmdOrCtrl+Alt+Shift+C', click: cmd('copy-picture-menu') },
     { label: 'Mute or Unmute Cue', accelerator: 'CmdOrCtrl+Alt+Shift+M', click: () => uiCommand('master-mute') },
@@ -6092,7 +6308,9 @@ app.whenReady().then(async () => {
     welcomeData, finishWelcome, showWelcome: () => { store.data.welcome = 'pending'; sendEvent('welcome', welcomeData()); },
     midiAsks: () => [...midiAsks], portUp: () => portUp, agentPort: AGENT_PORT, startUrl: START_URL, spaces, alwaysPinned, credReady: (identity, origin) => { const c = vault.find(identity, origin); return c ? { handsFree: !!c.auto || Vault.ownSite(origin) } : null; },
     // Volume on the pinned apps (test/tile-volume.js): put a tab to sleep the way Cue does
-    destroyView });
+    destroyView,
+    // AI per-tab agent & MCP connect (test/ai-per-tab.js)
+    AI_HOME, openAI, driveTab, stopDriveTab, setGeminiKey, getGeminiKey, hasGeminiKey, openAgentPort, agentBridgePath, agentTokenFile, mcpConnect });
 });
 
 // HTTP Basic / Digest / Proxy authentication prompt so corporate portals and staging sites never silently hang.
@@ -6119,7 +6337,7 @@ app.on('login', (event, wc, _details, authInfo, callback) => {
   });
 });
 
-app.on('before-quit', () => { quitting = true; if (store) { persist(); store.flush(); } if (lib) lib.close(); });
+app.on('before-quit', () => { quitting = true; stopDriveTab(); if (store) { persist(); store.flush(); } if (lib) lib.close(); });
 app.on('window-all-closed', () => app.quit());
 app.on('web-contents-created', (_e, wc) => {
   wc.on('will-attach-webview', (ev) => ev.preventDefault());

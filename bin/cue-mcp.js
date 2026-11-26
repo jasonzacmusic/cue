@@ -17,8 +17,11 @@ function conn() {
   throw new Error('Cue is not running yet. Open Cue first, then try again.');
 }
 
-const id = { type: 'number', description: 'Tab id from cue_tabs' };
-const TOOLS = [
+const SCOPED_TAB_ID = process.env.CUE_SCOPED_TAB_ID ? Number(process.env.CUE_SCOPED_TAB_ID) : null;
+const SCOPED_NAMES = new Set(['read', 'snapshot', 'screenshot', 'click', 'type', 'press', 'scroll', 'wait', 'navigate', 'back']);
+
+const id = { type: 'number', description: SCOPED_TAB_ID ? `Tab id (defaults to ${SCOPED_TAB_ID})` : 'Tab id from cue_tabs' };
+const ALL_TOOLS = [
   ['identities', 'List the folders you may work in: each person in Cue has a private folder with their own sign-ins, and only the unlocked folders the person has opened to AI agents are listed, plus "agent" (a clean login of your own). Each has an id, a name and the Google account it holds. Use one of these instead of asking anyone to log in.', {}],
   ['tabs', 'List the open tabs you may see, with id, title, address, folder (identity), group, and whether you may act in them.', {}],
   ['open', 'Open a page in your own AI lane. Cue keeps ONE tab per site for you: calling this again for the same site reuses that tab and navigates it, so WhatsApp, the Learning Portal and YouTube each stay a single tab however many times you visit them. Do not try to manage tabs yourself, and only pass newTab:true when you genuinely need two pages of the same site side by side. identity: a folder name or id from cue_identities, to work inside that folder\'s existing sign-ins; "agent" is a clean login.', { url: { type: 'string', description: 'Address or search words' }, identity: { type: 'string', description: 'A folder name or id from cue_identities, or "agent"' }, background: { type: 'boolean' }, newTab: { type: 'boolean', description: 'Force a second tab for a site you already have open. Rarely needed.' } }, ['url']],
@@ -74,14 +77,22 @@ const TOOLS = [
   ['download', 'Save a file from a page into Downloads/Cue Agents with no save dialog, and get its full path back, so you can attach it somewhere else with cue_attach. id: a tab you may act in; url: the file\'s address, or selector: the link or button on the page that downloads it. Example: {"id": 12, "selector": "a.invoice-pdf"}',
     { id, url: { type: 'string', description: 'The file\'s address' }, selector: { type: 'string', description: 'The link or button that downloads it' } },
     ['id']],
-].map(([name, description, props, required = []]) => ({ name: `cue_${name}`, description, inputSchema: { type: 'object', properties: props, required } }));
+].filter(([name]) => !SCOPED_TAB_ID || SCOPED_NAMES.has(name)).map(([name, description, props, required = []]) => ({
+  name: `cue_${name}`,
+  description,
+  inputSchema: { type: 'object', properties: props, required: SCOPED_TAB_ID ? required.filter((r) => r !== 'id') : required },
+}));
+
+const TOOLS = ALL_TOOLS;
 
 async function call(name, args) {
   const c = conn();
+  const payload = { ...(args || {}) };
+  if (SCOPED_TAB_ID && payload.id === undefined) payload.id = SCOPED_TAB_ID;
   const r = await fetch(`${c.url}/tool/${name.replace(/^cue_/, '')}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json', 'x-agent': process.env.CUE_AGENT_NAME || clientName || 'AI agent' },
-    body: JSON.stringify(args || {}),
+    body: JSON.stringify(payload),
   });
   const body = await r.json();
   if (!r.ok) throw new Error(body.error || `Cue said ${r.status}`);
@@ -100,8 +111,10 @@ async function handle(msg) {
     return reply(msgId, {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'cue', version: '0.7.17' },
-      instructions: 'Cue is the user\'s browser and the user works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Each person in Cue has a private folder. Use cue_identities to see the folders you may work in (locked folders and folders not opened to AI agents are never listed), then cue_open with identity set to one of those names or ids to work inside that folder\'s sign-ins without asking anyone to log in. Work only in tabs you open, in the background, so you never steal the window the person is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose folder every time, by its name or id from cue_identities. To put files from this computer on a page, never click a file box (that opens a dialog nobody can answer): use cue_attach, or files on cue_whatsapp and cue_gmail; cue_download saves a file from a page and gives you its path.',
+      serverInfo: { name: 'cue', version: '0.7.18' },
+      instructions: SCOPED_TAB_ID
+        ? `You are driving ONE specific browser tab in Cue (tab ${SCOPED_TAB_ID}). Every tool operates strictly on tab ${SCOPED_TAB_ID} (id defaults to ${SCOPED_TAB_ID}). Call cue_snapshot or cue_read first, perform the user's goal step by step, verify the result, and reply briefly.`
+        : 'Cue is the user\'s browser and the user works in it while you do. Keep it tidy: Cue gives you ONE tab per site, so call cue_open as often as you like for the same site and it will reuse that tab rather than piling up new ones. Never open a second tab for a site you already have, and clean up with cue_close when a job is finished. Each person in Cue has a private folder. Use cue_identities to see the folders you may work in (locked folders and folders not opened to AI agents are never listed), then cue_open with identity set to one of those names or ids to work inside that folder\'s sign-ins without asking anyone to log in. Work only in tabs you open, in the background, so you never steal the window the person is using. Never use tabs marked private or on air. For WhatsApp, never open web.whatsapp.com and click: call cue_whatsapp, which works in the tab that is already linked and answers in a few plain lines. Say whose folder every time, by its name or id from cue_identities. To put files from this computer on a page, never click a file box (that opens a dialog nobody can answer): use cue_attach, or files on cue_whatsapp and cue_gmail; cue_download saves a file from a page and gives you its path.',
     });
   }
   if (method === 'ping') return reply(msgId, {});

@@ -564,11 +564,10 @@ function renderExtras() {
   $('#musicbtn').classList.toggle('on', !!S.strip);
   $('#aihead').hidden = !S.ai;
   $('#aibtn').classList.toggle('on', !!S.ai);
-  document.querySelectorAll('[data-ai]').forEach((b) => b.classList.toggle('on', !!S.ai && b.dataset.ai === S.ai.which));
-  // Say whose login the panel is using, so he is never guessing which account Claude Code or Codex
-  // came up as.
+  if (S.ai && $('#aiswitch')) $('#aiswitch').value = S.ai.which;
+  // Say whose login the panel is using, so you are never guessing which account Gemini, Claude or Codex came up as.
   $('#aiwho').textContent = S.ai && S.ai.folder ? `as ${(S.identities[S.ai.folder] || {}).name || S.ai.folder}` : '';
-  $('#aiask').textContent = S.ai ? `Ask ${(S.ai.names && S.ai.names[S.ai.which]) || 'AI'} about this page` : 'Ask about this page';
+  $('#aiask').textContent = 'Drive tab';
   $('#peekbar').hidden = !S.peek;
   if (S.peek) $('#peektitle').textContent = S.peek.title;
   $('#recbtn').hidden = !S.recording;
@@ -1028,11 +1027,11 @@ function tabRow(t, splitIds) {
     // appears when you point at the row, so the sidebar is tab names and nothing
     // else until you reach for something.
     const ai = el('button', 'aitog' + (t.aiBusy ? ' busy' : t.aiOk ? ' on' : ' idle'), 'AI');
-    tip(ai, t.aiBusy ? 'An agent is working in this tab right now'
-      : t.agent ? 'An agent opened this tab, so it can work here'
+    tip(ai, t.aiBusy ? 'An AI agent is working in this tab right now'
+      : t.agent ? 'An AI agent opened this tab, so it can work here'
       : t.aiSite ? `${t.aiSite} is handed to agents for every folder \u00b7 change that in Settings`
-      : t.aiOk ? 'Claude Code and Codex may work in this tab \u00b7 click to take it back'
-               : 'Only you can use this tab \u00b7 click to hand it to Claude Code and Codex');
+      : t.aiOk ? 'Gemini, Claude and Codex may work in this tab \u00b7 click to take it back'
+               : 'Only you can use this tab \u00b7 click to hand it to Gemini, Claude and Codex');
     if (fixed) ai.disabled = true;
     else ai.onclick = (e) => { e.stopPropagation(); send('ai-tab', { id: t.id }); };
     ctl.append(ai);
@@ -1756,8 +1755,9 @@ window.addEventListener('keydown', (e) => {
 $('#musicbtn').onclick = () => send('strip');
 $('#aibtn').onclick = () => send('ai');
 $('#aiclose').onclick = () => send('ai');
+$('#aisend').onclick = () => send('ai-send-tab');
 $('#aiask').onclick = () => send('ai-ask');
-document.querySelectorAll('[data-ai]').forEach((b) => { b.onclick = () => send('ai', { which: b.dataset.ai }); });
+$('#aiswitch').onchange = (e) => send('ai', { which: e.target.value });
 $('#peekclose').onclick = () => send('peek-close');
 $('#peekkeep').onclick = () => send('peek-keep');
 $('#recbtn').onclick = stopRecording;
@@ -2547,17 +2547,86 @@ function settingsRooms(lockTarget) {
         });
       } },
 
-    { id: 'ai', name: 'AI agents', line: 'Let Claude Code, Codex and other AI tools work in Cue.',
-      more: 'They work in their own tabs with a purple ring and in the folders you allow. They can never touch off-air tabs, Vanish tabs or the tab on air, and Cue says on screen when one reaches into a tab you did not hand it. To hand over a tab, point at its row in the sidebar and click the AI mark; click it again to take it back. A lit mark means an agent is working in there right now.',
+    { id: 'ai', name: 'AI agents', line: 'Let Gemini, Claude, Codex and other AI tools drive Cue tabs.',
+      more: 'Connect Gemini CLI, Antigravity, Claude Code, Claude Desktop, Codex, or Cursor in one click, or save a free Google AI Studio API key to drive any tab directly inside Cue with zero installs. Locked accounts, private tabs, Vanish, and On Air tabs always stay off-limits.',
       build: (p) => {
         toggles(p,
-          toggle('', !!S.agent.on, 'Let AI agents drive Cue', 'Stays as you leave it, so an agent can answer messages or check a page while you are busy. While it is off nothing can drive Cue but you, and an AI tool that tries is told why.', (on) => send('ai-door', { on })),
+          toggle('', !!S.agent.on, 'Let AI agents drive Cue', 'Stays as you leave it, so external AI tools can work in handed-over tabs. While off, nothing external can drive Cue except you.', (on) => send('ai-door', { on })),
           ...(S.agent.sites || []).map((site) => toggle(`agentSites.${site.id}`, (s.agentSites || {})[site.id] !== false, `Let agents use ${site.name}`, site.what)));
+
+        // 1-Click Connect cards for Gemini CLI, Antigravity, Claude Code, Claude Desktop, Codex, Cursor
+        const mcpWrap = el('div', 'mcpgrid');
+        mcpWrap.append(el('div', 'hint', 'Checking installed AI tools…'));
+        const renderClients = (clients) => {
+          mcpWrap.innerHTML = '';
+          for (const c of clients || []) {
+            const card = el('div', 'mcpcard');
+            const left = el('div', 'mcpl');
+            const top = el('div', 'mcpname');
+            top.append(document.createTextNode(c.name));
+            const b = el('span', 'mcpbadge' + (c.connected ? ' on' : ''), c.connected ? 'Connected' : c.installed ? c.badge : 'Not installed');
+            top.append(b);
+            left.append(top, el('div', 'mcphint', c.hint));
+            const btn = el('button', 'btn', c.connected ? 'Disconnect' : 'Connect');
+            btn.type = 'button';
+            btn.onclick = async () => {
+              btn.disabled = true;
+              try {
+                const res = await ask(c.connected ? 'mcp-disconnect' : 'mcp-connect', { id: c.id });
+                if (res && res.clients) renderClients(res.clients);
+                toast(c.connected ? `Disconnected ${c.name}.` : `Connected ${c.name} to Cue — restart ${c.name} if it is already open.`);
+              } catch (err) {
+                toast(String(err.message || err).replace(/^.*?Error: /, ''));
+                btn.disabled = false;
+              }
+            };
+            card.append(left, btn);
+            mcpWrap.append(card);
+          }
+        };
+        p.append(settingRow('One-click AI tool connect', mcpWrap, 'Writes only the “cue” MCP entry into each tool’s config file and turns on Cue’s AI door automatically.'));
+        ask('mcp-clients').then((r) => { if (r && r.clients) renderClients(r.clients); }).catch(() => { mcpWrap.textContent = 'Could not read AI tool configs.'; });
+
+        // Built-in Gemini API key (Google AI Studio) for zero-CLI-install tab driving
+        const gbox = el('div', 'btnline');
+        const gkey = el('input', ''); gkey.type = 'password'; gkey.placeholder = 'Paste free AI Studio key (AIza…)'; gkey.style.minWidth = '210px';
+        const gmod = el('select');
+        for (const [val, lbl] of [['gemini-2.5-flash', 'Gemini 2.5 Flash'], ['gemini-2.5-pro', 'Gemini 2.5 Pro']]) gmod.add(new Option(lbl, val));
+        const gsave = el('button', 'btn', 'Save'); gsave.type = 'button';
+        const gclear = el('button', 'btn', 'Clear'); gclear.type = 'button'; gclear.hidden = true;
+        const gget = el('button', 'btn', 'Get free key'); gget.type = 'button';
+        gget.onclick = () => send('new-tab', { url: 'https://aistudio.google.com/apikey' });
+        const gstatus = el('span', 'hint', '');
+        const syncGemini = (r) => {
+          if (!r) return;
+          if (r.geminiModel) gmod.value = r.geminiModel;
+          gclear.hidden = !r.hasGeminiKey;
+          gkey.placeholder = r.hasGeminiKey ? 'Saved in keychain (paste to replace)' : 'Paste free AI Studio key (AIza…)';
+          gstatus.textContent = r.hasGeminiKey ? 'Saved securely in your OS keychain.' : 'Zero installs needed: lets Gemini drive any tab directly inside Cue.';
+        };
+        gsave.onclick = async () => {
+          const r = await ask('ai-gemini-key', { key: gkey.value.trim() || undefined, model: gmod.value });
+          gkey.value = ''; syncGemini(r); toast('Gemini settings saved.');
+        };
+        gmod.onchange = async () => {
+          const r = await ask('ai-gemini-key', { model: gmod.value });
+          syncGemini(r);
+        };
+        gclear.onclick = async () => {
+          const r = await ask('ai-gemini-key', { key: '' });
+          syncGemini(r); toast('Gemini key cleared.');
+        };
+        gbox.append(gkey, gmod, gsave, gclear, gget);
+        const grow = settingRow('Built-in Gemini (Google AI Studio)', gbox, 'Encrypted with your system keychain. Used when you pick “Gemini (AI Studio Key)” in Drive this tab (⌘⇧J).');
+        grow.querySelector('.slab')?.append(gstatus);
+        p.append(grow);
+        ask('ai-providers').then(syncGemini).catch(() => {});
+
         const cp = el('span', 'btnline'); const cpb = el('button', 'btn', 'Copy AI setup'); cpb.type = 'button';
         const tell = said(cp);
-        cpb.onclick = () => { send('agent-copy'); tell('Copied. Paste it into your AI tool.'); };
+        cpb.onclick = () => { send('agent-copy'); tell('Copied. Paste it into any other MCP client.'); };
         cp.prepend(cpb);
-        p.append(settingRow('Connect an AI tool', cp, '', S.agent.last ? `Last: ${S.agent.last.agent} used ${S.agent.last.tool}` : 'No agent has connected yet.'));
+        p.append(settingRow('Other MCP clients', cp, '', S.agent.last ? `Last: ${S.agent.last.agent} used ${S.agent.last.tool}` : 'No external agent has connected yet.'));
         advanced(p, (box) => {
           box.append(settingRow('Address agents connect to', el('code', 'addr', esc(`127.0.0.1:${S.agent.port}`)), 'Only programs on this computer can reach it.'));
         });
@@ -2920,42 +2989,145 @@ window.cue.onState((s) => {
   else if (refreshMusic && practiceHover) send('practice-hover', { zone: practiceHover });
   metronome.setMode(s.live, !!s.settings.masterMuted);
 });
+let activeAgentLog = null;
 function askLocalSheet(tab) {
-  openModal(sheet => {
-    const heading = el('h2','','Ask about this tab'), source = el('p','note');
-    source.textContent = tab.title + ' · The selected assistant receives visible text and control labels.';
-    const provider = el('select'); provider.setAttribute('aria-label','Assistant account');
-    for (const [value,text] of [['claudecode','Claude Code'],['codex','Codex']]) provider.add(new Option(text,value));
-    provider.value = tab.which;
-    const form = el('form'), input = el('input'); input.placeholder = 'Ask a question or find a button'; input.required = true; input.value = tab.question || ''; input.maxLength = 3000;
-    input.setAttribute('aria-label','Question about this tab');
-    const go = el('button','btn','Ask'); go.type = 'submit';
-    const output = el('p','note'); output.setAttribute('role','status');
-    const apply = el('button','btn'); apply.hidden = true;
-    form.append(input,go); sheet.append(heading,source,provider,form,output,apply);
-    form.onsubmit = async e => {
-      e.preventDefault(); if (go.disabled) return; go.disabled = true; apply.hidden = true;
-      output.textContent = 'Asking ' + provider.selectedOptions[0].text + '…';
-      try {
-        const r = await window.cue.invoke('ask-local-run',{id:tab.id,which:provider.value,question:input.value});
-        output.textContent = r.answer;
-        if (r.label) {
-          apply.textContent = 'Click “' + r.label + '”'; apply.hidden = false;
-          apply.onclick = async () => {
-            apply.hidden = true;
-            try { if (await window.cue.invoke('ask-local-click',{id:tab.id,doc:r.doc})) { closeModal(); toast('Clicked ' + r.label); }
-              else output.textContent = 'The control changed. Ask again.'; }
-            catch { output.textContent = 'The tab changed. Ask again.'; }
-          };
-        }
-      } catch(err) { output.textContent = String(err.message).replace(/^.*?Error: /,''); }
-      finally { go.disabled = false; }
+  openModal((sheet) => {
+    const heading = el('h2', '', 'Drive this tab with AI');
+    const source = el('p', 'note');
+    source.textContent = `${tab.title} · Locked strictly to this single tab. Private, locked, and On Air tabs stay off-limits.`;
+
+    const row = el('div', 'aimoderow');
+    const provider = el('select'); provider.setAttribute('aria-label', 'AI account');
+    const defaults = [
+      ['gemini-api', 'Gemini (AI Studio Key)'],
+      ['gemini-cli', 'Gemini CLI (Google Account)'],
+      ['claudecode', 'Claude (Claude Code)'],
+      ['codex', 'Codex (ChatGPT)'],
+    ];
+    for (const [value, text] of defaults) provider.add(new Option(text, value));
+    if (defaults.some(([v]) => v === tab.which)) provider.value = tab.which;
+
+    const modelSel = el('select'); modelSel.setAttribute('aria-label', 'Gemini model');
+    for (const [val, lbl] of [['gemini-2.5-flash', 'Gemini 2.5 Flash'], ['gemini-2.5-pro', 'Gemini 2.5 Pro']]) modelSel.add(new Option(lbl, val));
+
+    let driveMode = 'drive'; // 'drive' = autonomous multi-step on this tab, 'ask' = read + 1-click confirm
+    const pill = el('div', 'modepill');
+    const btnDrive = el('button', 'on', 'Act freely'); btnDrive.type = 'button';
+    const btnAsk = el('button', '', 'Ask first'); btnAsk.type = 'button';
+    const setMode = (m) => {
+      driveMode = m;
+      btnDrive.classList.toggle('on', m === 'drive');
+      btnAsk.classList.toggle('on', m === 'ask');
+      go.textContent = m === 'drive' ? 'Drive tab' : 'Ask';
+      input.placeholder = m === 'drive' ? 'Tell AI what to do in this tab (e.g. fill this form, find prices, click submit)…' : 'Ask a question or find a button to confirm…';
     };
-    setTimeout(()=>input.focus(),40);
+    btnDrive.onclick = () => setMode('drive');
+    btnAsk.onclick = () => setMode('ask');
+    pill.append(btnDrive, btnAsk);
+    row.append(provider, modelSel, pill);
+
+    const statusLine = el('p', 'hint', 'Checking connected accounts…');
+    const syncModelVis = () => { modelSel.hidden = !provider.value.startsWith('gemini'); };
+    provider.onchange = syncModelVis;
+    syncModelVis();
+
+    let providerList = [];
+    window.cue.invoke('ai-providers').then((info) => {
+      if (!info || !provider.isConnected) return;
+      providerList = info.providers || [];
+      const cur = provider.value;
+      provider.innerHTML = '';
+      for (const p of providerList) {
+        const opt = new Option(`${p.name}${p.ready ? ' ✓' : ''}`, p.id);
+        provider.add(opt);
+      }
+      if (info.geminiModel) modelSel.value = info.geminiModel;
+      const curObj = providerList.find((p) => p.id === cur);
+      if (curObj && curObj.ready) provider.value = cur;
+      else {
+        const firstReady = providerList.find((p) => p.ready);
+        if (firstReady) provider.value = firstReady.id;
+        else if (cur) provider.value = cur;
+      }
+      const updateDetail = () => {
+        const p = providerList.find((x) => x.id === provider.value);
+        statusLine.textContent = p ? p.detail : '';
+        syncModelVis();
+      };
+      provider.onchange = updateDetail;
+      updateDetail();
+    }).catch(() => { statusLine.textContent = ''; });
+
+    const form = el('form');
+    const input = el('input');
+    input.placeholder = 'Tell AI what to do in this tab (e.g. fill this form, find prices, click submit)…';
+    input.required = true; input.value = tab.question || ''; input.maxLength = 4000;
+    input.setAttribute('aria-label', 'Instruction for this tab');
+    const go = el('button', 'btn', 'Drive tab'); go.type = 'submit';
+    const stopBtn = el('button', 'btn', 'Stop'); stopBtn.type = 'button'; stopBtn.hidden = true;
+    stopBtn.onclick = async () => {
+      stopBtn.disabled = true;
+      await window.cue.invoke('tab-drive-stop').catch(() => {});
+    };
+    form.append(input, go, stopBtn);
+
+    const logBox = el('div', 'ailog'); logBox.hidden = true;
+    const output = el('p', 'note'); output.setAttribute('role', 'status');
+    const apply = el('button', 'btn'); apply.hidden = true;
+
+    const addStep = (kind, text) => {
+      if (!logBox.isConnected) return;
+      logBox.hidden = false;
+      const line = el('div', 'aistep' + (kind === 'done' ? ' done' : kind === 'error' ? ' err' : ''), text);
+      logBox.append(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    };
+    activeAgentLog = { tabId: tab.id, addStep };
+
+    sheet.append(heading, source, row, statusLine, form, logBox, output, apply);
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (go.disabled) return;
+      go.disabled = true; apply.hidden = true;
+      logBox.innerHTML = ''; logBox.hidden = true;
+      const pickedLabel = provider.selectedOptions[0]?.text.replace(/ ✓$/, '') || 'AI';
+      if (driveMode === 'ask') {
+        output.textContent = `Asking ${pickedLabel}…`;
+        try {
+          const r = await window.cue.invoke('ask-local-run', { id: tab.id, which: provider.value, question: input.value, model: modelSel.value });
+          output.textContent = r.answer;
+          if (r.label) {
+            apply.textContent = 'Click “' + r.label + '”'; apply.hidden = false;
+            apply.onclick = async () => {
+              apply.hidden = true;
+              try {
+                if (await window.cue.invoke('ask-local-click', { id: tab.id, doc: r.doc })) { closeModal(); toast('Clicked ' + r.label); }
+                else output.textContent = 'The control changed. Ask again.';
+              } catch { output.textContent = 'The tab changed. Ask again.'; }
+            };
+          }
+        } catch (err) { output.textContent = String(err.message).replace(/^.*?Error: /, ''); }
+        finally { go.disabled = false; }
+      } else {
+        output.textContent = `${pickedLabel} is driving this tab…`;
+        stopBtn.hidden = false; stopBtn.disabled = false;
+        try {
+          const r = await window.cue.invoke('tab-drive-start', { id: tab.id, which: provider.value, goal: input.value, model: modelSel.value });
+          output.textContent = r.answer || 'Done.';
+        } catch (err) {
+          output.textContent = String(err.message).replace(/^.*?Error: /, '');
+        } finally {
+          go.disabled = false; stopBtn.hidden = true; stopBtn.disabled = false;
+        }
+      }
+    };
+    setTimeout(() => input.focus(), 40);
   });
 }
 window.cue.onEvent((name, data) => {
   if (name === 'ask-local') askLocalSheet(data);
+  else if (name === 'tab-agent-event' && activeAgentLog && data && data.tabId === activeAgentLog.tabId) activeAgentLog.addStep(data.kind, data.text);
   if (name === 'track-beat') metronome.updateTrack(data);
   else if (name === 'practice-key') practiceKey(data);
   else if (name === 'toast') toast(data);

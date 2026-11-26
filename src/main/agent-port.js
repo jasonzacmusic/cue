@@ -42,6 +42,7 @@ function findJS(target) {
     }
     if (!el) return null;
     el.scrollIntoView({ block: 'center', inline: 'center' });
+    if (t.focus && typeof el.focus === 'function') el.focus();
     const r = el.getBoundingClientRect();
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), tag: el.tagName.toLowerCase() };
   })()`;
@@ -54,8 +55,24 @@ async function startAgentPort({ port, tokenFile, api }) {
   fs.writeFileSync(tokenFile, JSON.stringify({ url: `http://127.0.0.1:${port}`, token }, null, 2), { mode: 0o600 });
   fs.chmodSync(tokenFile, 0o600); // the mode above only applies when the file is new
 
-  const need = (t, act) => {
+  const scopedTokens = new Map();
+  const SCOPED_TOOLS = new Set(['read', 'snapshot', 'screenshot', 'click', 'type', 'press', 'scroll', 'wait', 'navigate', 'back', 'problems']);
+  const issueScopedToken = (tabId, { agentName = 'Tab Agent', ttlMs = 300000, onTool = null } = {}) => {
+    const tok = crypto.randomBytes(24).toString('hex');
+    const exp = Date.now() + ttlMs;
+    scopedTokens.set(tok, { tabId: Number(tabId), agentName, exp, onTool });
+    return tok;
+  };
+  const revokeScopedToken = (tok) => { if (tok) scopedTokens.delete(tok); };
+
+  const need = (t, act, scope = null) => {
     if (!t) throw new Error('No tab with that id.');
+    if (scope) {
+      if (t.id !== scope.tabId) throw new Error('This tab agent is locked to its assigned tab only.');
+      if (!api.canDriveScoped(t)) throw new Error('This tab is no longer available to AI (it may be private, on air, locked, or closed).');
+      api.ensure(t);
+      return t.view.webContents;
+    }
     if (!api.canRead(t)) throw new Error('That tab is private, in a Vanish window, or in a folder that is locked or not open to AI agents. Agents cannot use it.');
     if (act && api.paused && api.paused()) throw new Error('AI agents are paused in Cue. The person is working in these tabs themselves. Stop here and say so — do not try another way in. They resume agents with the AI row in the sidebar.');
     if (act && !api.canAct(t)) throw new Error('Agents can only act in tabs they opened, or tabs marked "Let AI agents use this tab". Open your own tab with the open tool (it can use the sign-ins of any folder cue_identities lists).');
@@ -64,7 +81,7 @@ async function startAgentPort({ port, tokenFile, api }) {
   };
   // The same checks, then the tab is woken for the agent (wake() in main.js): drawn at its real
   // size outside the window's visible area, so a background page reads as it would on screen.
-  const needAwake = async (t, act) => { const wc = need(t, act); if (api.wake) await api.wake(t); return wc; };
+  const needAwake = async (t, act, scope = null) => { const wc = need(t, act, scope); if (api.wake) await api.wake(t); return wc; };
   const waitLoad = async (wc, ms = 15000) => {
     const end = Date.now() + ms;
     while (wc.isLoading() && Date.now() < end) await sleep(100);
@@ -78,28 +95,28 @@ async function startAgentPort({ port, tokenFile, api }) {
       await waitLoad(t.view.webContents);
       return { id: t.id, title: t.view.webContents.getTitle(), url: t.view.webContents.getURL(), identity: t.identity };
     },
-    navigate: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); await wc.loadURL(api.safeUrl(a.url)).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
-    back: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return { url: wc.getURL() }; },
+    navigate: async (a, sc) => { const t = api.get(a.id); const wc = await needAwake(t, true, sc); await wc.loadURL(api.safeUrl(a.url)).catch(() => {}); await waitLoad(wc); return { url: wc.getURL(), title: wc.getTitle() }; },
+    back: async (a, sc) => { const t = api.get(a.id); const wc = await needAwake(t, true, sc); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return { url: wc.getURL() }; },
     close: async (a) => { const t = api.get(a.id); need(t, true); api.close(t); return { closed: a.id }; },
-    read: async (a) => {
-      const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc);
+    read: async (a, sc) => {
+      const t = api.get(a.id); const wc = await needAwake(t, false, sc); await waitLoad(wc);
       const text = await wc.executeJavaScript('document.body ? document.body.innerText : ""', true);
       const max = Math.min(Number(a.maxChars) || 20000, 200000);
       return { id: t.id, title: wc.getTitle(), url: wc.getURL(), text: text.slice(0, max), truncated: text.length > max };
     },
-    snapshot: async (a) => {
-      const t = api.get(a.id); const wc = await needAwake(t, false); await waitLoad(wc);
+    snapshot: async (a, sc) => {
+      const t = api.get(a.id); const wc = await needAwake(t, false, sc); await waitLoad(wc);
       const out = { url: wc.getURL(), title: wc.getTitle(), elements: await wc.executeJavaScript(SNAPSHOT_JS, true) };
       // Where files can go (hidden boxes, iframes and shadow roots included), for cue_attach.
-      try {
+      if (!sc) try {
         const f = api.fileTargets ? await api.fileTargets(t) : null;
         if (f && (f.inputs.length || f.openers.length || f.dropZones.length)) out.files = { ...f, how: 'Put files here with cue_attach: files:[full paths], and selector if there is more than one place.' };
       } catch {}
       return out;
     },
-    screenshot: async (a) => { const t = api.get(a.id); need(t, false); const img = await api.capture(t); if (!img) throw new Error('Could not take a picture of that tab yet. Try again in a moment.'); const out = a.width ? img.resize({ width: Number(a.width) }) : img; return { mime: 'image/png', base64: out.toPNG().toString('base64') }; },
-    click: async (a) => {
-      const t = api.get(a.id); const wc = await needAwake(t, true);
+    screenshot: async (a, sc) => { const t = api.get(a.id); need(t, false, sc); const img = await api.capture(t); if (!img) throw new Error('Could not take a picture of that tab yet. Try again in a moment.'); const out = a.width ? img.resize({ width: Number(a.width) }) : img; return { mime: 'image/png', base64: out.toPNG().toString('base64') }; },
+    click: async (a, sc) => {
+      const t = api.get(a.id); const wc = await needAwake(t, true, sc);
       const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: a.text }), true);
       if (!p) throw new Error('Could not find that element. Call snapshot first and click by ref.');
       await sleep(80);
@@ -109,23 +126,23 @@ async function startAgentPort({ port, tokenFile, api }) {
       await sleep(300); await waitLoad(wc, 8000);
       return { clicked: p.tag, url: wc.getURL() };
     },
-    type: async (a) => {
-      const t = api.get(a.id); const wc = await needAwake(t, true);
+    type: async (a, sc) => {
+      const t = api.get(a.id); const wc = await needAwake(t, true, sc);
       const label = a.label ?? a.text; // the field's label, under either name
       if (a.ref || a.selector || label) {
-        const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: label }), true);
+        const p = await wc.executeJavaScript(findJS({ ref: a.ref, selector: a.selector, text: label, focus: true }), true);
         if (!p) throw new Error('Could not find that field.');
         wc.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 });
         wc.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 });
-        await sleep(60);
+        await sleep(80);
       }
       if (a.clear) { await wc.executeJavaScript('document.execCommand("selectAll")', true); }
       await wc.insertText(String(a.value ?? a.textToType ?? ''));
       if (a.submit) { wc.sendInputEvent({ type: 'keyDown', keyCode: 'Return' }); wc.sendInputEvent({ type: 'char', keyCode: '\r' }); wc.sendInputEvent({ type: 'keyUp', keyCode: 'Return' }); await sleep(300); await waitLoad(wc); }
       return { typed: true, url: wc.getURL() };
     },
-    press: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, true); wc.sendInputEvent({ type: 'keyDown', keyCode: a.key }); wc.sendInputEvent({ type: 'keyUp', keyCode: a.key }); await sleep(150); return { pressed: a.key }; },
-    scroll: async (a) => { const t = api.get(a.id); const wc = await needAwake(t, false); await wc.executeJavaScript(`window.scrollBy(0, ${Number(a.dy) || 600})`, true); return { ok: true }; },
+    press: async (a, sc) => { const t = api.get(a.id); const wc = await needAwake(t, true, sc); wc.sendInputEvent({ type: 'keyDown', keyCode: a.key }); wc.sendInputEvent({ type: 'keyUp', keyCode: a.key }); await sleep(150); return { pressed: a.key }; },
+    scroll: async (a, sc) => { const t = api.get(a.id); const wc = await needAwake(t, false, sc); await wc.executeJavaScript(`window.scrollBy(0, ${Number(a.dy) || 600})`, true); return { ok: true }; },
     // Say so when the script is missing. String(undefined) is the word "undefined", which evaluates
     // to nothing and comes back as a perfectly innocent null - three calls in a row looked like the
     // page was empty when the real answer was that the caller had named the argument something else.
@@ -135,8 +152,8 @@ async function startAgentPort({ port, tokenFile, api }) {
       const r = await wc.executeJavaScript(a.script, true);
       return { result: r === undefined ? null : r };
     },
-    wait: async (a) => {
-      const t = api.get(a.id); const wc = await needAwake(t, false); const end = Date.now() + Math.min(Number(a.ms) || 5000, 30000);
+    wait: async (a, sc) => {
+      const t = api.get(a.id); const wc = await needAwake(t, false, sc); const end = Date.now() + Math.min(Number(a.ms) || 5000, 30000);
       while (Date.now() < end) {
         if (a.selector) { if (await wc.executeJavaScript(`!!document.querySelector(${JSON.stringify(a.selector)})`, true)) return { found: true }; }
         else if (a.text) { if (await wc.executeJavaScript(`document.body && document.body.innerText.includes(${JSON.stringify(a.text)})`, true)) return { found: true }; }
@@ -145,7 +162,7 @@ async function startAgentPort({ port, tokenFile, api }) {
       }
       return { found: false };
     },
-    problems: async (a) => { const t = api.get(a.id); need(t, false); return { url: t.url, problems: api.problems(t) }; },
+    problems: async (a, sc) => { const t = api.get(a.id); need(t, false, sc); return { url: t.url, problems: api.problems(t) }; },
     fullpage: async (a) => { const t = api.get(a.id); await needAwake(t, false); return api.fullPage(t); },
     alert: async (a) => { api.alert(a); return { ok: true }; },
     bills: async () => api.bills(),
@@ -191,27 +208,40 @@ async function startAgentPort({ port, tokenFile, api }) {
     const host = (req.headers.host || '').split(':')[0];
     if (!['127.0.0.1', 'localhost'].includes(host) || req.headers.origin) return send(403, { error: 'Local AI tools only.' });
     if (req.url === '/health') return send(200, { app: 'cue', ready: true });
-    if (req.headers.authorization !== `Bearer ${token}`) return send(401, { error: 'Missing or wrong token.' });
+    const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    let scope = null;
+    if (bearer !== token) {
+      scope = scopedTokens.get(bearer) || null;
+      if (!scope) return send(401, { error: 'Missing or wrong token.' });
+      if (Date.now() > scope.exp) { scopedTokens.delete(bearer); return send(401, { error: 'This tab session expired. Start again.' }); }
+    }
     // The key alone is not permission. Anything running as you can read this
     // file, so the door itself has to be opened by hand, and only for as long
-    // as Cue is open.
-    if (!api.doorOpen() && req.url !== '/tool/livequeue') {
+    // as Cue is open. A scoped single-tab token bypasses the global door because
+    // the person explicitly launched "Drive this tab" on that one tab.
+    if (!scope && !api.doorOpen() && req.url !== '/tool/livequeue') {
       api.knock(String(req.headers['x-agent'] || 'An AI tool').slice(0, 40));
       return send(403, { error: 'The AI door is closed. In Cue, open Settings and switch on "Let AI agents drive Cue". It stays on until the person switches it off.' });
     }
     const m = req.url.match(/^\/tool\/(\w+)$/);
     if (!m || req.method !== 'POST' || !Object.hasOwn(tools, m[1])) return send(404, { error: 'Unknown tool.', tools: Object.keys(tools) });
+    if (scope && !SCOPED_TOOLS.has(m[1])) return send(403, { error: 'This per-tab agent can only inspect and interact with its assigned tab.' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 2e6) req.destroy(); });
     req.on('end', async () => {
       let args = {}; try { args = body ? JSON.parse(body) : {}; } catch { return send(400, { error: 'Body must be JSON.' }); }
-      const agent = String(req.headers['x-agent'] || 'AI agent').slice(0, 40);
+      if (scope) {
+        if (args.id !== undefined && Number(args.id) !== scope.tabId) return send(403, { error: 'This per-tab agent is locked to its assigned tab only.' });
+        args.id = scope.tabId;
+      }
+      const agent = scope ? scope.agentName : String(req.headers['x-agent'] || 'AI agent').slice(0, 40);
       // The NAMES of any files an agent hands a page go in the log, never what is in them.
       const list = Array.isArray(args.files) ? args.files : typeof args.files === 'string' ? [args.files] : [];
       const files = list.length ? { files: list.slice(0, 25).map((f) => path.basename(String(f))) } : {};
       const tab = args.id ?? (typeof args.tab === 'number' || /^\d+$/.test(String(args.tab ?? '')) ? args.tab : undefined);
       try {
-        const out = await tools[m[1]](args);
+        if (scope && scope.onTool) scope.onTool({ tool: m[1], args });
+        const out = await tools[m[1]](args, scope);
         api.log({ agent, tool: m[1], tab, url: args.url, ...files, ok: true });
         send(200, out);
       } catch (e) {
@@ -220,6 +250,9 @@ async function startAgentPort({ port, tokenFile, api }) {
       }
     });
   });
+  server.issueScopedToken = issueScopedToken;
+  server.revokeScopedToken = revokeScopedToken;
+  server.portUrl = `http://127.0.0.1:${port}`;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   return server;
 }

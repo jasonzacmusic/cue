@@ -106,9 +106,25 @@
   <button data-t="mark" title="Copy the current timestamp and page link">Mark time</button><button data-t="frame" title="Save the current video frame as a PNG in Downloads → Cue Captures">Grab frame</button></span>
 </div>
 <div id="aihead" class="aihead" hidden>
-  <button data-ai="claudecode">Claude Code</button><button data-ai="codex">Codex</button>
+  <select id="aiswitch" class="aiswitch" aria-label="AI panel mode">
+    <optgroup label="Gemini">
+      <option value="gemini">Gemini</option>
+      <option value="aistudio">AI Studio</option>
+      <option value="notebooklm">NotebookLM</option>
+      <option value="jules">Jules</option>
+    </optgroup>
+    <optgroup label="Claude">
+      <option value="claudecode">Claude Code</option>
+      <option value="claude">Claude</option>
+    </optgroup>
+    <optgroup label="OpenAI">
+      <option value="codex">Codex</option>
+      <option value="chatgpt">ChatGPT</option>
+    </optgroup>
+  </select>
   <span id="aiwho" class="aiwho"></span>
-  <button id="aiask" class="btn">Ask about this page</button>
+  <button id="aisend" class="btn" title="Copy and paste the current tab into this chat">Send tab</button>
+  <button id="aiask" class="btn" title="Let Gemini, Claude, or Codex drive the current tab (⌘⇧J)">Drive tab</button>
   <button id="aiclose" class="icon" aria-label="Close AI panel">×</button>
 </div>
 
