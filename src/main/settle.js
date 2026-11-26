@@ -67,7 +67,7 @@ function desktopEntry(launcher, icon) {
   return `[Desktop Entry]
 Type=Application
 Name=Cue
-Comment=The Nathaniel School of Music browser
+Comment=The browser for people who make things
 Exec=${execArg(launcher)} %U
 Icon=${deskString(icon)}
 Terminal=false

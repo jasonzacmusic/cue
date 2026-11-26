@@ -7,7 +7,8 @@ const FAILED = /(payment (has )?failed|card (was |has been )?declined|unable to 
 const PAID = /\b(?:invoice|payment|receipt)(?:\s+(?:status|is|was|has been))?\s*[:–—-]?\s*paid\b|\bpaid\s+(?:invoice|receipt)\b/i;
 const HYPOTHETICAL = /\b(?:if|unless|when|not|never|why|what if)\b/i;
 const NEXT = /(next|upcoming|renew(s|al)?|due)[^\n]{0,40}?(?:on\s+|date:?\s+|:\s*)?((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+20\d\d|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+20\d\d|20\d\d-\d\d-\d\d)/i;
-const MONEY = /(₹|INR\s?|\$|USD\s?)\s?(\d[\d,]*(?:\.\d{1,2})?)/;
+const MONEY = /(₹|INR\s?|€|EUR\s?|£|GBP\s?|A\$|AUD\s?|C\$|CAD\s?|¥|JPY\s?|\$|USD\s?)\s?(\d[\d,]*(?:\.\d{1,2})?)/;
+const PER_USD = { USD: 1, INR: 85, EUR: 0.92, GBP: 0.79, AUD: 1.54, CAD: 1.38, JPY: 155 };
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
@@ -20,7 +21,17 @@ function readPage(text) {
   if (n) { const d = new Date(n[3].replace(/(\d)(st|nd|rd|th)/i, '$1')); if (!Number.isNaN(+d)) out.renews = iso(d); }
   const near = n ? text.slice(Math.max(0, n.index - 120), n.index + n[0].length + 120) : text;
   const m = near.match(MONEY);
-  if (m) out.amount = { value: Number(m[2].replace(/,/g, '')), usd: /\$|USD/.test(m[1]) };
+  if (m) {
+    const sym = m[1].trim().toUpperCase();
+    const code = sym === '₹' || sym === 'INR' ? 'INR'
+      : sym === '€' || sym === 'EUR' ? 'EUR'
+      : sym === '£' || sym === 'GBP' ? 'GBP'
+      : sym === 'A$' || sym === 'AUD' ? 'AUD'
+      : sym === 'C$' || sym === 'CAD' ? 'CAD'
+      : sym === '¥' || sym === 'JPY' ? 'JPY'
+      : 'USD';
+    out.amount = { value: Number(m[2].replace(/,/g, '')), currency: code, usd: code === 'USD' };
+  }
   return out;
 }
 
@@ -59,7 +70,7 @@ function reminder(b, now = new Date()) {
   return { key: phase + '|' + (b.renews || ''), title: b.name + ': ' + detail };
 }
 
-function fromPage(bills, url, text, usdToInr) {
+function fromPage(bills, url, text, usdToInr, currency) {
   const u = new URL(url);
   const read = readPage(text);
   if (!read.status && !read.renews) return null;
@@ -68,7 +79,15 @@ function fromPage(bills, url, text, usdToInr) {
   if (!b) { b = { id: crypto.randomUUID(), name: host, url, amountINR: 0, renews: '', status: 'ok', note: 'Found on this page', source: 'page' }; bills.push(b); }
   if (read.status) b.status = read.status;
   if (read.renews) b.renews = read.renews;
-  if (read.amount) b.amountINR = Math.round(read.amount.usd ? read.amount.value * usdToInr : read.amount.value);
+  if (read.amount) {
+    const target = String(currency || (Number(usdToInr) > 20 ? 'INR' : 'USD')).toUpperCase();
+    const rate = Number(usdToInr) > 0 ? Number(usdToInr) : (PER_USD[target] || 1);
+    const src = read.amount.currency || (read.amount.usd ? 'USD' : 'INR');
+    const converted = src === target ? read.amount.value
+      : src === 'USD' ? read.amount.value * rate
+      : (read.amount.value / (PER_USD[src] || 1)) * rate;
+    b.amountINR = target === 'INR' || target === 'JPY' ? Math.round(converted) : Math.round(converted * 100) / 100;
+  }
   b.url = url;
   return b;
 }

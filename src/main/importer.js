@@ -375,17 +375,31 @@ function readPasswords(browser, profile, key) {
   try {
     if (!browser || isSafari(browser) || !key) return [];
     const dir = profilePath(browser, profile);
-    const file = isFile(path.join(dir, 'Login Data')) ? path.join(dir, 'Login Data') : path.join(dir, 'Login Data For Account');
-    return withDb(file, (db) => {
-      const out = [];
-      for (const r of rows(db, 'SELECT origin_url, username_value, password_value FROM logins')) {
-        const password = decryptValue(r.password_value, key);
-        const username = str(r.username_value);
-        if (!password) continue; // blocked-site markers and federated logins have no password
-        out.push({ origin: str(r.origin_url), username, password });
+    // Modern Chrome keeps synced Google Password Manager entries in "Login Data For Account"
+    // alongside a local (often empty) "Login Data" file. Read both and merge without duplicates.
+    const files = ['Login Data', 'Login Data For Account']
+      .map((name) => path.join(dir, name))
+      .filter((f) => isFile(f));
+    const out = [];
+    const seen = new Map();
+    for (const file of files) {
+      const part = withDb(file, (db) => {
+        const list = [];
+        for (const r of rows(db, 'SELECT origin_url, username_value, password_value FROM logins')) {
+          const password = decryptValue(r.password_value, key);
+          const username = str(r.username_value);
+          if (!password) continue; // blocked-site markers and federated logins have no password
+          list.push({ origin: str(r.origin_url), username, password });
+        }
+        return list;
+      }, []);
+      for (const item of part) {
+        const k = `${item.origin}\0${item.username}`;
+        if (seen.has(k)) out[seen.get(k)] = item;
+        else { seen.set(k, out.length); out.push(item); }
       }
-      return out;
-    }, []);
+    }
+    return out;
   } catch { return []; }
 }
 

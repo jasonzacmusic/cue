@@ -150,7 +150,7 @@ browser per phone, so there is no second session to make — these tabs are it.
   again since 11-Nov; on 2-Nov it did not), clicks the matching row under "Chats" (then
   "Contacts"; never a "Messages" hit) and empties the box afterwards, every time, in a `finally`.
   If WhatsApp does not answer with its section headings, Cue walks the list instead and clicks the
-  row the moment it is drawn. A phone number works as a name ("+91 85003 50600" or "8500350600");
+  row the moment it is drawn. A phone number works as a name ("+1 555 010 0199" or "5550100199");
   a number with no chat at all is opened with WhatsApp's `send?phone=` address, which reloads the
   tab, so it is refused on the tab he has in front of him.
 - **The right chat, or an error.** Names are compared in FULL (letters and digits only, so emoji

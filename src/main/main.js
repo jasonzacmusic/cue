@@ -2,7 +2,7 @@
 // Main process: windows, tabs, identities, split views, the on-air stage and the AI port.
 if (process.env.CUE_TEST && !process.env.CUE_REAL_SCREEN) require('../../test/hidden-windows');
 const {
-  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, nativeImage, protocol, net, webContents, screen, powerMonitor,
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, shell, dialog, desktopCapturer, clipboard, nativeImage, protocol, net, webContents, screen, powerMonitor, systemPreferences,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -184,6 +184,29 @@ const emailOf = (k) => {
 const unlocked = new Set();
 const lockTouched = {};
 const lockTries = {};
+const passChangeTries = {};
+const canTouchId = () => {
+  if (process.platform !== 'darwin' || typeof systemPreferences?.canPromptTouchID !== 'function') return false;
+  try { return !!systemPreferences.canPromptTouchID(); } catch { return false; }
+};
+function lockBucket(name) {
+  if (store && store.data) {
+    if (!store.data[name] || typeof store.data[name] !== 'object') store.data[name] = {};
+    return store.data[name];
+  }
+  return name === 'passChangeTries' ? passChangeTries : lockTries;
+}
+function getLockTry(name, id) {
+  const b = lockBucket(name);
+  const t = b[id];
+  if (t && t.until && t.until <= Date.now()) { t.until = 0; }
+  return t || null;
+}
+function saveLockTry(name, id, val) {
+  const b = lockBucket(name);
+  if (val) b[id] = val; else delete b[id];
+  if (store) store.save();
+}
 const hasLock = (id) => { const f = folderById(id); return !!(f && f.lock && f.lock.hash && f.lock.salt); };
 const isLocked = (id) => hasLock(id) && !unlocked.has(id);
 const passHash = (code, salt) => crypto.scryptSync(String(code), Buffer.from(salt, 'hex'), 32).toString('hex');
@@ -867,31 +890,72 @@ function setFolder(name) {
   if (first) activate(first.id); else openTab({ identity: name });
 }
 
+// Cycle to the next or previous account folder (Cmd+Shift+] / Cmd+Shift+[).
+function stepFolder(dir = 1) {
+  const list = userFolders();
+  if (list.length <= 1) return;
+  const i = list.findIndex((f) => f.id === openFolder());
+  const next = list[((i < 0 ? 0 : i) + (dir < 0 ? -1 : 1) + list.length) % list.length];
+  if (next) setFolder(next.id);
+}
+
 // ---------------------------------------------------------------- people: add, lock, remove
 // The small sheet in the sidebar that asks for a folder's passcode.
 function askUnlock(id) {
   const f = folderById(id);
   if (!f) return;
-  const t = lockTries[id];
+  const t = getLockTry('lockTries', id);
   const wait = t && t.until > Date.now() ? Math.ceil((t.until - Date.now()) / 1000) : 0;
-  sendEvent('unlock', { id, name: f.name, color: f.color || NEUTRAL, picture: f.picture || '', wait });
+  sendEvent('unlock', { id, name: f.name, color: f.color || NEUTRAL, picture: f.picture || '', wait, touchId: canTouchId() && f.touchId !== false });
 }
 
-// Five wrong tries and the sheet waits a minute before it takes another.
+// Five wrong tries and the sheet waits a minute before it takes another. Persisted across restarts.
 const LOCK_TRIES = 5;
 const LOCK_WAIT_MS = 60000;
+function checkRateLimit(bucket, id, code) {
+  const t = getLockTry(bucket, id) || { n: 0, until: 0 };
+  if (t.until > Date.now()) {
+    const wait = Math.ceil((t.until - Date.now()) / 1000);
+    return { error: `Too many wrong tries. Wait ${wait} seconds, then try again.`, wait };
+  }
+  if (!passOk(id, code)) {
+    t.n = (t.n || 0) + 1;
+    if (t.n >= LOCK_TRIES) {
+      t.n = 0; t.until = Date.now() + LOCK_WAIT_MS;
+      saveLockTry(bucket, id, t);
+      return { error: 'That passcode is not right. That was the fifth try, so wait a minute before the next one.', wait: LOCK_WAIT_MS / 1000 };
+    }
+    saveLockTry(bucket, id, t);
+    return { error: `That passcode is not right. ${LOCK_TRIES - t.n} tr${LOCK_TRIES - t.n === 1 ? 'y' : 'ies'} left before a one-minute wait.` };
+  }
+  saveLockTry(bucket, id, null);
+  return null;
+}
+
 function tryUnlock(id, code) {
   const f = folderById(id);
   if (!f) return { error: 'That folder is not there any more.' };
   if (!isLocked(id)) return { ok: true };
-  const t = lockTries[id] = lockTries[id] || { n: 0, until: 0 };
-  if (t.until > Date.now()) return { error: `Too many wrong tries. Wait ${Math.ceil((t.until - Date.now()) / 1000)} seconds, then try again.`, wait: Math.ceil((t.until - Date.now()) / 1000) };
-  if (!passOk(id, code)) {
-    t.n += 1;
-    if (t.n >= LOCK_TRIES) { t.n = 0; t.until = Date.now() + LOCK_WAIT_MS; return { error: 'That passcode is not right. That was the fifth try, so wait a minute before the next one.', wait: LOCK_WAIT_MS / 1000 }; }
-    return { error: `That passcode is not right. ${LOCK_TRIES - t.n} tr${LOCK_TRIES - t.n === 1 ? 'y' : 'ies'} left before a one-minute wait.` };
+  const bad = checkRateLimit('lockTries', id, code);
+  if (bad) return bad;
+  unlocked.add(id);
+  lockTouched[id] = Date.now();
+  buildMenu();
+  pushState();
+  return { ok: true };
+}
+
+async function tryUnlockTouchId(id) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  if (!isLocked(id)) return { ok: true };
+  if (!canTouchId() || f.touchId === false) return { error: 'Touch ID is not available for this account.' };
+  try {
+    await systemPreferences.promptTouchID(`unlock ${f.name} in Cue`);
+  } catch {
+    return { error: 'Touch ID was cancelled.' };
   }
-  delete lockTries[id];
+  saveLockTry('lockTries', id, null);
   unlocked.add(id);
   lockTouched[id] = Date.now();
   buildMenu();
@@ -946,39 +1010,97 @@ function lockFolder(id) {
 }
 
 // Idle re-lock. The folder in front of you counts as used while the computer is in use; a folder
-// you have left counts from the moment you left it. Never mid-class: a lock that fired while he
-// teaches would pull the tab off the stage in front of the students.
+// you have left counts from the moment you left it. A folder actively on the on-air stage never
+// locks mid-class, while other idle folders still lock on schedule.
+const folderOnStage = (id) => live && tabs.some((t) => t.identity === id && (t.id === programId || stageIds.includes(t.id)));
 function lockSweep({ now = Date.now(), idle } = {}) {
   const mins = Number(settings().lockMinutes ?? 15);
-  if (!mins || live) return [];
+  if (!mins) return [];
   let idleS = idle;
   if (idleS === undefined) { try { idleS = powerMonitor.getSystemIdleTime(); } catch { idleS = 0; } }
   const locked = [];
   for (const f of userFolders()) {
-    if (!hasLock(f.id) || !unlocked.has(f.id)) continue;
+    if (!hasLock(f.id) || !unlocked.has(f.id) || folderOnStage(f.id)) continue;
     if (f.id === openFolder() && idleS < 60) lockTouched[f.id] = now;
     if (now - (lockTouched[f.id] || 0) >= mins * 60000) { lockFolder(f.id); locked.push(f.id); }
   }
   return locked;
 }
 
-// Sets, changes or removes a folder's passcode. Changing or removing one needs the current one.
+// Lock passcode-protected folders immediately when the computer sleeps or its screen locks.
+function lockForSleep() {
+  const locked = [];
+  for (const f of userFolders()) {
+    if (!hasLock(f.id) || !unlocked.has(f.id) || folderOnStage(f.id)) continue;
+    if (lockFolder(f.id)) locked.push(f.id);
+  }
+  return locked;
+}
+
+// Sets, changes or removes a folder's passcode. Changing or removing one needs the current one (rate-limited).
 function setPasscode({ id, current, code }) {
   const f = folderById(id);
   if (!f) return { error: 'That folder is not there any more.' };
-  if (hasLock(id) && !passOk(id, current)) return { error: 'The current passcode is not right, so nothing was changed.' };
+  if (hasLock(id)) {
+    const bad = checkRateLimit('passChangeTries', id, current);
+    if (bad) return { error: bad.wait ? bad.error : 'The current passcode is not right, so nothing was changed.', ...(bad.wait ? { wait: bad.wait } : {}) };
+  }
   const next = String(code || '');
   if (!next) {
-    f.lock = null; unlocked.delete(id); delete lockTries[id];
+    f.lock = null; unlocked.delete(id); saveLockTry('lockTries', id, null); saveLockTry('passChangeTries', id, null);
     store.save(); pushState(); buildMenu();
     return { ok: true, locked: false };
   }
   if (next.length < 4) return { error: 'Use at least four characters.' };
   const salt = crypto.randomBytes(16).toString('hex');
   f.lock = { salt, hash: passHash(next, salt) };
+  if (f.touchId === undefined) f.touchId = true;
   unlocked.add(id); lockTouched[id] = Date.now();
   store.save(); pushState(); buildMenu();
   return { ok: true, locked: true };
+}
+
+async function setPasscodeTouchId({ id, code }) {
+  const f = folderById(id);
+  if (!f) return { error: 'That folder is not there any more.' };
+  if (!canTouchId() || f.touchId === false) return { error: 'Touch ID is not enabled for this account.' };
+  const next = String(code || '');
+  if (next && next.length < 4) return { error: 'Use at least four characters.' };
+  try {
+    await systemPreferences.promptTouchID(next ? `change the passcode for ${f.name} in Cue` : `remove the passcode for ${f.name} in Cue`);
+  } catch {
+    return { error: 'Touch ID was cancelled.' };
+  }
+  if (!next) {
+    f.lock = null; unlocked.delete(id); saveLockTry('lockTries', id, null); saveLockTry('passChangeTries', id, null);
+    store.save(); pushState(); buildMenu();
+    return { ok: true, locked: false };
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  f.lock = { salt, hash: passHash(next, salt) };
+  unlocked.add(id); lockTouched[id] = Date.now();
+  saveLockTry('lockTries', id, null); saveLockTry('passChangeTries', id, null);
+  store.save(); pushState(); buildMenu();
+  return { ok: true, locked: true };
+}
+
+function setFolderTouchId({ id, on }) {
+  const f = folderById(id);
+  if (!f || isLocked(id)) return { error: 'Unlock this folder first.' };
+  f.touchId = !!on;
+  store.save(); pushState();
+  return { ok: true };
+}
+
+function reorderFolder({ id, beforeId }) {
+  const list = userFolders();
+  const from = list.findIndex((f) => f.id === id);
+  if (from < 0) return { error: 'That folder is not there any more.' };
+  const [moved] = list.splice(from, 1);
+  const to = beforeId ? list.findIndex((f) => f.id === beforeId) : list.length;
+  list.splice(to < 0 ? list.length : to, 0, moved);
+  store.save(); buildMenu(); pushState();
+  return { ok: true };
 }
 
 // A new person's folder. The id is made up here and never changes; the name is theirs to change.
@@ -1047,7 +1169,7 @@ const partnersOf = (id) => pairs().flatMap(([x, y]) => (x === id ? [y] : y === i
 function wireSharing() {
   const want = new Map();
   for (const [a, b] of pairs()) want.set(pairKey(a, b), [a, b]);
-  for (const [k, [a, b]] of want) if (!sharing.has(k)) sharing.set(k, shareLogins(sessionFor(a), sessionFor(b)));
+  for (const [k, [a, b]] of want) if (!sharing.has(k)) sharing.set(k, shareLogins(sessionFor(a), sessionFor(b), { canSync: () => !isLocked(a) && !isLocked(b) }));
   for (const [k, h] of sharing) if (!want.has(k)) { h.stop(); sharing.delete(k); }
 }
 // Fill in what the folders paired with this one are missing. Nothing at all for a folder that is
@@ -1068,11 +1190,12 @@ function setShared({ a, b, on }) {
 
 // What the Settings room shows: every folder, with the details only an unlocked folder gives up.
 function folderRows() {
+  const touch = canTouchId();
   return userFolders().map((f) => {
     const locked = isLocked(f.id);
     const row = { id: f.id, name: f.name, color: f.color || NEUTRAL, picture: f.picture || '', locked, hasLock: hasLock(f.id), open: f.id === openFolder() };
     if (locked) return row;
-    return { ...row, email: emailOf(f.id), agents: f.agents === true, shared: partnersOf(f.id) };
+    return { ...row, email: emailOf(f.id), agents: f.agents === true, shared: partnersOf(f.id), touchId: f.touchId !== false, canTouchId: touch };
   });
 }
 
@@ -1144,7 +1267,7 @@ async function removeFolder({ id, confirmed } = {}) {
   d.bills = (d.bills || []).filter((b) => b.folder !== id);
   closedStack.splice(0, closedStack.length, ...closedStack.filter((c) => c.identity !== id));
   downloads.splice(0, downloads.length, ...downloads.filter((x) => x.folder !== id));
-  delete lockTouched[id]; delete lockTries[id]; unlocked.delete(id);
+  delete lockTouched[id]; saveLockTry('lockTries', id, null); saveLockTry('passChangeTries', id, null); unlocked.delete(id);
   d.folders = userFolders().filter((x) => x.id !== id);
   if (!byId(activeId)) {
     const next = sidebarOrder().find((t) => t.identity === openFolder());
@@ -3147,45 +3270,116 @@ ipcMain.on('cue:note', (e, n) => {
 // A password saved in one folder is offered in another ONLY when the person paired those two
 // folders, and never on a site where people keep two accounts.
 const sharesPasswords = (identity, origin) => partnersOf(identity).length > 0 && !hasTwoAccounts(hostName(origin));
-// Which saved login applies here, found the same way for both handlers below so
-// the answer to "is there one" can never differ from the one that is handed out.
-function credFor(e) {
-  const t = byWC(e.sender);
-  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || t.id === programId || agentCanAct(t) || isLocked(t.identity)) return null;
-  const origin = safeOrigin(e.senderFrame.url);
-  if (!securePage(origin)) return null;
-  let c = vault.find(t.identity, origin);
-  if (!c && sharesPasswords(t.identity, origin)) {
-    for (const p of partnersOf(t.identity)) { if (isLocked(p)) continue; c = vault.find(p, origin); if (c) break; }
+// Short-lived RAM map of typed usernames from step 1 of two-step logins (Google, Microsoft, Amazon, Okta...).
+const stepUsers = new Map();
+const STEP_TTL_MS = 5 * 60 * 1000;
+function stepKey(wcId, origin) {
+  const site = Vault.siteKey(origin) || origin;
+  return `${wcId}|${site}`;
+}
+function rememberStepUser(wc, origin, username) {
+  const u = String(username || '').trim().slice(0, 200);
+  if (!u || !wc) return;
+  const k = stepKey(wc.id, origin);
+  stepUsers.set(k, { username: u, at: Date.now() });
+  if (!wc._cueStepCleanup) {
+    wc._cueStepCleanup = true;
+    wc.once('destroyed', () => {
+      const prefix = `${wc.id}|`;
+      for (const key of [...stepUsers.keys()]) if (key.startsWith(prefix)) stepUsers.delete(key);
+    });
   }
-  return c ? { c, origin } : null;
+}
+function recallStepUser(wc, origin) {
+  if (!wc) return '';
+  const hit = stepUsers.get(stepKey(wc.id, origin));
+  if (!hit || Date.now() - hit.at > STEP_TTL_MS) return '';
+  return hit.username;
 }
 
-// Asked the moment a password box appears. It says whether Cue holds a login
-// and whether that site fills itself - never the password. The password is
-// handed over by cue:cred-get, and on every site but our own that only happens
-// after you have clicked the box yourself.
-ipcMain.handle('cue:cred-ready', (e) => {
-  const hit = credFor(e);
-  if (!hit) return null;
-  return { handsFree: !!hit.c.auto || Vault.ownSite(hit.origin) };
+// Which folder + origin a credential IPC belongs to. Works for normal tabs AND OAuth sign-in popups,
+// plus same-site HTTPS login iframes (never third-party iframes, Vanish, stage, agents, or locked folders).
+function credContext(e) {
+  if (!e || !e.sender || !e.senderFrame) return null;
+  const t = byWC(e.sender);
+  let identity = null;
+  if (t) {
+    if (t.identity === 'vanish' || t.id === programId || agentCanAct(t) || isLocked(t.identity)) return null;
+    identity = t.identity;
+  } else if (popupIdentity.has(e.sender)) {
+    identity = popupIdentity.get(e.sender);
+    if (!identity || identity === 'vanish' || isLocked(identity)) return null;
+  } else {
+    return null;
+  }
+  const origin = safeOrigin(e.senderFrame.url);
+  if (!securePage(origin)) return null;
+  if (e.senderFrame !== e.sender.mainFrame) {
+    const topOrigin = safeOrigin(e.sender.getURL());
+    if (!securePage(topOrigin) || !Vault.sameSite(origin, topOrigin)) return null;
+  }
+  return { identity, origin };
+}
+
+function credsFor(e) {
+  const ctx = credContext(e);
+  if (!ctx) return null;
+  const { identity, origin } = ctx;
+  const list = [...vault.findAll(identity, origin)];
+  const seen = new Set(list.map((x) => `${x.username}\0${x.password}`));
+  if (sharesPasswords(identity, origin)) {
+    for (const p of partnersOf(identity)) {
+      if (isLocked(p)) continue;
+      for (const c of vault.findAll(p, origin)) {
+        const k = `${c.username}\0${c.password}`;
+        if (!seen.has(k)) { seen.add(k); list.push(c); }
+      }
+    }
+  }
+  return list.length ? { list, identity, origin } : null;
+}
+
+ipcMain.on('cue:cred-step-user', (e, username) => {
+  const ctx = credContext(e);
+  if (ctx) rememberStepUser(e.sender, ctx.origin, username);
 });
-ipcMain.handle('cue:cred-get', (e) => {
-  const hit = credFor(e);
+
+// Asked the moment a password box (or Step-1 login input) appears. Never sends passwords —
+// only whether logins exist, their usernames for a multi-account picker, and whether hands-free
+// auto-fill applies (only when a single login matches).
+ipcMain.handle('cue:cred-ready', (e) => {
+  const hit = credsFor(e);
   if (!hit) return null;
-  const { c, origin } = hit;
+  const first = hit.list[0];
+  return {
+    handsFree: hit.list.length === 1 && (!!first.auto || Vault.ownSite(hit.origin)),
+    count: hit.list.length,
+    accounts: hit.list.map(({ id, username, origin }) => ({ id, username, origin })),
+  };
+});
+ipcMain.handle('cue:cred-get', (e, a = {}) => {
+  const hit = credsFor(e);
+  if (!hit) return null;
+  const { list, identity, origin } = hit;
+  const c = (a && a.id ? list.find((x) => x.id === a.id) : null) || list[0];
+  if (!c) return null;
   vault.used(c.id);
   let submit = false;
-  if (c.auto && Date.now() - (autoTried[origin] || 0) > 120000) { autoTried[origin] = Date.now(); submit = true; }
+  const autoKey = `${identity}|${origin}`;
+  if (!a?.id && list.length === 1 && c.auto && Date.now() - (autoTried[autoKey] || 0) > 120000) {
+    autoTried[autoKey] = Date.now();
+    submit = true;
+  }
   return { username: c.username, password: c.password, submit };
 });
 ipcMain.on('cue:cred-offer', (e, c) => {
-  const t = byWC(e.sender);
-  if (!t || e.senderFrame !== e.sender.mainFrame || t.identity === 'vanish' || agentCanAct(t) || !c.password) return;
-  const origin = safeOrigin(e.senderFrame.url);
-  if (!securePage(origin) || vault.never.includes(origin) || vault.has(t.identity, origin, c.username, c.password)) return;
-  pendingCred = { identity: t.identity, origin, username: c.username, password: c.password };
-  sendEvent('save-password', { origin, username: c.username });
+  const ctx = credContext(e);
+  if (!ctx || !c || !c.password) return;
+  const { identity, origin } = ctx;
+  const username = String(c.username || '').trim() || recallStepUser(e.sender, origin);
+  if (vault.isNever(origin, identity) || vault.has(identity, origin, username, c.password)) return;
+  pendingCred = { identity, origin, username, password: c.password };
+  sendEvent('save-password', { origin, username, folder: folderName(identity) });
 });
 ipcMain.handle('cue:internal', async (e, cmd, a = {}) => {
   if (!e.senderFrame || e.senderFrame !== e.sender.mainFrame || !e.senderFrame.url.startsWith('cue://') || !Object.hasOwn(internal, cmd)) throw new Error('Not allowed');
@@ -3239,6 +3433,20 @@ function folderCommand(cmd, a) {
     case 'folder.color': return say(recolorFolder(a));
     case 'folder.email': return say(setFolderEmail(a));
     case 'folder.agents': return say(setFolderAgents(a));
+    case 'folder.touchid': return say(setFolderTouchId(a));
+    case 'folder.reorder': return say(reorderFolder(a));
+    case 'folder.step': stepFolder(a.dir === -1 ? -1 : 1); return { ok: true };
+    case 'folder.open-url': {
+      const to = a.to;
+      const url = String(a.url || '');
+      if (!isPerson(to) || !/^https?:\/\//i.test(url)) return null;
+      if (isLocked(to)) { askUnlock(to); return { locked: true }; }
+      store.data.folder = to;
+      buildMenu();
+      const nt = openTab({ url, identity: to });
+      if (nt) activate(nt.id);
+      return { ok: true };
+    }
     case 'folder.share': return say(setShared(a));
     case 'folder.lock-now': {
       if (!folderById(a.id)) return say({ error: 'That folder is no longer available.' });
@@ -3255,6 +3463,32 @@ function folderCommand(cmd, a) {
         { type: 'separator' },
         { label: 'Folders and accounts…', click: () => sendEvent('open-settings', 'folders') },
       ]).popup({ window: mainWin });
+      return { ok: true };
+    }
+    case 'omni-account-menu': {
+      const cur = openFolder();
+      const active = byId(activeId);
+      const url = active && /^https?:\/\//i.test(active.url || '') ? active.url : '';
+      const list = userFolders();
+      const items = list.map((f) => ({
+        label: f.id === cur ? `${f.name} (current)` : isLocked(f.id) ? `${f.name} (locked)` : `Switch to ${f.name}`,
+        type: 'checkbox',
+        checked: f.id === cur,
+        click: () => setFolder(f.id),
+      }));
+      const others = list.filter((f) => f.id !== cur && !isLocked(f.id));
+      if (url && others.length) {
+        items.push({ type: 'separator' });
+        for (const f of others) {
+          items.push({ label: `Open this page in ${f.name}`, click: () => folderCommand('folder.open-url', { to: f.id, url }) });
+        }
+      }
+      items.push({ type: 'separator' });
+      if (isPerson(cur)) {
+        items.push({ label: hasLock(cur) ? `Lock ${folderName(cur)} now` : `Set passcode for ${folderName(cur)}…`, click: () => folderCommand('folder.lock-now', { id: cur }) });
+      }
+      items.push({ label: 'Accounts and passcodes…', click: () => sendEvent('open-settings', 'folders') });
+      Menu.buildFromTemplate(items).popup({ window: mainWin });
       return { ok: true };
     }
     default: return null;
@@ -3340,7 +3574,7 @@ function uiCommandRaw(cmd, a = {}) {
   let t = a.id ? byId(a.id) : byId(activeId);
   if (t && isLocked(t.identity)) t = null; // a locked folder's tab cannot be touched from here
   const wc = liveContents(t?.view);
-  if (cmd.startsWith('folder.') || cmd === 'folder-menu') return folderCommand(cmd, a);
+  if (cmd.startsWith('folder.') || cmd === 'folder-menu' || cmd === 'omni-account-menu') return folderCommand(cmd, a);
   switch (cmd) {
     case 'navigate': navigate(a); break;
     case 'activate': activate(a.id); break;
@@ -3490,7 +3724,7 @@ function uiCommandRaw(cmd, a = {}) {
     case 'peek-keep': { if (peek) { const url = peek.url; const from = peek.identity; closePeek(); openTab({ url, identity: from }); } break; }
     case 'ai': toggleAI(a.which); break;
     // One click on the AI badge in the sidebar, the same thing the right-click menu does.
-    case 'ai-tab': { const x = byId(a.id); if (x && !x.agent && x.identity !== 'vanish' && !x.private) { x.aiAllowed = !x.aiAllowed; pushState(); persist(); } break; }
+    case 'ai-tab': { const x = byId(a.id); if (x && !x.agent && x.identity !== 'vanish' && !x.private && !isLocked(x.identity)) { x.aiAllowed = !x.aiAllowed; pushState(); persist(); } break; }
     case 'ai-ask': askAboutPage(a.which); break;
     case 'strip-height': {
       const height = Number(a.height);
@@ -3507,8 +3741,17 @@ function uiCommandRaw(cmd, a = {}) {
     case 'tool': runTool(a.name, t); break;
     case 'open-page': openCuePage(a.page, openFolder()); break;
     case 'cred-save': if (pendingCred && !isLocked(pendingCred.identity)) { vault.save({ ...pendingCred, auto: !!a.auto }); pendingCred = null; sendEvent('toast', 'Password saved.'); } break;
-    case 'cred-never': if (pendingCred) { vault.neverFor(pendingCred.origin); pendingCred = null; } break;
+    case 'cred-never': if (pendingCred) { vault.neverFor(pendingCred.origin, pendingCred.identity); pendingCred = null; } break;
     case 'cred-dismiss': pendingCred = null; break;
+    case 'auth-reply': {
+      const req = pendingAuth.get(a.requestId);
+      if (req) {
+        pendingAuth.delete(a.requestId);
+        if (a.cancel) req.callback();
+        else req.callback(String(a.username || ''), String(a.password || ''));
+      }
+      break;
+    }
     // Only a login of the folder that is open can be changed from its Settings.
     case 'pw-auto': { const pw = vault.get(a.pw); if (pw && pw.identity === openFolder() && !isLocked(pw.identity)) vault.setAuto(a.pw, a.on); break; }
     case 'pw-remove': { const pw = vault.get(a.pw); if (pw && pw.identity === openFolder() && !isLocked(pw.identity)) vault.remove(a.pw); break; }
@@ -3558,6 +3801,67 @@ async function uiInvoke(cmd, a = {}) {
   if (cmd === 'import-run') return runImport(a);
   if (cmd === 'open-disk-access') return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
   if (cmd === 'passwords') return isLocked(openFolder()) ? [] : vault.list(openFolder());
+  if (cmd === 'passwords-info') {
+    const here = openFolder();
+    if (isLocked(here)) return { items: [], never: [], weakStorage: vault.isWeakStorage(), canTouchId: canTouchId() };
+    return { items: vault.list(here), never: vault.listNever(here), weakStorage: vault.isWeakStorage(), canTouchId: canTouchId() };
+  }
+  if (cmd === 'pw-reveal') {
+    const here = openFolder();
+    const pw = vault.get(a.pw);
+    if (!pw || pw.identity !== here || isLocked(here)) return { error: 'Not available.' };
+    if (canTouchId() && !process.env.CUE_TEST) {
+      try { await systemPreferences.promptTouchID(`view a saved password for ${hostName(pw.origin)} in Cue`); }
+      catch { return { error: 'Touch ID was cancelled.' }; }
+    }
+    const secret = vault.reveal(pw.id);
+    return secret === null ? { error: 'Could not unlock that password.' } : { password: secret };
+  }
+  if (cmd === 'pw-add') {
+    const here = openFolder();
+    if (!isPerson(here) || isLocked(here)) return { error: 'Unlock this account first.' };
+    let site = String(a.origin || '').trim();
+    if (!site) return { error: 'Type a website address.' };
+    if (!/^https?:\/\//i.test(site)) site = `https://${site}`;
+    let origin;
+    try { origin = new URL(site).origin; } catch { return { error: 'That does not look like a web address.' }; }
+    if (!securePage(origin)) return { error: 'Passwords are saved for HTTPS sites only.' };
+    if (!a.password) return { error: 'Type a password.' };
+    const ok = vault.save({ identity: here, origin, username: String(a.username || '').trim(), password: String(a.password), auto: !!a.auto });
+    return ok ? { ok: true } : { error: 'Password storage is unavailable on this computer.' };
+  }
+  if (cmd === 'pw-update') {
+    const here = openFolder();
+    const pw = vault.get(a.pw);
+    if (!pw || pw.identity !== here || isLocked(here)) return { error: 'Not available.' };
+    const ok = vault.update(pw.id, { username: a.username, password: a.password, auto: a.auto });
+    return ok ? { ok: true } : { error: 'Could not update that password.' };
+  }
+  if (cmd === 'pw-never-clear') {
+    const here = openFolder();
+    if (isLocked(here)) return { error: 'Unlock this account first.' };
+    vault.clearNever(String(a.origin || ''), here);
+    return { ok: true };
+  }
+  if (cmd === 'pw-export-csv') {
+    const here = openFolder();
+    if (!isPerson(here) || isLocked(here)) return { error: 'Unlock this account first.' };
+    if (canTouchId() && !process.env.CUE_TEST) {
+      try { await systemPreferences.promptTouchID(`export saved passwords for ${folderName(here)} in Cue`); }
+      catch { return { error: 'Touch ID was cancelled.' }; }
+    }
+    const { csv, count } = vault.exportCsv(here);
+    if (!count) return { error: 'No saved passwords to export.' };
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+      title: `Export passwords for ${folderName(here)}`,
+      defaultPath: `cue-passwords-${folderName(here).toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'account'}.csv`,
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    });
+    if (canceled || !filePath) return { canceled: true };
+    fs.writeFileSync(filePath, csv, { mode: 0o600 });
+    return { ok: true, count, file: filePath };
+  }
+  if (cmd === 'signin.carry-all') return internal['signin.carry-all'](a);
   // ---- people's folders
   if (cmd === 'folders') return { rows: folderRows(), lockMinutes: Number(settings().lockMinutes ?? 15) };
   if (cmd === 'folder-unlock') {
@@ -3565,7 +3869,13 @@ async function uiInvoke(cmd, a = {}) {
     if (r.ok) { setFolder(a.id); openWaitingLinks(a.id); }
     return r;
   }
+  if (cmd === 'folder-unlock-touchid') {
+    const r = await tryUnlockTouchId(a.id);
+    if (r.ok) { setFolder(a.id); openWaitingLinks(a.id); }
+    return r;
+  }
   if (cmd === 'folder-passcode') return setPasscode(a);
+  if (cmd === 'folder-passcode-touchid') return setPasscodeTouchId(a);
   if (cmd.startsWith('folder.')) { try { return await folderCommand(cmd, a); } catch (e) { return { error: e.message }; } }
   if (cmd === 'storage') return storageReport();
   // Settings asks for these and shows the answer on the row, so it never has to close.
@@ -3700,6 +4010,14 @@ function setSetting(key, value) {
       s.quickKeys = box;
       buildMenu();
     }
+  }
+  else if (key === 'lockMinutes') {
+    const mins = Math.max(0, Math.round(Number(value) || 0));
+    if (mins === 0 && userFolders().some((f) => isLocked(f.id))) {
+      sendEvent('toast', 'Unlock locked accounts before turning auto-lock off.');
+      return;
+    }
+    s.lockMinutes = mins;
   }
   else if (key === 'archiveDays') s.archiveDays = Math.max(0, Math.round(Number(value) || 0));
   // 'quit' (never written to disk) or a number of hours. Saving at once means switching to
@@ -4013,7 +4331,7 @@ function readBillPage(t) {
       const text = await t.view.webContents.executeJavaScript('document.body ? document.body.innerText.slice(0, 40000) : ""', true);
       // Read against this folder's own bills, and a new one is filed in this folder.
       const mine = billsOf(folder);
-      const b = bills.fromPage(mine, url, text, store.data.usdToInr);
+      const b = bills.fromPage(mine, url, text, store.data.usdToInr, store.data.currency);
       if (b) {
         if (!store.data.bills.includes(b)) { b.folder = folder; store.data.bills.push(b); }
         checkBills();
@@ -4994,6 +5312,11 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: mainOnly(() => cycle(1)) },
         { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: mainOnly(() => cycle(-1)) },
+        { type: 'separator' },
+        { label: 'Next Account', accelerator: 'CmdOrCtrl+Shift+]', click: mainOnly(() => stepFolder(1)) },
+        { label: 'Previous Account', accelerator: 'CmdOrCtrl+Shift+[', click: mainOnly(() => stepFolder(-1)) },
+        { label: 'Lock Current Account', accelerator: 'CmdOrCtrl+Alt+L', click: mainOnly(() => folderCommand('folder.lock-now', { id: openFolder() })) },
+        { type: 'separator' },
         { label: 'Mute / Unmute Tab', accelerator: 'Ctrl+M', click: cmd('mute') },
         { label: 'Play / Pause Tab', accelerator: MAC ? 'Ctrl+P' : 'Alt+P', click: cmd('media', { cmd: 'toggle' }) },
         { label: 'Mini Player (keeps playing while you work)', accelerator: MAC ? 'Control+Cmd+M' : 'Ctrl+Alt+M', click: cmd('mini') },
@@ -5068,7 +5391,7 @@ function toolMenu(cmd) {
       { type: 'separator' },
       tool('Thumbnail Check', 'thumbcheck'),
       { label: 'YouTube Studio', click: () => openTab({ url: 'https://studio.youtube.com' }) },
-      { label: 'YouTube Comments', click: () => openTab({ url: 'https://studio.youtube.com/channel/UC/comments/inbox' }) },
+      { label: 'YouTube Comments', click: () => openTab({ url: 'https://studio.youtube.com/comments' }) },
     ] : []),
     { type: 'separator' }, tool('Bills and Alerts', 'bills'),
   ];
@@ -5677,6 +6000,11 @@ app.whenReady().then(async () => {
     const t = byId(recTabId);
     if (t && t.view) cb({ video: t.view.webContents.mainFrame, audio: t.view.webContents.mainFrame }); else cb({});
   });
+  // Lock passcode-protected accounts automatically when the screen locks or the computer sleeps.
+  try {
+    powerMonitor.on('lock-screen', () => { try { lockForSleep(); } catch (e) { logProblem('lock-screen', e); } });
+    powerMonitor.on('suspend', () => { try { lockForSleep(); } catch (e) { logProblem('lock-suspend', e); } });
+  } catch {}
   buildMenu();
   createMain();
   // Some Linux systems (recent Ubuntu) stop Chromium's sandbox, and Cue then runs without it.
@@ -5750,7 +6078,8 @@ app.whenReady().then(async () => {
   if (sharing.size) setTimeout(() => syncShared().catch(() => {}), 3000); // after the first pages, so start-up stays quick
   if (process.env.CUE_TEST) require(path.join(ROOT, '..', 'test', process.env.CUE_TEST === '1' ? 'in-app.js' : `${process.env.CUE_TEST}.js`))({ app, tabs, byId, openTab, activate, closeTab, setSplit, take, setLive, setVolume, setMuted, layout, captureTab, lib, vault, store, addAlert, checkBills, archiveOldTabs, switchSpace, openPeek, closePeek, toggleAI, runTool, internal, sendEvent, setSetting, suggestions, command: uiCommand, setFolder, moveToFolder, openFolder, rememberWhose, addToBoard, lensFile, bookmarkTab, newerVersion, sidebarOrder, loadTeamVault, agentApi, siteName: tabName, siteLogo, quickKeys, jumpTo, midiOk, sessionFor, persist, vanish, shield: () => shield, secureVersion, extensions, trimCaches, storageReport, resizeSplit, setSideHidden, setSideReveal, setOverlay, sharedLogins: () => sharedLogins, mustStayAwake, getPeek: () => peek, getAI: () => aiView, getState: () => ({ activeId, programId, live, panes, split: store.data.split }), win: () => mainWin, stage: () => stageWin, ui: () => uiView,
     // people's folders (test/people.js)
-    addFolder, removeFolder, renameFolder, lockFolder, tryUnlock, setPasscode, lockSweep, isLocked, folderRows, userFolders, setShared, reopenClosed,
+    addFolder, removeFolder, renameFolder, lockFolder, tryUnlock, tryUnlockTouchId, setPasscode, setPasscodeTouchId, setFolderTouchId, reorderFolder, stepFolder, lockSweep, lockForSleep, isLocked, canTouchId, folderRows, userFolders, setShared, reopenClosed,
+    credContext, credsFor, popupIdentity, rememberStepUser, recallStepUser,
     lastState: () => lastState, sendState, closedStack, downloads, invoke: uiInvoke, internalAs: (cmd, a, from) => internal[cmd](a, from),
     // Vanish (test/vanish-settings.js)
     runMigrations, vanishMemory: () => ({ dangerOk: [...vanishDangerOk], noHttps: [...VANISH_NO_HTTPS] }),
@@ -5764,6 +6093,30 @@ app.whenReady().then(async () => {
     midiAsks: () => [...midiAsks], portUp: () => portUp, agentPort: AGENT_PORT, startUrl: START_URL, spaces, alwaysPinned, credReady: (identity, origin) => { const c = vault.find(identity, origin); return c ? { handsFree: !!c.auto || Vault.ownSite(origin) } : null; },
     // Volume on the pinned apps (test/tile-volume.js): put a tab to sleep the way Cue does
     destroyView });
+});
+
+// HTTP Basic / Digest / Proxy authentication prompt so corporate portals and staging sites never silently hang.
+const pendingAuth = new Map();
+app.on('login', (event, wc, _details, authInfo, callback) => {
+  event.preventDefault();
+  if (!mainWin || mainWin.isDestroyed() || process.env.CUE_TEST) {
+    if (process.env.CUE_TEST && global.__cueAuthTest) { global.__cueAuthTest(authInfo, callback); return; }
+    callback();
+    return;
+  }
+  const requestId = crypto.randomUUID();
+  pendingAuth.set(requestId, { callback, wc });
+  wc.once('destroyed', () => {
+    const req = pendingAuth.get(requestId);
+    if (req) { pendingAuth.delete(requestId); req.callback(); }
+  });
+  sendEvent('auth-prompt', {
+    requestId,
+    host: String(authInfo.host || ''),
+    realm: String(authInfo.realm || ''),
+    scheme: String(authInfo.scheme || 'basic'),
+    isProxy: !!authInfo.isProxy,
+  });
 });
 
 app.on('before-quit', () => { quitting = true; if (store) { persist(); store.flush(); } if (lib) lib.close(); });

@@ -31,7 +31,7 @@ const CHATS = {
     { name: 'Parth Ahire 🔍 Recruit NSM', when: 'Yesterday', last: 'Okay', unread: 0 },
     ...filler.slice(30),
     { name: 'Priyanshu Yadav 🔍 Recruit NSM', when: '15/10/2026', last: 'starting from Jan 1st', unread: 0 },
-    { name: LTR('+91 85003 50600'), when: '7:16 pm', last: 'Voice call', unread: 0, call: true },
+    { name: LTR('+1 555 010 0199'), when: '7:16 pm', last: 'Voice call', unread: 0, call: true },
     { name: 'Trap', when: '01:00', last: 'This row opens the wrong chat', unread: 0, opens: 'Trapeze Artist' },
   ],
   school: [
@@ -373,8 +373,8 @@ module.exports = async ({ app, agentApi, tabs, openTab, getState, userFolders, a
     const pri = await wa({ who: 'jason', action: 'read', chat: 'Priyanshu Yadav' });
     check('a chat far down the list opens (not drawn until scrolled to)', /^Personal · Priyanshu Yadav/.test(pri.text), pri.text.split('\n')[0]);
     check('Priyanshu never opens Parth, though the header starts with "P"', !/Parth/.test(pri.text) && /starting from Jan 1st/.test(pri.text), pri.text);
-    const num = await wa({ who: 'jason', action: 'read', chat: '8500350600' });
-    check('an unsaved number opens by its digits, through the invisible marks', /85003 50600/.test(num.text.split('\n')[0]), num.text.split('\n')[0]);
+    const num = await wa({ who: 'jason', action: 'read', chat: '5550100199' });
+    check('an unsaved number opens by its digits, through the invisible marks', /555 010 0199/.test(num.text.split('\n')[0]), num.text.split('\n')[0]);
     check('a chat whose only history is a call says so', /Voice call/.test(num.text), num.text);
     check('the search box is empty after every call', (await boxOf(jasonTab)) === '');
 

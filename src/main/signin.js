@@ -1,6 +1,6 @@
 // Decides where a page's "open a new window" goes. A site's "Sign in with..." popup has to stay
 // a popup, or the site that opened it never hears back. A plain sign-in link is a normal page.
-const AUTH_PAGE = /^https:\/\/(accounts\.google\.com|appleid\.apple\.com|login\.microsoftonline\.com|github\.com\/login|www\.facebook\.com\/(v[\d.]+\/)?dialog)/;
+const AUTH_PAGE = /^https:\/\/(accounts\.google\.com|appleid\.apple\.com|login\.microsoftonline\.com|login\.live\.com|github\.com\/login|www\.facebook\.com\/(v[\d.]+\/)?dialog|[^/]+\.auth0\.com\/|[^/]+\.okta\.com\/|[^/]+\.oktapreview\.com\/|[^/]+\.clerk\.accounts\.dev\/|clerk\.[^/]+\/|[^/]+\.amazoncognito\.com\/|slack\.com\/oauth|discord\.com\/oauth2|twitter\.com\/i\/oauth|x\.com\/i\/oauth|www\.linkedin\.com\/oauth|www\.paypal\.com\/(signin|checkoutnow|connect)|checkout\.stripe\.com\/|id\.atlassian\.com\/|accounts\.spotify\.com\/|id\.twitch\.tv\/|accounts\.shopify\.com\/)/;
 const REPORTS_BACK = /[?&](client_id|redirect_uri|response_type|app_id)=|\/oauth|\/dialog\//i;
 const GOOGLE_FRONT_PAGE = /^https:\/\/(workspace|www)\.google\.[^/]+\//; // where a signed-out Gmail tab lands
 

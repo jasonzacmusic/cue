@@ -72,7 +72,7 @@ module.exports = async (c) => {
     const box = await ui("(() => { const card = document.querySelector('.fcard'); const p = card.querySelector('.lockbox input[type=password]'); return p ? p.placeholder : ''; })()");
     check('turning it on asks for a new passcode', /New passcode/.test(box), box);
     await shot('settings-passcode-on', c.ui().webContents);
-    await ui("(() => { const card = document.querySelector('.fcard'); const p = card.querySelector('.lockbox input[type=password]'); p.value = 'pass-1234'; [...card.querySelectorAll('.lockbox button')].find(b => b.textContent === 'Turn on').click(); return 1; })()");
+    await ui("(() => { const card = document.querySelector('.fcard'); for (const p of card.querySelectorAll('.lockbox input[type=password]')) p.value = 'pass-1234'; [...card.querySelectorAll('.lockbox button')].find(b => b.textContent === 'Turn on').click(); return 1; })()");
     const first = await until(() => c.store.data.folders.find((f) => f.lock) || null, 4000);
     check('...and typing one turns the passcode on', !!first, first && first.id);
     await sleep(500);

@@ -663,70 +663,262 @@ if (location.protocol === 'cue:') {
   contextBridge.exposeInMainWorld('cueInternal', { invoke: (cmd, args) => ipcRenderer.invoke('cue:internal', cmd, args) });
 }
 
-// ---- saved logins: fill when a password box appears, offer to save when a form is sent
-if (window === window.top && /^https?:$/.test(location.protocol)) {
-  let filled = false; let tried = false;
-  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2 && getComputedStyle(el).visibility !== 'hidden'; };
-  const pwField = () => [...document.querySelectorAll('input[type=password]')].find(visible);
+// ---- saved logins: fill when a password box appears, 2-step username memory, multi-account chooser, offer to save
+if (/^https?:$/.test(location.protocol)) {
+  let filled = false;
+  let tried = false;
+  let lastHref = location.href;
+  let lastPw = null;
+  let lastOffered = '';
+  let lastOfferedAt = 0;
+  let lastStepSent = '';
+  let pickerHost = null;
+  let wakeBound = false;
+  let cachedReady = null;
+
+  const visible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
+  };
+  const pwField = () => [...document.querySelectorAll('input[type=password]')].find((i) => !i.disabled && !i.readOnly && visible(i));
+  const looksLikeUserInput = (i) => {
+    if (!i || i.tagName !== 'INPUT' || i.disabled || i.readOnly || !visible(i)) return false;
+    if (i.type === 'email') return true;
+    if (!/^(text|tel|)$/.test(i.type)) return false;
+    const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+    if (/\b(username|email)\b/.test(ac)) return true;
+    const hint = `${i.name} ${i.id} ${i.placeholder} ${i.getAttribute('aria-label') || ''}`.toLowerCase();
+    return /\b(email|e-mail|user|username|login|userid|account|identifier|phone|mobile)\b/.test(hint);
+  };
   const userField = (pw) => {
-    const inputs = [...(pw.form || document).querySelectorAll('input')].filter((i) => /^(text|email|tel|)$/.test(i.type) && visible(i));
+    const scope = (pw && pw.form) || document;
+    const inputs = [...scope.querySelectorAll('input')].filter((i) => /^(text|email|tel|)$/.test(i.type) && !i.disabled && !i.readOnly && visible(i));
+    if (!pw) return inputs.find(looksLikeUserInput) || null;
     const before = inputs.filter((i) => i.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING);
-    return before[before.length - 1] || inputs[0] || null;
+    return before.find(looksLikeUserInput) || before[before.length - 1] || inputs.find(looksLikeUserInput) || inputs[0] || null;
   };
   const setVal = (el, v) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
-  const fill = async (pw) => {
-    if (filled) return;
-    const c = await ipcRenderer.invoke('cue:cred-get');
+  const rememberStepUser = (el) => {
+    if (!el || !looksLikeUserInput(el)) return;
+    const v = String(el.value || '').trim();
+    if (!v || v.length > 200 || v === lastStepSent) return;
+    lastStepSent = v;
+    ipcRenderer.send('cue:cred-step-user', v);
+  };
+  const closePicker = () => {
+    if (pickerHost) { pickerHost.remove(); pickerHost = null; }
+  };
+  const openPicker = (anchor, accounts, onPick) => {
+    closePicker();
+    if (!anchor || !accounts.length) return;
+    const r = anchor.getBoundingClientRect();
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;z-index:2147483647;left:0;top:0;width:0;height:0;pointer-events:auto;';
+    const shadow = host.attachShadow({ mode: 'closed' });
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const style = document.createElement('style');
+    style.textContent = `
+      .menu{position:fixed;min-width:${Math.max(210, Math.min(340, Math.round(r.width)))}px;max-width:340px;
+        background:${dark ? '#1e2024' : '#ffffff'};color:${dark ? '#f1f3f5' : '#181a1f'};
+        border:1px solid ${dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.14)'};border-radius:10px;
+        box-shadow:0 10px 28px rgba(0,0,0,${dark ? '.45' : '.16'});padding:5px;
+        font:12.5px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;}
+      .hd{font-size:10.5px;font-weight:600;letter-spacing:.03em;color:${dark ? '#9aa0a8' : '#6b7280'};padding:4px 8px 5px;}
+      button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;border:0;border-radius:7px;
+        background:transparent;color:inherit;text-align:left;padding:6px 8px;cursor:pointer;font:inherit;}
+      button:hover,button:focus{background:${dark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.06)'};outline:none;}
+      b{font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      small{font-size:11px;color:${dark ? '#9aa0a8' : '#6b7280'};max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    `;
+    const menu = document.createElement('div');
+    menu.className = 'menu';
+    const top = r.bottom + 4 + 180 > window.innerHeight ? Math.max(8, r.top - 4 - Math.min(200, accounts.length * 42 + 30)) : r.bottom + 4;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - 230));
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    const hd = document.createElement('div');
+    hd.className = 'hd';
+    hd.textContent = accounts.length > 1 ? 'Choose a saved login' : 'Fill saved login';
+    menu.append(hd);
+    for (const acc of accounts.slice(0, 8)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const title = document.createElement('b');
+      title.textContent = acc.username || '(saved password)';
+      b.append(title);
+      try {
+        const h = new URL(acc.origin).hostname.replace(/^www\./, '');
+        if (h && h !== location.hostname.replace(/^www\./, '')) {
+          const sub = document.createElement('small');
+          sub.textContent = h;
+          b.append(sub);
+        }
+      } catch {}
+      b.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closePicker();
+        onPick(acc);
+      });
+      menu.append(b);
+    }
+    shadow.append(style, menu);
+    (document.body || document.documentElement).append(host);
+    pickerHost = host;
+  };
+
+  const IGNORE_BTN = /\b(show|hide|reveal|visibility|toggle|eye|cancel|back|forgot|reset|close|dismiss|clear|help)\b/i;
+  const SUBMIT_BTN = /\b(sign\s*in|log\s*in|continue|next|submit|enter|unlock|verify)\b/i;
+  const isIgnoredBtn = (el) => {
+    if (!el) return true;
+    if (el.type === 'reset') return true;
+    const label = `${el.getAttribute('aria-label') || ''} ${el.title || ''} ${el.textContent || ''} ${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+    if (IGNORE_BTN.test(label) && el.type !== 'submit') return true;
+    return false;
+  };
+  const findSubmitButton = (pw) => {
+    const form = pw && pw.form;
+    if (form) {
+      const explicit = [...form.querySelectorAll('button[type=submit],input[type=submit]')].find((b) => !b.disabled && visible(b));
+      if (explicit) return explicit;
+      const untyped = [...form.querySelectorAll('button:not([type])')].find((b) => !b.disabled && visible(b) && !isIgnoredBtn(b));
+      if (untyped) return untyped;
+      const labelled = [...form.querySelectorAll('button,[role=button]')].find((b) => !b.disabled && visible(b) && !isIgnoredBtn(b) && SUBMIT_BTN.test(`${b.textContent || ''} ${b.getAttribute('aria-label') || ''}`));
+      if (labelled) return labelled;
+    }
+    return [...document.querySelectorAll('button[type=submit],input[type=submit]')].find((b) => !b.disabled && visible(b)) || null;
+  };
+
+  const fill = async (pw, id) => {
+    if (filled && !id) return;
+    const c = await ipcRenderer.invoke('cue:cred-get', id ? { id } : undefined);
     if (!c) return;
     filled = true;
     const u = userField(pw);
-    if (u && c.username && !u.value) setVal(u, c.username);
+    if (u && c.username && (!u.value || id)) setVal(u, c.username);
+    if (c.username) { lastStepSent = c.username; ipcRenderer.send('cue:cred-step-user', c.username); }
     setVal(pw, c.password);
-    if (c.submit) {
+    if (c.submit && !id) {
       const form = pw.form;
-      const btn = (form || document).querySelector('button[type=submit],input[type=submit],button:not([type])');
+      const btn = findSubmitButton(pw);
       setTimeout(() => { if (btn) btn.click(); else if (form) form.requestSubmit(); }, 250);
     }
   };
+
   // A saved password is typed into the box only after you touch it. A page that
   // loads a hidden login form - which is how passwords get read off a browser
-  // that fills them unasked - gets nothing. The school's own sites are the
-  // exception: those fill themselves, because signing in to them twenty times
-  // a day is the job, not a risk.
-  const tryFill = async () => {
-    if (filled || tried) return;
-    const pw = pwField();
-    if (!pw) return;
-    tried = true;
-    const ready = await ipcRenderer.invoke('cue:cred-ready');
-    if (!ready) return;
-    if (ready.handsFree) { fill(pw); return; }
-    const wake = (e) => {
+  // that fills them unasked - gets nothing. Sites marked auto sign-in (or a
+  // preset's own sites) are the exception when a single login matches.
+  const bindWake = () => {
+    if (wakeBound) return;
+    wakeBound = true;
+    document.addEventListener('pointerdown', async (e) => {
       if (!e.isTrusted) return; // a real press only: a page's own script can focus a box or fake a press
       const box = e.target;
-      if (!box || box.tagName !== 'INPUT') return;
+      if (pickerHost && box !== pickerHost) closePicker();
+      if (!box || box.tagName !== 'INPUT' || box.disabled || box.readOnly) return;
       const now = pwField();
-      if (!now || (box !== now && box !== userField(now))) return;
-      document.removeEventListener('pointerdown', wake, true);
-      fill(now);
-    };
-    document.addEventListener('pointerdown', wake, true);
+      if (now && (box === now || box === userField(now))) {
+        const ready = cachedReady || await ipcRenderer.invoke('cue:cred-ready');
+        cachedReady = ready;
+        if (!ready) return;
+        if (ready.count > 1 && Array.isArray(ready.accounts) && ready.accounts.length > 1) {
+          openPicker(box, ready.accounts, (acc) => fill(now, acc.id));
+        } else if (!filled) {
+          fill(now);
+        }
+        return;
+      }
+      // Step-1 email/username field before the password step appears
+      if (!now && looksLikeUserInput(box)) {
+        const ready = cachedReady || await ipcRenderer.invoke('cue:cred-ready');
+        cachedReady = ready;
+        const withUser = (ready && Array.isArray(ready.accounts) ? ready.accounts : []).filter((a) => a.username);
+        if (!withUser.length) return;
+        openPicker(box, withUser, (acc) => {
+          setVal(box, acc.username);
+          rememberStepUser(box);
+        });
+      }
+    }, true);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePicker(); }, true);
   };
+
+  const tryFill = async () => {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      filled = false;
+      tried = false;
+      cachedReady = null;
+      lastPw = null;
+      closePicker();
+    }
+    const pw = pwField();
+    if (pw && lastPw && pw !== lastPw) {
+      filled = false;
+      tried = false;
+    }
+    if (!pw) {
+      if (userField(null)) bindWake();
+      return;
+    }
+    lastPw = pw;
+    if (filled || tried) return;
+    tried = true;
+    const ready = await ipcRenderer.invoke('cue:cred-ready');
+    cachedReady = ready;
+    if (!ready) return;
+    if (ready.handsFree) { fill(pw); return; }
+    bindWake();
+  };
+
   const offer = () => {
     const pw = pwField();
-    if (!pw || !pw.value) return;
+    if (!pw || !pw.value) {
+      const uOnly = userField(null);
+      if (uOnly) rememberStepUser(uOnly);
+      return;
+    }
     const u = userField(pw);
-    ipcRenderer.send('cue:cred-offer', { username: u ? u.value : '', password: pw.value });
+    const username = u ? u.value.trim() : '';
+    const password = pw.value;
+    const sig = `${username}\0${password}`;
+    const now = Date.now();
+    if (sig === lastOffered && now - lastOfferedAt < 2000) return;
+    lastOffered = sig;
+    lastOfferedAt = now;
+    ipcRenderer.send('cue:cred-offer', { username, password });
   };
+
+  document.addEventListener('change', (e) => { if (e.target && e.target.tagName === 'INPUT') rememberStepUser(e.target); }, true);
+  document.addEventListener('blur', (e) => { if (e.target && e.target.tagName === 'INPUT') rememberStepUser(e.target); }, true);
   document.addEventListener('submit', offer, true);
-  document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('button,input[type=submit],[role=button]')) offer(); }, true);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.type === 'password') offer(); }, true);
+  document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest && e.target.closest('button,input[type=submit],[role=button]');
+    if (!btn || isIgnoredBtn(btn)) return;
+    const pw = pwField();
+    if (pw && pw.value) {
+      if (pw.form && btn.form && btn.form !== pw.form) return;
+      offer();
+    } else {
+      const uOnly = userField(null);
+      if (uOnly) rememberStepUser(uOnly);
+    }
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.target && e.target.type === 'password') offer();
+    else if (e.target && e.target.tagName === 'INPUT') rememberStepUser(e.target);
+  }, true);
   addEventListener('DOMContentLoaded', () => {
     tryFill();
-    new MutationObserver(() => { if (!filled && !tried) tryFill(); }).observe(document.documentElement, { childList: true, subtree: true });
+    new MutationObserver(() => { tryFill(); }).observe(document.documentElement, { childList: true, subtree: true });
   });
 }

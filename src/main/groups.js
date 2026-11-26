@@ -12,6 +12,7 @@ const GROUPS = [
       'elevenlabs.io', 'replicate.com', 'midjourney.com', 'cursor.com', 'suno.com',
       'vercel.com', 'neon.tech', 'bunny.net', 'brevo.com', 'render.com', 'name.com',
       'paddle.com', 'stripe.com', 'vidiq.com', 'wisprflow.ai', 'canva.com',
+      'notion.so', 'figma.com', 'linear.app', 'dropbox.com', 'cloudflare.com',
     ],
     paths: [['github.com', '/settings/billing'], ['console.cloud.google.com', '/billing']],
   },
@@ -21,19 +22,20 @@ const GROUPS = [
   },
   {
     id: 'social', name: 'Social',
-    hosts: ['instagram.com', 'facebook.com', 'threads.net', 'threads.com', 'linkedin.com', 'x.com', 'twitter.com', 'pinterest.com', 'whatsapp.com', 'patreon.com'],
+    hosts: ['instagram.com', 'facebook.com', 'threads.net', 'threads.com', 'linkedin.com', 'x.com', 'twitter.com', 'pinterest.com', 'whatsapp.com', 'patreon.com', 'reddit.com', 'discord.com', 'slack.com', 'tiktok.com', 'bsky.app'],
   },
-  { id: 'code', name: 'Code', hosts: ['github.com', 'gitlab.com', 'npmjs.com', 'stackoverflow.com'] },
+  { id: 'code', name: 'Code', hosts: ['github.com', 'gitlab.com', 'npmjs.com', 'stackoverflow.com', 'bitbucket.org'] },
   {
     // Shops and the parcels they send. A cart and its tracking page belong
     // together: both are "the thing I ordered", and neither is Social.
     id: 'shop', name: 'Shopping',
     hosts: [
-      'amazon.in', 'amazon.com', 'flipkart.com', 'robu.in', 'robocraze.com', 'silverlineelectronics.in',
+      'amazon.in', 'amazon.com', 'amazon.co.uk', 'amazon.de', 'amazon.ca', 'flipkart.com', 'ebay.com', 'walmart.com', 'target.com', 'etsy.com', 'bestbuy.com', 'ikea.com',
+      'robu.in', 'robocraze.com', 'silverlineelectronics.in',
       'element14.com', 'mouser.in', 'thingbits.in', 'zepto.com', 'zeptonow.com', 'swiggy.com', 'zomato.com',
       'blinkit.com', 'bigbasket.com', 'myntra.com', 'ajio.com', 'croma.com', 'reliancedigital.in',
       'store.apple.com', 'bambulab.com', 'makerbazar.in', 'thomann.de', 'bhphotovideo.com', 'sweetwater.com',
-      'bluedart.com', 'trackon.in', 'delhivery.com', 'dtdc.in', 'indiapost.gov.in', 'fedex.com', 'dhl.com',
+      'bluedart.com', 'trackon.in', 'delhivery.com', 'dtdc.in', 'indiapost.gov.in', 'fedex.com', 'dhl.com', 'ups.com', 'usps.com',
     ],
   },
   {
@@ -44,6 +46,7 @@ const GROUPS = [
       'axisbank.com', 'axis.bank.in', 'hdfcbank.com', 'icicibank.com', 'sbi.co.in', 'kotak.com',
       'reward360.in', 'paytm.com', 'phonepe.com', 'razorpay.com', 'payu.in', 'onlinesbi.sbi',
       'incometax.gov.in', 'gst.gov.in', 'cleartax.in', 'zerodha.com', 'groww.in', 'paypal.com',
+      'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 'americanexpress.com', 'wise.com', 'revolut.com', 'mercury.com',
     ],
   },
   {
@@ -53,6 +56,7 @@ const GROUPS = [
       'netflix.com', 'primevideo.com', 'hotstar.com', 'jiohotstar.com', 'sonyliv.com', 'zee5.com',
       'jiocinema.com', 'tv.apple.com', 'spotify.com', 'open.spotify.com', 'soundcloud.com',
       'cricinfo.com', 'espncricinfo.com', 'hoichoi.tv', 'mubi.com',
+      'disneyplus.com', 'hulu.com', 'max.com', 'twitch.tv', 'vimeo.com', 'music.apple.com',
     ],
   },
 ];

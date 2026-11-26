@@ -8,7 +8,7 @@
 // account, so Claude, ChatGPT or Grok in Personal and in School are two different accounts. Sharing
 // them made a sign-in in one folder replace the other's, and School's own Claude pages then said
 // "Sign in to view this page" for ever.
-const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.(net|com)|facebook\.com|whatsapp\.com|claude\.(ai|com)|anthropic\.com|claudeusercontent\.com|chatgpt\.com|openai\.com|sora\.com|grok\.com|x\.ai|perplexity\.ai|poe\.com|mistral\.ai|deepseek\.com|meta\.ai|character\.ai|copilot\.microsoft\.com|huggingface\.co|midjourney\.com)$/i;
+const TWO_ACCOUNTS = /(^|\.)(google\.[a-z.]+|gmail\.com|youtube\.com|instagram\.com|threads\.(net|com)|facebook\.com|whatsapp\.com|claude\.(ai|com)|anthropic\.com|claudeusercontent\.com|chatgpt\.com|openai\.com|sora\.com|grok\.com|x\.ai|perplexity\.ai|poe\.com|mistral\.ai|deepseek\.com|meta\.ai|character\.ai|copilot\.microsoft\.com|huggingface\.co|midjourney\.com|github\.com|gitlab\.com|linkedin\.com|x\.com|twitter\.com|slack\.com|discord\.com|notion\.so|figma\.com|canva\.com|vercel\.com|render\.com|stripe\.com|paypal\.com|amazon\.[a-z.]+|apple\.com|icloud\.com|microsoft\.com|live\.com|office\.com|outlook\.com|reddit\.com|shopify\.com|dropbox\.com|linear\.app|atlassian\.(com|net)|zoom\.us|patreon\.com|tiktok\.com|twitch\.tv|spotify\.com)$/i;
 
 const hostOf = (c) => c.domain.replace(/^\./, '');
 const keyOf = (c) => [c.domain, c.path, c.name, c.value].join('|');
@@ -40,8 +40,9 @@ function copyOf(c) {
   return out;
 }
 
-function shareLogins(a, b) {
+function shareLogins(a, b, { canSync = () => true } = {}) {
   async function put(to, c) {
+    if (!canSync()) return;
     mark(to, keyOf(c));
     try { await to.cookies.set(copyOf(c)); } catch { /* one cookie never stops the rest */ }
   }
@@ -49,7 +50,7 @@ function shareLogins(a, b) {
   const listeners = [];
   function follow(from, to) {
     const fn = (_e, c, cause, removed) => {
-      if (hasTwoAccounts(hostOf(c))) return;
+      if (!canSync() || hasTwoAccounts(hostOf(c))) return;
       if (removed) {
         if (cause === 'overwrite' || cause === 'evicted') return;
         if (arrived(from, gone(c))) return;
@@ -64,6 +65,7 @@ function shareLogins(a, b) {
 
   // Fills in what each side is missing. It never replaces a sign-in that side already has.
   async function syncNow() {
+    if (!canSync()) return;
     const [inA, inB] = await Promise.all([a.cookies.get({}), b.cookies.get({})]);
     const id = (c) => [c.domain, c.path, c.name].join('|');
     const haveA = new Set(inA.map(id)); const haveB = new Set(inB.map(id));

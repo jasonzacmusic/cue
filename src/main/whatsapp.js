@@ -50,7 +50,7 @@ const possessive = (name) => (/s$/i.test(String(name)) ? `${name}'` : `${name}'s
 // The same comparison the page scripts make (NAME_FN below), for the checks that happen out here.
 // Two spellings of one chat meet once everything but letters and digits is gone: the list keeps
 // emoji as text, the header shows them as pictures, and unsaved numbers carry WhatsApp's invisible
-// direction marks (U+202A ... U+202C) around "+91 85003 50600".
+// direction marks (U+202A ... U+202C) around "+1 555 010 0199".
 //
 // EXACT, NEVER A PREFIX. On 11-Nov-2026 the header of Parth's chat read "P" (the avatar's letter)
 // as its first line, and "Priyanshu Yadav" starts with "P", so a read for Priyanshu returned
@@ -175,7 +175,7 @@ const READ = (limit) => `(() => {
   const chat = CHAT_NAME();
   // Every row of the conversation, in order: messages carry the stamp, and the rest - a voice call,
   // a missed call, a deleted message - are rows without one. A chat whose only history is an
-  // 11-minute call used to read back as "no messages yet" (11-Nov-2026, +91 85003 50600).
+  // 11-minute call used to read back as "no messages yet" (11-Nov-2026).
   const stamps = [...document.querySelectorAll('#main [data-pre-plain-text]')];
   const events = [...document.querySelectorAll('#main [role="row"]')].filter((r) => !r.querySelector('[data-pre-plain-text]')
     && (r.innerText || '').trim() && !/end-to-end encrypted/i.test(r.innerText || ''));

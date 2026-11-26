@@ -195,7 +195,7 @@ async function fresh(c) {
   check('lock: an unprotected folder opens its own setup control', setup.setup && await until(() => ui('!!(' + button + ')')));
   await ui(`{ const b = ${button}; b.click(); }`);
   check('lock: submitting an empty setup keeps the folder open', !c.isLocked(D.id) && !c.folderRows().find(r => r.id === D.id).hasLock);
-  await ui(`{ const b = ${button}; b.closest('.lockbox').querySelector('input[type=password]').value = 'dev-pass-1'; b.click(); }`);
+  await ui(`{ const b = ${button}; for (const i of b.closest('.lockbox').querySelectorAll('input[type=password]')) i.value = 'dev-pass-1'; b.click(); }`);
   check('lock: setting the passcode locks this folder immediately', await until(() => c.isLocked(D.id)));
   check('lock: the chosen code opens it again', c.tryUnlock(D.id, 'dev-pass-1').ok && !c.isLocked(D.id));
   c.setFolder(D.id); c.activate(td.id); await loaded(td);

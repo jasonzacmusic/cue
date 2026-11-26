@@ -360,7 +360,9 @@ const LOCK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-
 
 function renderFolders() {
   const box = $('#folders'); box.innerHTML = '';
-  for (const id of (S.pickFolders || S.folders)) {
+  const list = S.pickFolders || S.folders;
+  box.classList.toggle('many', list.length >= 4);
+  for (const id of list) {
     const v = S.identities[id]; if (!v) continue;
     const mine = id === S.folder;
     const info = (S.folderInfo || {})[id] || {};
@@ -408,30 +410,44 @@ function renderFolders() {
     const held = live.map(([, x]) => `${x.label}: ${x.who}`).join(' · ');
     const unread = info.unread ? ` · ${info.unread} unread` : '';
     tip(b, `${v.name}${acct ? ` · ${acct}` : ''}`,
-      v.locked ? 'Locked. Click to type its passcode.'
+      v.locked ? 'Locked. Click to unlock.'
         : `${held ? `${held}\n` : ''}${mine ? `Open. ${all} tab${all === 1 ? '' : 's'} in here, and new tabs are born in it.`
-          : `${all} tab${all === 1 ? '' : 's'} in here${unread}. Click to open this folder — new tabs go in it and it stays signed in as its own account.`}${id !== 'agent' ? '\nRight-click to lock it now.' : ''}`);
+          : `${all} tab${all === 1 ? '' : 's'} in here${unread}. Click to switch account — new tabs go in it and it stays signed in as its own account.`}${id !== 'agent' ? '\nRight-click to lock it now. Drag to reorder.' : ''}`);
     b.onclick = () => send('folder', { name: id });
-    if (id !== 'agent') b.oncontextmenu = (e) => { e.preventDefault(); send('folder-menu', { id }); };
+    if (id !== 'agent') {
+      b.oncontextmenu = (e) => { e.preventDefault(); send('folder-menu', { id }); };
+      b.draggable = true;
+      b.ondragstart = (e) => { e.dataTransfer.setData('text/cue-folder', id); b.classList.add('dragging'); };
+      b.ondragend = () => b.classList.remove('dragging');
+      b.ondragover = (e) => { if (e.dataTransfer.types.includes('text/cue-folder')) { e.preventDefault(); b.classList.add('dropbefore'); } };
+      b.ondragleave = () => b.classList.remove('dropbefore');
+      b.ondrop = (e) => {
+        b.classList.remove('dropbefore');
+        const dragged = e.dataTransfer.getData('text/cue-folder');
+        if (!dragged || dragged === id) return;
+        e.preventDefault(); e.stopPropagation();
+        send('folder.reorder', { id: dragged, beforeId: id });
+      };
+    }
     box.append(b);
   }
   const foot = el('div', 'fbottom');
-  // A new person gets a folder of their own: their own sign-ins, WhatsApp, Google, tabs,
+  // A new account gets a folder of its own: own sign-ins, WhatsApp, Google, tabs,
   // history and passwords. Click, type a name, press Enter.
-  const add = el('button', 'addperson', `${ICONS.plus}<span class="ap">Add a person</span>`);
-  tip(add, 'Add a person', 'A private folder of their own: own sign-ins, WhatsApp, Google, tabs, history and passwords');
+  const add = el('button', 'addperson', `${ICONS.plus}<span class="ap">Add account</span>`);
+  tip(add, 'Add account', 'A separate account folder with its own sign-ins, tabs, history, passwords and optional passcode');
   add.onclick = () => {
     if (add.querySelector('input')) return;
     inlineEdit({
       hide: add.querySelector('.ap'), value: '', cls: 'rename newperson', max: 40,
-      place: (inp) => { inp.placeholder = 'Their name'; add.append(inp); },
+      place: (inp) => { inp.placeholder = 'Account name'; add.append(inp); },
       save: (name) => { if (name) send('folder.add', { name }); },
     });
   };
   foot.append(add);
   // Vanish is not a folder: it keeps nothing, so it holds no tabs and stays
   // signed in to nothing. It is a window you open, so it stays a button - a
-  // dashed circle, where adding a person is a plain labelled button beside it.
+  // dashed circle, where adding an account is a plain labelled button beside it.
   const van = el('button', 'vanish');
   van.style.setProperty('--c', (S.identities.vanish || {}).color || 'var(--muted)');
   tip(van, 'Vanish window', 'A window that saves nothing — no history, no cookies, no files');
@@ -552,6 +568,7 @@ function renderExtras() {
   // Say whose login the panel is using, so he is never guessing which account Claude Code or Codex
   // came up as.
   $('#aiwho').textContent = S.ai && S.ai.folder ? `as ${(S.identities[S.ai.folder] || {}).name || S.ai.folder}` : '';
+  $('#aiask').textContent = S.ai ? `Ask ${(S.ai.names && S.ai.names[S.ai.which]) || 'AI'} about this page` : 'Ask about this page';
   $('#peekbar').hidden = !S.peek;
   if (S.peek) $('#peektitle').textContent = S.peek.title;
   $('#recbtn').hidden = !S.recording;
@@ -1083,9 +1100,13 @@ function renderBar() {
   $('#fwd').disabled = !(a && a.canFwd);
   if (!editingOmni) $('#omnibox').value = a ? a.url : '';
   const oid = $('#omni-id');
-  oid.className = 'omni-id' + (a && a.identity === 'vanish' ? ' vanish' : '');
-  oid.style.setProperty('--ring', a ? (a.agent ? 'var(--agent)' : ringColor(a)) : '');
-  oid.title = a ? `${S.identities[a.identity].name}${S.labels[a.identity] ? ` · ${S.labels[a.identity]}` : ''}` : '';
+  const idKey = a ? a.identity : S.folder;
+  const idInfo = S.identities[idKey];
+  oid.className = 'omni-id' + (idKey === 'vanish' ? ' vanish' : '');
+  oid.style.setProperty('--ring', a ? (a.agent ? 'var(--agent)' : ringColor(a)) : (idInfo ? idInfo.color : ''));
+  oid.innerHTML = idInfo ? `<span>${esc(idInfo.name)}</span>` : '';
+  oid.title = idInfo ? `${idInfo.name}${S.labels[idKey] ? ` · ${S.labels[idKey]}` : ''} — click to switch account or open this page in another account` : 'Switch account';
+  oid.setAttribute('aria-label', oid.title);
   document.querySelectorAll('[data-split]').forEach((b) => b.classList.toggle('on', b.dataset.split === S.split.mode));
   $('#syncscroll').classList.toggle('on', !!S.settings.syncScroll);
   $('#syncplay').classList.toggle('on', !!S.settings.syncPlay);
@@ -1168,7 +1189,14 @@ function renderContent() {
   }
   const ph = $('#placeholder');
   const a = S.tabs.find((t) => t.id === S.activeId);
-  if (S.live && a && a.id === S.programId) { ph.hidden = false; ph.innerHTML = '<div><b>On air</b>This tab is showing in the Cue Stage window.<br>Click another tab to cue it, then press TAKE.</div>'; }
+  if (S.folderLocked && !a) {
+    const nm = folderName(S.folder);
+    ph.hidden = false;
+    ph.innerHTML = `<div><b style="color:var(--ink)">${esc(nm)} is locked</b>Unlock this account or pick another in the sidebar.<br><button id="ph-unlock" class="btn" type="button" style="margin-top:10px">Unlock ${esc(nm)}</button></div>`;
+    const ub = $('#ph-unlock');
+    if (ub) ub.onclick = () => send('folder', { name: S.folder });
+  }
+  else if (S.live && a && a.id === S.programId) { ph.hidden = false; ph.innerHTML = '<div><b>On air</b>This tab is showing in the Cue Stage window.<br>Click another tab to cue it, then press TAKE.</div>'; }
   else if (a && a.host === 'popout') { ph.hidden = false; ph.innerHTML = '<div><b style="color:var(--ink)">Popped out</b>This tab is in its own window, ready for Zoom or OBS.<br>Close that window to bring it back.</div>'; }
   else ph.hidden = true;
 }
@@ -1450,7 +1478,20 @@ omni.addEventListener('drop', async (e) => {
 function commands() {
   const k = (S && S.settings && S.settings.kits) || {};
   const on = (kit) => k[kit] !== false;
+  const active = S && S.tabs && S.tabs.find((t) => t.id === S.activeId);
+  const pageUrl = active && /^https?:\/\//i.test(active.url || '') ? active.url : '';
+  const acctCmds = ((S && (S.pickFolders || S.folders)) || []).filter((id) => id !== S.folder && S.identities[id]).map((id) => [
+    `Switch account: ${S.identities[id].name}${S.identities[id].locked ? ' (locked)' : ''}`,
+    () => send('folder', { name: id }),
+  ]);
+  const openInCmds = pageUrl ? ((S && (S.pickFolders || S.folders)) || [])
+    .filter((id) => id !== 'agent' && id !== S.folder && S.identities[id] && !S.identities[id].locked)
+    .map((id) => [`Open this page in ${S.identities[id].name}`, () => send('folder.open-url', { to: id, url: pageUrl })]) : [];
+  const lockCmd = S && S.folder && S.folder !== 'agent' && !S.folderLocked
+    ? [[`Lock ${folderName(S.folder)}`, () => send('folder.lock-now', { id: S.folder })]]
+    : [];
   return [
+    ...acctCmds, ...openInCmds, ...lockCmd,
     ...(on('teacher') ? [['Go live', () => send('live', { on: !S.live })]] : []), ['New Vanish tab', () => send('new-tab', { identity: 'vanish' })],
     ['New tab just for now', () => send('new-tab', { temp: true })],
     ['Side by side', () => send('split', { mode: 'cols2' })], ['Grid of four', () => send('split', { mode: 'grid4' })], ['One tab', () => send('split', { mode: 'single' })],
@@ -1726,12 +1767,20 @@ $('#openlibrary').onclick = () => send('tool', { name: 'library' });
 $('#openbills').onclick = () => send('tool', { name: 'bills' });
 
 // ---------------------------------------------------------------- save password
+let credOverlay = false;
 function credBar(d) {
   const box = $('#credbar'); box.innerHTML = ''; box.hidden = false;
+  if (S && S.settings && S.settings.sideHidden) send('side-reveal', { on: true });
+  const floating = document.body.classList.contains('rail');
+  if (floating && !credOverlay) { credOverlay = true; overlay(true); }
   box.append(el('div', '', `Save password for <b>${esc(hostOf(d.origin))}</b>?`));
-  if (d.username) box.append(el('div', 'note', esc(d.username)));
+  if (d.username || d.folder) box.append(el('div', 'note', esc([d.username, d.folder ? `in ${d.folder}` : ''].filter(Boolean).join(' · '))));
   const row = el('div', 'credrow');
-  const close = () => { box.hidden = true; };
+  const close = () => {
+    box.hidden = true;
+    if (credOverlay) { credOverlay = false; overlay(false); }
+    if (S && S.settings && S.settings.sideHidden) send('side-reveal', { on: false });
+  };
   const yes = el('button', 'btn', 'Save'); yes.onclick = () => { send('cred-save', {}); close(); };
   const auto = el('button', 'btn', 'Save, auto sign-in'); auto.title = 'Cue signs you in on this site by itself'; auto.onclick = () => { send('cred-save', { auto: true }); close(); };
   const no = el('button', 'btn', 'Never'); no.onclick = () => { send('cred-never'); close(); };
@@ -1751,6 +1800,7 @@ find.addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- buttons
 $('#newtab').onclick = () => send('new-tab');
+$('#omni-id').onclick = () => send('omni-account-menu');
 $('#back').onclick = () => send('back');
 $('#fwd').onclick = () => send('forward');
 $('#reload').onclick = () => send('reload');
@@ -1794,7 +1844,13 @@ function openModal(build) {
   m.append(sheet); m.hidden = false; overlay(true);
   m.onclick = (e) => { if (e.target === m) closeModal(); };
 }
-function closeModal() { const m = $('#modal'); if (m.hidden) return; if (sharePending) { send('share-choose', { requestId: sharePending }); sharePending = null; } m.hidden = true; m.innerHTML = ''; overlay(false); }
+function closeModal() {
+  const m = $('#modal');
+  if (m.hidden) return;
+  if (sharePending) { send('share-choose', { requestId: sharePending }); sharePending = null; }
+  if (authPending) { send('auth-reply', { requestId: authPending, cancel: true }); authPending = null; }
+  m.hidden = true; m.innerHTML = ''; overlay(false);
+}
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) { closeModal(); } });
 
 // ---------------------------------------------------------------- settings
@@ -1902,11 +1958,11 @@ function settingsRooms(lockTarget) {
   const key = (n) => (MAC_KEYS ? `Command-${n}` : `Ctrl-${n}`);
   return [
     { id: 'tabs', name: 'Tabs and sound', line: 'How new tabs open, and which ones may make a sound.',
-      more: 'WhatsApp, Gmail, Instagram and Facebook live in the strip at the top of the sidebar, one of each per folder. YouTube keeps a tab each for watching, Studio and your posts. Any other site opens as many tabs as you like.',
+      more: 'Pinned apps sit in the strip at the top of the sidebar, one of each per account. Right-click any tab to pin or unpin it.',
       build: (p) => {
         heading(p, 'Sound');
         p.append(settingRow('Apps that open silent', text('muteSites', (s.muteSites || []).join(', '), 'web.whatsapp.com', 'text', 'wide'),
-          'WhatsApp is here to start with. You can still unmute any tab by hand; this only decides how it starts. Separate sites with a comma.'));
+          'Sites listed here open muted. You can still unmute any tab by hand; this only decides how it starts. Separate sites with a comma.'));
         p.append(settingRow('When a new tab opens while a video plays', choice('videoSwitch', s.videoSwitch || 'both', [['both', 'Go to it; both keep playing'], ['switch', 'Pause it and play the new one'], ['stay', 'Stay here; the new tab waits quietly']])));
         toggles(p,
           toggle('onePlayer', s.onePlayer, 'Only one video plays at a time', 'Off is how other browsers behave. Turn it on and starting a video pauses the others. This is the main window only; Vanish has its own setting.'),
@@ -1970,7 +2026,7 @@ function settingsRooms(lockTarget) {
       more: 'Messages still arrive, the count still shows in the sidebar, and every one is kept in Bills & alerts. Nothing pops up at all while you are on air; whatever came in is waiting when you finish.',
       build: (p) => {
         p.append(settingRow('Sites that never pop a notification up', text('quietSites', (s.quietSites || []).join(', '), 'web.whatsapp.com', 'text', 'wide'),
-          'WhatsApp is here to start with. Separate sites with a comma.'));
+          'Notifications from these sites stay quiet in Bills and alerts instead of popping up. Separate sites with a comma.'));
       } },
 
     { id: 'keys', name: 'The number keys', line: `${key(1)} to ${key(9)} open these sites in the folder you have open.`,
@@ -2035,11 +2091,12 @@ function settingsRooms(lockTarget) {
               rm.disabled = false;
             });
             if (rows.length <= 1) { rm.disabled = true; tip(rm, 'The last folder stays'); }
+            else if (f.locked) { rm.disabled = true; tip(rm, 'Unlock this account before removing it'); }
             else tip(rm, `Remove ${f.name}`, 'Closes its tabs and removes its sign-ins, history, bookmarks, Boards and passwords from Cue. Its site data goes to the Trash.');
             head.append(rm);
             card.append(head, sayBox);
             if (f.locked) {
-              card.append(el('div', 'hint', 'Locked. Click it in the sidebar and type its passcode to change anything here.'));
+              card.append(el('div', 'hint', 'Locked. Click it in the sidebar to unlock with its passcode or Touch ID before changing anything here.'));
               box.append(card);
               continue;
             }
@@ -2051,8 +2108,7 @@ function settingsRooms(lockTarget) {
               (on) => act('folder.agents', { id: f.id, on }, told)));
             card.append(grid);
 
-            // ---- the passcode: a switch, off unless the person turns it on. On asks for the new
-            // passcode; off asks for the current one. Nothing changes until the passcode is typed.
+            // ---- the passcode: a simple per-account switch, easy to set and change anytime, with optional Touch ID on Mac.
             const lockBox = el('div', 'lockbox');
             const lockRow = el('span', 'btnline');
             const setupAndLock = f.id === lockTarget && !f.hasLock;
@@ -2060,42 +2116,72 @@ function settingsRooms(lockTarget) {
               lockRow.textContent = '';
               if (!mode) { lockRow.style.display = 'none'; return; }
               lockRow.style.display = '';
+              if (mode === 'set') {
+                const ch = el('button', 'btn', 'Change passcode'); ch.type = 'button'; ch.onclick = () => showLock('change');
+                const now = el('button', 'btn', 'Lock now'); now.type = 'button';
+                now.onclick = async () => { await act('folder.lock-now', { id: f.id }, told); if (box.isConnected) await draw(); };
+                lockRow.append(ch, now);
+                return;
+              }
               const pw = el('input'); pw.type = 'password'; pw.autocomplete = mode === 'off' ? 'off' : 'new-password'; pw.className = 'short';
-              pw.placeholder = mode === 'off' ? 'Current passcode' : mode === 'change' ? 'Current passcode' : 'New passcode';
+              pw.placeholder = mode === 'off' || mode === 'change' ? 'Current passcode' : 'New passcode';
               pw.setAttribute('aria-label', pw.placeholder);
               const nw = el('input'); nw.type = 'password'; nw.autocomplete = 'new-password'; nw.className = 'short'; nw.placeholder = 'New passcode'; nw.setAttribute('aria-label', 'New passcode');
+              const cf = el('input'); cf.type = 'password'; cf.autocomplete = 'new-password'; cf.className = 'short'; cf.placeholder = 'Confirm passcode'; cf.setAttribute('aria-label', 'Confirm passcode');
+              const inputs = mode === 'on' ? [pw, cf] : mode === 'change' ? [pw, nw, cf] : [pw];
+              const eye = el('button', 'btn pw-eye', 'Show'); eye.type = 'button';
+              eye.onclick = () => {
+                const reveal = pw.type === 'password';
+                inputs.forEach((x) => { x.type = reveal ? 'text' : 'password'; });
+                eye.textContent = reveal ? 'Hide' : 'Show';
+              };
               const go = el('button', 'btn', mode === 'off' ? 'Turn off' : mode === 'change' ? 'Change' : 'Turn on'); go.type = 'button';
               const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button';
               if (setupAndLock && mode === 'on') go.textContent = 'Set passcode and lock';
               cancel.onclick = () => { if (setupAndLock) { closeModal(); return; } sw.checked = !!f.hasLock; showLock(f.hasLock ? 'set' : null); told(''); };
               go.onclick = async () => {
+                const nextCode = mode === 'on' ? pw.value : mode === 'change' ? nw.value : '';
+                if (mode !== 'off') {
+                  if (nextCode.length < 4) { told('Use at least four characters.', true); return; }
+                  if (nextCode !== cf.value) { told('Those two passcodes do not match.', true); cf.focus(); return; }
+                }
                 const args = mode === 'on' ? { id: f.id, current: '', code: pw.value } : mode === 'off' ? { id: f.id, current: pw.value, code: '' } : { id: f.id, current: pw.value, code: nw.value };
-                if (mode !== 'off' && args.code.length < 4) { told('Use at least four characters.', true); return; }
                 const r = await act('folder-passcode', args, told);
                 if (r?.ok && setupAndLock) {
                   closeModal();
                   await ask('folder.lock-now', { id: f.id });
                   return;
                 }
-                if (r && r.ok) await draw();
+                if (r && r.ok && box.isConnected) await draw();
               };
-              pw.onkeydown = (e) => { if (e.key === 'Enter' && mode !== 'change') go.click(); };
-              nw.onkeydown = (e) => { if (e.key === 'Enter') go.click(); };
-              if (mode === 'set') {
-                const ch = el('button', 'btn', 'Change passcode'); ch.type = 'button'; ch.onclick = () => showLock('change');
-                const now = el('button', 'btn', 'Lock now'); now.type = 'button';
-                now.onclick = async () => { await act('folder.lock-now', { id: f.id }, told); draw(); };
-                lockRow.append(ch, now);
-                return;
+              pw.onkeydown = (e) => { if (e.key === 'Enter') { if (mode === 'off') go.click(); else (mode === 'on' ? cf : nw).focus(); } };
+              nw.onkeydown = (e) => { if (e.key === 'Enter') cf.focus(); };
+              cf.onkeydown = (e) => { if (e.key === 'Enter') go.click(); };
+              lockRow.append(...inputs, eye, go);
+              if ((mode === 'change' || mode === 'off') && f.canTouchId && f.touchId) {
+                const tid = el('button', 'btn', mode === 'off' ? 'Turn off with Touch ID' : 'Change with Touch ID'); tid.type = 'button';
+                tid.onclick = async () => {
+                  const nextCode = mode === 'change' ? nw.value : '';
+                  if (mode === 'change') {
+                    if (nextCode.length < 4) { told('Type your new passcode first (at least 4 characters).', true); nw.focus(); return; }
+                    if (nextCode !== cf.value) { told('Those two new passcodes do not match.', true); cf.focus(); return; }
+                  }
+                  const r = await act('folder-passcode-touchid', { id: f.id, code: nextCode }, told);
+                  if (r && r.ok && box.isConnected) await draw();
+                };
+                lockRow.append(tid);
               }
-              lockRow.append(pw); if (mode === 'change') lockRow.append(nw);
-              lockRow.append(go, cancel);
+              lockRow.append(cancel);
               setTimeout(() => pw.focus(), 0);
             };
-            const swRow = toggle('', !!f.hasLock, 'Ask for a passcode to open this folder', 'Off unless you turn it on. Stops someone clicking into a folder that is not theirs. It is not a safe: people who share one computer login could still dig through the computer’s own files.',
+            const swRow = toggle('', !!f.hasLock, 'Ask for a passcode to open this folder', 'Off unless you turn it on. Stops someone clicking into an account that is not theirs. Locks again on idle, screen lock, or sleep. Separate computer logins are stronger against file access.',
               (on) => showLock(on ? (f.hasLock ? 'set' : 'on') : (f.hasLock ? 'off' : null)));
             const sw = swRow.querySelector('input');
             lockBox.append(swRow, lockRow);
+            if (f.hasLock && f.canTouchId) {
+              lockBox.append(toggle('', f.touchId !== false, 'Unlock with Touch ID', 'Use Touch ID on this Mac to unlock this account without typing its passcode.',
+                (on) => act('folder.touchid', { id: f.id, on }, told)));
+            }
             if (setupAndLock) { sw.checked = true; showLock('on'); }
             else showLock(f.hasLock ? 'set' : null);
             card.append(lockBox);
@@ -2104,7 +2190,7 @@ function settingsRooms(lockTarget) {
             for (const other of f.shared || []) {
               const o = byId[other];
               if (!o || f.id > other) continue; // each pair once
-              card.append(toggle('', true, `Shares sign-ins with ${o.name}`, 'A site signed in here is signed in there too, and the other way round. Gmail, YouTube, Instagram, Facebook and WhatsApp always stay separate.',
+              card.append(toggle('', true, `Shares sign-ins with ${o.name}`, 'A site signed in here is signed in there too, and the other way round. Gmail, YouTube, Instagram, Facebook, GitHub, Slack, AI tools and other two-account sites always stay separate.',
                 async (on) => { await act('folder.share', { a: f.id, b: other, on }, told); draw(); }));
             }
             for (const other of f.shared || []) {
@@ -2126,13 +2212,19 @@ function settingsRooms(lockTarget) {
             const g = el('button', 'btn', 'Google'); g.type = 'button';
             g.onclick = () => { send('signin.google', { identity: f.id }); told(`Google’s sign-in page is open in a new tab in ${f.name}. Close Settings to use it.`); };
             const m = el('button', 'btn', 'Instagram and Facebook from Chrome'); m.type = 'button';
-            m.onclick = () => {
+            m.onclick = async () => {
               m.disabled = true; told('Bringing them over from Chrome…');
-              send('signin.carry-all', { identity: f.id });
-              setTimeout(() => { m.disabled = false; told('Done. Open Instagram or Facebook in this folder to check.'); }, 6000);
+              try {
+                const r = await ask('signin.carry-all', { identity: f.id });
+                if (r && r.error) told(r.error, true);
+                else if (r && r.cancelled) told('Cancelled.');
+                else if (r && r.count > 0) told(`Carried ${r.count} sign-in cookies from Chrome. Open Instagram or Facebook in ${f.name} to check.`);
+                else told('No signed-in Instagram or Facebook session was found in Chrome.');
+              } catch { told('Could not copy sign-ins from Chrome.', true); }
+              finally { m.disabled = false; }
             };
             signs.append(g); if (S.canCarryFromChrome) signs.append(m); // only on a Mac that has Chrome
-            card.append(settingRow('Sign in', signs, 'Google: signs this folder in on Google’s own page, after emptying its old Google cookies. Instagram and Facebook do not always accept a sign-in typed into a browser they do not know yet, so if Chrome on this computer is signed in, this copies those two across into this folder only. Google is never copied: it ties a sign-in to the one browser it was made in.'));
+            card.append(settingRow('Sign in', signs, 'Google: opens Google’s sign-in page for this folder, keeping existing Google sign-ins intact. Instagram and Facebook do not always accept a sign-in typed into a new browser, so if Chrome on this Mac is signed in, this copies those two into this folder only. Google is never copied.'));
             box.append(card);
           }
           box.append(settingRow('Lock folders again after', amount(text('lockMinutes', lockMinutes, '15', 'number'), 'idle minutes'),
@@ -2253,7 +2345,7 @@ function settingsRooms(lockTarget) {
       } },
 
     { id: 'pw', name: 'Passwords', line: 'Cue offers to save a password when you sign in, then fills it in.',
-      more: 'With “auto” ticked, Cue signs you in to that site by itself. Nothing leaves this computer, and nothing is ever filled into a page you did not open yourself. Only the open folder’s passwords are listed.',
+      more: 'With “auto” ticked, Cue signs you in to that site by itself when one login matches. Nothing leaves this computer, and nothing is ever filled into a page you did not open yourself. Only the open folder’s passwords are listed.',
       build: (p) => {
         p.append(passwordImport());
         const team = el('span', 'btnline'); const teamBtn = el('button', 'btn', 'Load'); teamBtn.type = 'button';
@@ -2265,24 +2357,133 @@ function settingsRooms(lockTarget) {
         team.prepend(teamBtn);
         const pwBox = el('div', 'pwlist'); p.append(pwBox);
         ask('team-offered').then((yes) => { if (yes) pwBox.before(settingRow('Your team’s shared logins', team, 'Loads the shared logins from your team’s site, once. Cards and bank logins stay out.')); });
-        ask('passwords').then((list) => {
-          if (!list) return;
-          if (!list.length) { pwBox.append(el('div', 'hint', 'No saved passwords yet.')); return; }
-          const same = new Map();
-          list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
-          const rows = [...same.values()].sort((q, r2) => hostOf(q[0].origin).localeCompare(hostOf(r2[0].origin)));
-          pwBox.append(el('h3', '', `Saved sign-ins (${rows.length})`));
-          rows.forEach((g) => {
-            const x = g[0]; const r = el('div', 'srow unit');
-            const a2 = el('input', 'switch'); a2.type = 'checkbox'; a2.checked = g.every((i) => i.auto); a2.setAttribute('role', 'switch');
-            a2.setAttribute('aria-label', `Sign in to ${hostOf(x.origin)} by itself`);
-            a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
-            const rm = el('button', 'btn', 'Remove'); rm.type = 'button'; rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
-            const left = el('div', 'slab'); left.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'}`)));
-            const ctl = el('div', 'sctl'); ctl.append(el('span', 'unitword', 'auto'), a2, rm);
-            r.append(left, ctl); pwBox.append(r);
-          });
-        });
+        const genPass = () => {
+          const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*-_';
+          const bytes = new Uint8Array(18);
+          crypto.getRandomValues(bytes);
+          return [...bytes].map((b) => abc[b % abc.length]).join('');
+        };
+        let query = '';
+        let showAdd = false;
+        const drawPw = async () => {
+          const info = await ask('passwords-info');
+          if (!info || !pwBox.isConnected) return;
+          pwBox.innerHTML = '';
+          if (info.weakStorage) {
+            pwBox.append(el('div', 'note help', 'Warning: No Linux system keyring (GNOME Keyring / KWallet) was found, so saved passwords are stored with basic protection only.'));
+          }
+          const tools = el('div', 'pw-tools');
+          const search = el('input'); search.type = 'search'; search.placeholder = 'Search saved logins'; search.value = query;
+          search.setAttribute('aria-label', 'Search saved logins');
+          const addBtn = el('button', 'btn', showAdd ? 'Close' : '+ Add login'); addBtn.type = 'button';
+          const expBtn = el('button', 'btn', 'Export CSV'); expBtn.type = 'button';
+          const status = el('span', 'note');
+          addBtn.onclick = () => { showAdd = !showAdd; drawPw(); };
+          expBtn.onclick = async () => {
+            expBtn.disabled = true;
+            const r = await ask('pw-export-csv');
+            expBtn.disabled = false;
+            if (r && r.ok) status.textContent = `Exported ${r.count} passwords.`;
+            else if (r && r.error) status.textContent = r.error;
+          };
+          tools.append(search, addBtn, expBtn, status);
+          pwBox.append(tools);
+          if (showAdd) {
+            const form = el('div', 'pw-add');
+            const fSite = el('input'); fSite.type = 'text'; fSite.placeholder = 'Website (e.g. example.com)';
+            const fUser = el('input'); fUser.type = 'text'; fUser.placeholder = 'Username or email';
+            const fPass = el('input'); fPass.type = 'text'; fPass.placeholder = 'Password';
+            const actRow = el('div', 'pw-act');
+            const gen = el('button', 'btn', 'Generate strong password'); gen.type = 'button';
+            gen.onclick = () => { fPass.value = genPass(); fPass.focus(); };
+            const saveBtn = el('button', 'btn', 'Save login'); saveBtn.type = 'button';
+            const msg = el('span', 'note');
+            saveBtn.onclick = async () => {
+              const r = await ask('pw-add', { origin: fSite.value, username: fUser.value, password: fPass.value });
+              if (r && r.ok) { showAdd = false; drawPw(); }
+              else msg.textContent = (r && r.error) || 'Could not save.';
+            };
+            actRow.append(gen, saveBtn, msg);
+            form.append(fSite, fUser, fPass, actRow);
+            pwBox.append(form);
+            setTimeout(() => fSite.focus(), 0);
+          }
+          const rowsWrap = el('div', ''); pwBox.append(rowsWrap);
+          const renderList = () => {
+            rowsWrap.innerHTML = '';
+            const ql = query.trim().toLowerCase();
+            const list = (info.items || []).filter((x) => !ql || `${hostOf(x.origin)} ${x.username || ''}`.toLowerCase().includes(ql));
+            if (!list.length) { rowsWrap.append(el('div', 'hint', ql ? 'No matching saved passwords.' : 'No saved passwords yet.')); return; }
+            const same = new Map();
+            list.forEach((x) => { const k = `${x.origin}|${x.username}`; same.set(k, [...(same.get(k) || []), x]); });
+            const rows = [...same.values()].sort((q, r2) => hostOf(q[0].origin).localeCompare(hostOf(r2[0].origin)));
+            rowsWrap.append(el('h3', '', `Saved sign-ins (${rows.length})`));
+            rows.forEach((g) => {
+              const x = g[0]; const r = el('div', 'srow unit');
+              const left = el('div', 'slab');
+              left.append(el('span', '', esc(`${hostOf(x.origin)} · ${x.username || 'no username'}`)));
+              const secret = el('code', 'pw-secret'); secret.hidden = true;
+              left.append(secret);
+              let hideTimer = null;
+              const copyBtn = el('button', 'btn', 'Copy'); copyBtn.type = 'button';
+              copyBtn.onclick = async () => {
+                const res = await ask('pw-reveal', { pw: x.id });
+                if (res && res.password !== undefined) {
+                  await navigator.clipboard.writeText(res.password);
+                  copyBtn.textContent = 'Copied';
+                  setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1800);
+                } else if (res && res.error) toast(res.error);
+              };
+              const showBtn = el('button', 'btn', 'Show'); showBtn.type = 'button';
+              showBtn.onclick = async () => {
+                if (!secret.hidden) { secret.hidden = true; secret.textContent = ''; showBtn.textContent = 'Show'; clearTimeout(hideTimer); return; }
+                const res = await ask('pw-reveal', { pw: x.id });
+                if (res && res.password !== undefined) {
+                  secret.textContent = res.password; secret.hidden = false; showBtn.textContent = 'Hide';
+                  clearTimeout(hideTimer);
+                  hideTimer = setTimeout(() => { secret.hidden = true; secret.textContent = ''; showBtn.textContent = 'Show'; }, 20000);
+                } else if (res && res.error) toast(res.error);
+              };
+              const editBtn = el('button', 'btn', 'Edit'); editBtn.type = 'button';
+              editBtn.onclick = () => {
+                const existing = r.querySelector('.pw-add');
+                if (existing) { existing.remove(); return; }
+                const ed = el('div', 'pw-add'); ed.style.gridColumn = '1 / -1'; ed.style.marginTop = '6px';
+                const eu = el('input'); eu.type = 'text'; eu.value = x.username || ''; eu.placeholder = 'Username';
+                const ep = el('input'); ep.type = 'password'; ep.placeholder = 'New password (leave blank to keep)';
+                const act = el('div', 'pw-act');
+                const eg = el('button', 'btn', 'Generate'); eg.type = 'button'; eg.onclick = () => { ep.type = 'text'; ep.value = genPass(); };
+                const es = el('button', 'btn', 'Save'); es.type = 'button';
+                es.onclick = async () => {
+                  const res = await ask('pw-update', { pw: x.id, username: eu.value.trim(), password: ep.value || undefined });
+                  if (res && res.ok) drawPw();
+                };
+                const ec = el('button', 'btn', 'Cancel'); ec.type = 'button'; ec.onclick = () => ed.remove();
+                act.append(eg, es, ec); ed.append(eu, ep, act); r.append(ed);
+              };
+              const a2 = el('input', 'switch'); a2.type = 'checkbox'; a2.checked = g.every((i) => i.auto); a2.setAttribute('role', 'switch');
+              a2.setAttribute('aria-label', `Sign in to ${hostOf(x.origin)} by itself`);
+              a2.onchange = () => g.forEach((i) => send('pw-auto', { pw: i.id, on: a2.checked }));
+              const rm = el('button', 'btn', 'Remove'); rm.type = 'button'; rm.onclick = () => { g.forEach((i) => send('pw-remove', { pw: i.id })); r.remove(); };
+              const ctl = el('div', 'sctl'); ctl.append(copyBtn, showBtn, editBtn, el('span', 'unitword', 'auto'), a2, rm);
+              r.append(left, ctl); rowsWrap.append(r);
+            });
+          };
+          search.oninput = () => { query = search.value; renderList(); };
+          renderList();
+          if (info.never && info.never.length) {
+            pwBox.append(el('h3', '', `Never saved (${info.never.length})`));
+            info.never.forEach((orig) => {
+              const r = el('div', 'srow unit');
+              const left = el('div', 'slab'); left.append(el('span', '', esc(hostOf(orig) || orig)));
+              const clr = el('button', 'btn', 'Allow again'); clr.type = 'button';
+              clr.onclick = async () => { await ask('pw-never-clear', { origin: orig }); drawPw(); };
+              const ctl = el('div', 'sctl'); ctl.append(clr);
+              r.append(left, ctl); pwBox.append(r);
+            });
+          }
+        };
+        drawPw();
       } },
 
     { id: 'ext', name: 'Chrome extensions', line: 'Add the extensions you already use in your other browsers.',
@@ -2612,8 +2813,8 @@ function welcomeSheet(d) {
   });
 }
 
-// The passcode sheet. Masked, a plain line when the code is wrong, and after five wrong tries it
-// says how long to wait and will not take another until then.
+// The passcode sheet. Masked, optional Touch ID on Mac, plain line when wrong, and after five
+// wrong tries it says how long to wait and will not take another until then.
 function unlockSheet(d) {
   closeModal();
   openModal((sh) => {
@@ -2623,9 +2824,21 @@ function unlockSheet(d) {
     top.append(el('h2', '', `${esc(d.name)} is locked`));
     top.style.setProperty('--c', d.color);
     sh.append(top);
-    sh.append(el('div', 'note', 'Type this folder’s passcode to open it.'));
-    const inp = el('input'); inp.type = 'password'; inp.autocomplete = 'off'; inp.placeholder = 'Passcode'; inp.setAttribute('aria-label', `Passcode for ${d.name}`);
+    sh.append(el('div', 'note', d.touchId ? 'Unlock with Touch ID or type this account’s passcode.' : 'Type this account’s passcode to open it.'));
     const say = el('div', 'note unlockerr'); say.setAttribute('role', 'alert');
+    if (d.touchId) {
+      const tb = el('button', 'btn touchbtn', 'Unlock with Touch ID'); tb.type = 'button';
+      tb.onclick = async () => {
+        tb.disabled = true;
+        const r = await window.cue.invoke('folder-unlock-touchid', { id: d.id });
+        tb.disabled = false;
+        if (r && r.ok) { clearInterval(timer); closeModal(); return; }
+        say.textContent = (r && r.error) || 'Touch ID did not unlock it.';
+        inp.focus();
+      };
+      sh.append(tb);
+    }
+    const inp = el('input'); inp.type = 'password'; inp.autocomplete = 'off'; inp.placeholder = 'Passcode'; inp.setAttribute('aria-label', `Passcode for ${d.name}`);
     const go = el('button', 'btn', 'Unlock');
     let timer = null;
     const waitFor = (s) => {
@@ -2652,6 +2865,32 @@ function unlockSheet(d) {
     sh.append(row, say);
     const foot = el('div', 'foot'); const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { clearInterval(timer); closeModal(); }; foot.append(cancel); sh.append(foot);
     if (d.wait) waitFor(d.wait); else setTimeout(() => inp.focus(), 30);
+  });
+}
+
+let authPending = null;
+function authSheet(d) {
+  closeModal();
+  authPending = d.requestId;
+  openModal((sh) => {
+    sh.append(el('h2', '', d.isProxy ? `Proxy sign-in · ${esc(d.host)}` : `Sign in to ${esc(d.host)}`));
+    if (d.realm) sh.append(el('div', 'note', esc(d.realm)));
+    const u = el('input'); u.type = 'text'; u.placeholder = 'Username'; u.autocomplete = 'username'; u.setAttribute('aria-label', 'Username');
+    const p = el('input'); p.type = 'password'; p.placeholder = 'Password'; p.autocomplete = 'current-password'; p.setAttribute('aria-label', 'Password');
+    const submit = () => {
+      const rid = authPending;
+      authPending = null;
+      send('auth-reply', { requestId: rid, username: u.value, password: p.value });
+      closeModal();
+    };
+    u.onkeydown = (e) => { if (e.key === 'Enter') p.focus(); };
+    p.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+    const foot = el('div', 'foot');
+    const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button'; cancel.onclick = () => closeModal();
+    const ok = el('button', 'btn', 'Sign in'); ok.type = 'button'; ok.onclick = submit;
+    foot.append(cancel, ok);
+    sh.append(u, p, foot);
+    setTimeout(() => u.focus(), 30);
   });
 }
 
@@ -2760,6 +2999,7 @@ window.cue.onEvent((name, data) => {
   }
   else if (name === 'setup-folder-lock') openSettings('folders', data);
   else if (name === 'unlock') unlockSheet(data);
+  else if (name === 'auth-prompt') authSheet(data);
   else if (name === 'welcome') welcomeSheet(data);
   else if (name === 'music-state' && data) {
     showMusic(data);
