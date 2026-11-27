@@ -96,35 +96,68 @@ function perUserHome(platform, env = process.env, homedir = require('os').homedi
   return '';
 }
 
-// Can Cue really write here? On Windows the access() call only looks at the
-// read-only flag, not at who may write, so it writes a tiny file and removes it.
+// Can Cue really write here? Tests with a real tiny probe file on every OS so
+// macOS read-only DMGs, APFS snapshots, ACLs, Linux mount flags and Windows NTFS
+// permissions are all detected honestly instead of relying on accessSync alone.
 function canWrite(dir, platform = process.platform) {
   try {
-    if (platform !== 'win32') { fs.accessSync(dir, fs.constants.W_OK); return true; }
-    const probe = path.join(dir, `.cue-write-test-${process.pid}-${Date.now()}`);
+    if (!dir || !fs.existsSync(dir)) return false;
+    const probe = path.join(dir, `.cue-write-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`);
     fs.writeFileSync(probe, '');
     fs.rmSync(probe, { force: true });
     return true;
   } catch { return false; }
 }
 
+// A guaranteed-writable per-user install location when the currently running
+// Cue lives on a read-only DMG, AppTranslocation, Program Files, or /opt.
+// Returns null only for store/single-file packages (Snap / AppImage).
+function relocateTarget({ platform = process.platform, env = process.env, homedir = require('os').homedir() } = {}) {
+  if (platform === 'darwin') {
+    const sysApps = '/Applications';
+    const sysBundle = path.join(sysApps, 'Cue.app');
+    if (canWrite(sysApps, platform) && (!fs.existsSync(sysBundle) || canWrite(sysBundle, platform))) {
+      return { live: sysBundle, exe: path.join(sysBundle, 'Contents', 'MacOS', 'Cue'), relocate: true };
+    }
+    const userApps = path.join(homedir, 'Applications');
+    const userBundle = path.join(userApps, 'Cue.app');
+    return { live: userBundle, exe: path.join(userBundle, 'Contents', 'MacOS', 'Cue'), relocate: true };
+  }
+  if (platform === 'win32') {
+    const home = perUserHome('win32', env, homedir);
+    return home ? { live: home, exe: path.join(home, exeName('win32')), relocate: true } : null;
+  }
+  if (platform === 'linux') {
+    if (env.APPIMAGE || env.SNAP) return null;
+    const home = perUserHome('linux', env, homedir);
+    return home ? { live: home, exe: path.join(home, exeName('linux')), relocate: true } : null;
+  }
+  return null;
+}
+
 // What would an update replace, and may it? Returns { live } or { blocked }:
 //   blocked 'dev'       not a packaged Cue (npm start): never touch anything
-//   blocked 'readonly'  a disk image, a translocated copy, a system folder or
-//                       a folder this user cannot write: never download
+//   blocked 'readonly'  a read-only disk image, a translocated copy, a system
+//                       folder or a folder this user cannot write
 function installTarget({ platform = process.platform, execPath = process.execPath, env = process.env, isPackaged = false } = {}) {
   if (!isPackaged) return { blocked: 'dev' };
   if (platform === 'darwin') {
     const bundle = path.resolve(execPath, '../../..');
     if (!bundle.endsWith('.app')) return { blocked: 'dev' };
-    if (/^\/Volumes\//.test(bundle) || /\/AppTranslocation\//.test(bundle)) return { blocked: 'readonly', live: bundle };
-    if (!canWrite(path.dirname(bundle), platform) || !canWrite(bundle, platform)) return { blocked: 'readonly', live: bundle };
+    if (/\/AppTranslocation\//.test(bundle)) return { blocked: 'readonly', live: bundle, reason: 'translocated' };
+    // Never reject every /Volumes/* path blindly: writable external SSDs can update
+    // in place, while mounted read-only .dmg volumes fail canWrite() honestly.
+    if (!canWrite(path.dirname(bundle), platform) || !canWrite(bundle, platform)) {
+      return { blocked: 'readonly', live: bundle, reason: /^\/Volumes\//.test(bundle) ? 'dmg' : 'permissions' };
+    }
     return { live: bundle };
   }
   if (platform === 'win32' || platform === 'linux') {
     const dir = path.dirname(execPath);
-    if (platform === 'linux' && (env.APPIMAGE || /^\/(opt|usr|snap)\//.test(dir))) return { blocked: 'readonly', live: dir };
-    if (!canWrite(dir, platform) || !canWrite(path.dirname(dir), platform)) return { blocked: 'readonly', live: dir };
+    if (platform === 'linux' && (env.APPIMAGE || env.SNAP || /^\/(opt|usr|snap)\//.test(dir))) {
+      return { blocked: 'readonly', live: dir, reason: env.APPIMAGE || env.SNAP || /^\/snap\//.test(dir) ? 'package' : 'system' };
+    }
+    if (!canWrite(dir, platform) || !canWrite(path.dirname(dir), platform)) return { blocked: 'readonly', live: dir, reason: 'permissions' };
     return { live: dir, exe: execPath };
   }
   return { blocked: 'dev' };
@@ -238,6 +271,7 @@ async function extract(archive, into, platform = process.platform) {
 // folder is put straight back and the staged copy is kept for the next try.
 // The old folder is left as `<install>.old` and removed at the next launch.
 function swapLinux({ live, staged, failAfterAside = false } = {}) {
+  fs.mkdirSync(path.dirname(live), { recursive: true });
   const incoming = `${live}.incoming`;
   let old = `${live}.old`;
   try { fs.rmSync(incoming, { recursive: true, force: true }); } catch {}
@@ -260,16 +294,21 @@ function swapLinux({ live, staged, failAfterAside = false } = {}) {
   const undoIncoming = () => {
     if (moved) { try { fs.renameSync(incoming, staged); } catch {} } else { try { fs.rmSync(incoming, { recursive: true, force: true }); } catch {} }
   };
-  try { fs.renameSync(live, old); } catch (e) { undoIncoming(); return { ok: false, why: `step aside: ${e.message}` }; }
+  const hadLive = fs.existsSync(live);
+  if (hadLive) {
+    try { fs.renameSync(live, old); } catch (e) { undoIncoming(); return { ok: false, why: `step aside: ${e.message}` }; }
+  }
   try {
     if (failAfterAside) throw new Error('test: forced failure after stepping aside');
     fs.renameSync(incoming, live);
   } catch (e) {
-    try { fs.renameSync(old, live); } catch (e2) { return { ok: false, why: `put back FAILED: ${e2.message}`, old }; }
+    if (hadLive) {
+      try { fs.renameSync(old, live); } catch (e2) { return { ok: false, why: `put back FAILED: ${e2.message}`, old }; }
+    }
     undoIncoming();
     return { ok: false, why: `put in place: ${e.message}` };
   }
-  return { ok: true, old };
+  return { ok: true, old: hadLive ? old : '' };
 }
 
 // Folders a finished swap left beside the install (`Cue.old`, `cue.old-…`).
@@ -355,7 +394,7 @@ module.exports = {
   quietRefusal,
   PLACEHOLDER_KEY, FEED_PUBLIC_KEY, Plain,
   newer, canonical, signFeed, verifyFeed, publicKeyFrom, platformKey, pickEntry,
-  perUserHome, canWrite, installTarget,
+  perUserHome, canWrite, relocateTarget, installTarget,
   downloadTo, sha256Of, run, tarPath, exeName, findAppDir, extract,
   swapLinux, clearOld, WIN_SWAP, writeWinSwap, startWindowsSwap, powershellPath, readResult,
 };

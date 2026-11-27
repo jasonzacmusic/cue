@@ -2637,7 +2637,13 @@ function settingsRooms(lockTarget) {
         toggles(p,
           toggle('autoUpdate', s.autoUpdate !== false, 'Download updates automatically', 'Cue shows the available version. Choose Install and reopen when you are ready.'),
           toggle('tidyInstallers', s.tidyInstallers, 'Move opened installers to the Trash after a day'));
-        if (S.update && S.update.blocked === 'readonly') p.append(el('div', 'hint', 'Cue cannot update itself here because its folder is read-only. Get the new version from its download page.'));
+        if (S.update && S.update.blocked === 'readonly') {
+          const ro = el('div', 'hint', 'This copy is in a read-only folder. Click Check for updates to install the newest version into your Applications/home folder, or ');
+          const dl = el('a', '', 'open the download page'); dl.href = '#';
+          dl.onclick = (e) => { e.preventDefault(); send('new-tab', { url: 'https://labs.nathanielschool.com/products/cue' }); closeModal(); };
+          ro.append(dl, '.');
+          p.append(ro);
+        }
         const upLine = el('span', 'btnline'); const upBtn = el('button', 'btn', 'Check for updates'); upBtn.type = 'button';
         const upText = el('span', 'hint', '');
         upBtn.onclick = () => {

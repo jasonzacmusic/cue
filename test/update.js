@@ -212,6 +212,43 @@ function fakeApp(dir, version) {
   check('a download that does not match its checksum is thrown away', st.state === 'error' && /checksum/.test(st.error || ''), { state: st.state, error: st.error });
   check('and nothing is put in place after a bad download', (await bad.install()).state === 'error');
 
+  // ----------------------------------- 5b. TCC-locked ~/.Trash (no Full Disk Access)
+  {
+    const lockedTrashHome = path.join(work, 'no-fda-home');
+    fs.mkdirSync(path.join(lockedTrashHome, '.Trash'), { recursive: true });
+    fs.chmodSync(path.join(lockedTrashHome, '.Trash'), 0o555);
+    const prevHome = os.homedir;
+    os.homedir = () => lockedTrashHome;
+    const apps2 = path.join(work, 'Applications-nofda');
+    fs.mkdirSync(apps2, { recursive: true });
+    fakeApp(path.join(apps2, 'Cue.app'), '0.0.1');
+    feedVersion = '99.0.5'; feedSha = sha; served = DMG;
+    const upNoFda = createUpdater({ onState: () => {}, log: (e) => log.push(e), auto: () => true, appsDir: apps2, feedUrl });
+    await upNoFda.check({ quiet: false });
+    const stNoFda = await ready(upNoFda);
+    check('no-FDA Mac: download succeeds', stNoFda.state === 'ready', stNoFda);
+    await upNoFda.install();
+    check('no-FDA Mac: swap succeeds even when ~/.Trash rejects renameSync (EACCES/EPERM)', versionAt(path.join(apps2, 'Cue.app')) === dmgVersion, versionAt(path.join(apps2, 'Cue.app')));
+    fs.chmodSync(path.join(lockedTrashHome, '.Trash'), 0o755);
+    os.homedir = prevHome;
+  }
+
+  // ----------------------------------- 5c. Running from read-only DMG / AppTranslocation
+  {
+    const relocHome = path.join(work, 'reloc-home');
+    fs.mkdirSync(relocHome, { recursive: true });
+    feedVersion = '99.0.6'; feedSha = sha; served = DMG;
+    const upTrans = createUpdater({
+      onState: () => {}, log: (e) => log.push(e), auto: () => true,
+      platform: 'darwin', execPath: '/private/var/folders/x/T/AppTranslocation/ABC/d/Cue.app/Contents/MacOS/Cue',
+      isPackaged: true, updatesDir: path.join(work, 'upd-trans'), feedUrl, homedir: relocHome,
+    });
+    const stQuiet = await upTrans.check({ quiet: true });
+    check('AppTranslocation: background quiet check stays blocked/silent', stQuiet.blocked === 'readonly' && stQuiet.state === 'idle', stQuiet);
+    const stManual = await upTrans.check({ quiet: false });
+    check('AppTranslocation: manual Check for Updates relocates cleanly to writable Applications', !stManual.blocked && !!stManual.relocateTo && stManual.relocateTo.endsWith('Cue.app'), stManual);
+  }
+
   // ----------------------------------- 6. a waiting copy does not get stuck on old
   const older = process.env.CUE_OLDER_DMG;
   if (older && fs.existsSync(older)) {

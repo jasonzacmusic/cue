@@ -208,6 +208,20 @@ const settle = async (u) => {
     check('read-only install: nothing is fetched, not even the feed', !hits['/cue-feed.json'] && !hits['/archive'], hits);
     check('read-only install: one quiet line, no error bar', s.blocked === 'readonly' && s.state === 'idle' && !s.error, s);
     check('the quiet line says it in plain words', /read-only\. Get the new version from labs\.nathanielschool\.com\.$/.test(SAY.readonly));
+    // Manual Check for Updates (quiet: false) from a read-only /opt install relocates to ~/.local/share/cue!
+    const relocHome = fresh('reloc-linux-home');
+    const uReloc = createUpdater({
+      onState() {}, platform: 'linux', arch: 'x64', execPath: '/opt/Cue/Cue',
+      isPackaged: true, env: { HOME: relocHome }, homedir: relocHome,
+      updatesDir: fresh('updates-reloc'), feedUrl: FEED_URL, publicKey: PUB, auto: () => true,
+    });
+    const sManual = await uReloc.check({ quiet: false });
+    const sDone = await settle(uReloc);
+    check('read-only /opt install: manual Check for Updates relocates to ~/.local/share/cue', !sManual.blocked && sDone.state === 'ready' && sDone.relocateTo === path.join(relocHome, '.local', 'share', 'cue'), { sManual, sDone });
+    await uReloc.install();
+    check('read-only /opt install: Install and reopen lands new Cue in ~/.local/share/cue', markerOf(path.join(relocHome, '.local', 'share', 'cue')) === 'new 1.1.0', markerOf(path.join(relocHome, '.local', 'share', 'cue')));
+    check('AppImage stays blocked even on manual check', core.relocateTarget({ platform: 'linux', env: { APPIMAGE: '/tmp/Cue.AppImage' }, homedir: relocHome }) === null);
+    check('Windows read-only relocates to per-user LocalAppData', core.relocateTarget({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' }, homedir: 'C:\\Users\\u' }).live.endsWith(path.join('Programs', 'Cue')));
   }
 
   // ------------------------------------------------------------- feed refusals in the updater

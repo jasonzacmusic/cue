@@ -5387,25 +5387,34 @@ async function checkForUpdates() {
   if (process.env.CUE_TEST) return;
   const ready = u.state === 'ready';
   const available = u.state === 'available';
+  const failed = !!(u.blocked || u.state === 'error');
   let message = 'You have the newest Cue.';
   let detail = `This is version ${app.getVersion()}.`;
-  if (u.blocked || u.state === 'error') {
-    message = 'Cue could not update.';
+  if (failed) {
+    message = 'Cue could not update automatically.';
     detail = u.error || UPDATE_SAY.readonly;
   } else if (ready || available) {
     message = `Cue ${u.latest} is available.`;
-    detail = u.notes || 'Choose when to install the update.';
+    const whereNote = u.relocateTo ? `\n\nCue will install into ${u.relocateTo} and reopen from there.` : '';
+    detail = (u.notes || 'Choose when to install the update.') + whereNote;
   } else if (u.state === 'downloading' || u.state === 'checking') {
     message = u.state === 'checking' ? 'Checking for updates…' : `Downloading Cue ${u.latest}…`;
     detail = 'Cue will show a notice when the update is ready.';
   }
-  const buttons = ready || available ? ['Later', ready ? 'Install and reopen' : 'Download update'] : ['OK'];
+  const buttons = ready || available
+    ? ['Later', ready ? 'Install and reopen' : 'Download update']
+    : failed ? ['OK', 'Open Download Page'] : ['OK'];
   const choice = await dialog.showMessageBox(mainWin, { type: 'info', buttons, message, detail, defaultId: 0, cancelId: 0 });
-  if (choice.response !== 1 || updater.state().latest !== u.latest) return;
+  if (choice.response !== 1) return;
+  if (failed) { openTab({ url: LABS_PAGE, identity: openFolder() }); return; }
+  if (updater.state().latest !== u.latest) return;
   if (available) await updater.download();
   if (ready) {
     const result = await updater.install();
-    if (result.error) await dialog.showMessageBox(mainWin, { message: result.error, buttons: ['OK'] });
+    if (result.error) {
+      const c2 = await dialog.showMessageBox(mainWin, { message: result.error, buttons: ['OK', 'Open Download Page'], defaultId: 0, cancelId: 0 });
+      if (c2.response === 1) openTab({ url: LABS_PAGE, identity: openFolder() });
+    }
   }
 }
 

@@ -95,10 +95,15 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
   const push = (patch) => { state = { ...state, ...patch }; onState && onState(state); };
 
   // What would be replaced, and may it be? Only the tests ever pass a folder.
-  function target() {
+  function target({ allowRelocate = false } = {}) {
     if (MAC && appsDir) return { live: path.join(appsDir, 'Cue.app') };
     if (!MAC && installDir) return { live: installDir, exe: path.join(installDir, core.exeName(PLATFORM)) };
-    return core.installTarget({ platform: PLATFORM, execPath: execPath || process.execPath, env: env || process.env, isPackaged: isPackaged !== undefined ? isPackaged : !!app.isPackaged });
+    const found = core.installTarget({ platform: PLATFORM, execPath: execPath || process.execPath, env: env || process.env, isPackaged: isPackaged !== undefined ? isPackaged : !!app.isPackaged });
+    if (allowRelocate && found.blocked === 'readonly' && found.reason !== 'package') {
+      const alt = core.relocateTarget({ platform: PLATFORM, env: env || process.env, homedir });
+      if (alt) return { ...alt, fromReadonly: found.live };
+    }
+    return found;
   }
 
   // A small memory of what was already said and tried, per version, so that
@@ -159,14 +164,18 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
 
   async function check({ quiet = true } = {}) {
     if (state.state === 'downloading' || state.state === 'checking') return state;
-    const where = target();
-    // Never fetch what could not be put in place. A read-only folder gets one
-    // quiet line in Settings, never a bar.
+    // Background checks stay silent on read-only/system folders so we never waste
+    // bandwidth. When the person explicitly clicks "Check for Updates", relocate
+    // to a writable permanent home (~/Applications, /Applications, %LOCALAPPDATA%,
+    // or ~/.local/share/cue) so updating works on every user machine.
+    const where = target({ allowRelocate: !quiet });
     if (where.blocked) {
-      push({ state: 'idle', blocked: where.blocked === 'readonly' ? 'readonly' : '', error: '' });
+      push({ state: 'idle', blocked: where.blocked === 'readonly' ? 'readonly' : '', relocateTo: '', error: '' });
       return state;
     }
-    if (state.blocked) push({ blocked: '' });
+    if (state.blocked || (where.relocate && state.relocateTo !== where.live)) {
+      push({ blocked: '', relocateTo: where.relocate ? where.live : '' });
+    }
     const waiting = state.state === 'ready';
     if (!waiting) push({ state: 'checking', error: '' });
     let offer;
@@ -287,24 +296,52 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
     return true;
   }
 
-  // Mac: the old bundle steps aside into the Trash (recoverable, never
-  // deleted), the new one is copied in, and if that fails the old one is put
-  // straight back. The same for "Install and reopen" and for quitting.
+  // Mac: installs staged bundle into `live` (creating ~/Applications if relocating).
+  // If an older copy sits at `live`, moves it aside into ~/.Trash when permitted,
+  // or into a sibling `.old` backup + shell.trashItem() on Macs without Full Disk
+  // Access (macOS TCC blocks direct writes into ~/.Trash for normal apps).
+  // If `ditto` fails, the previous bundle is restored immediately.
   function swapMac(live) {
-    const keep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
-    try {
-      fs.renameSync(live, keep);
-    } catch (e) {
-      if (e.code !== 'EXDEV') { say(`step aside: ${e.message}`); return false; }
-      try { execFileSync('/bin/mv', [live, keep], { timeout: 120_000 }); } catch (e2) { say(`step aside: ${e2.message}`); return false; }
+    try { fs.mkdirSync(path.dirname(live), { recursive: true }); } catch (e) { say(`prepare folder: ${e.message}`); return false; }
+    const hadLive = fs.existsSync(live);
+    let aside = '';
+    let usedSibling = false;
+    if (hadLive) {
+      const trashKeep = path.join(os.homedir(), '.Trash', `Cue-${app.getVersion()}-replaced-${Date.now()}.app`);
+      const siblingKeep = `${live}.old-${Date.now()}`;
+      try {
+        fs.renameSync(live, trashKeep);
+        aside = trashKeep;
+      } catch (e) {
+        if (e.code === 'EXDEV') {
+          try { execFileSync('/bin/mv', [live, trashKeep], { timeout: 120_000 }); aside = trashKeep; } catch {}
+        }
+        if (!aside) {
+          try {
+            fs.renameSync(live, siblingKeep);
+            aside = siblingKeep;
+            usedSibling = true;
+          } catch (e2) {
+            say(`step aside: ${e2.message}`);
+            return false;
+          }
+        }
+      }
     }
     try {
       execFileSync('/usr/bin/ditto', [staged, live], { timeout: 120_000 });
     } catch (e) {
       try { fs.rmSync(live, { recursive: true, force: true }); } catch {}
-      try { fs.renameSync(keep, live); } catch { try { execFileSync('/bin/mv', [keep, live], { timeout: 120_000 }); } catch {} }
+      if (aside) {
+        try { fs.renameSync(aside, live); } catch { try { execFileSync('/bin/mv', [aside, live], { timeout: 120_000 }); } catch {} }
+      }
       say(`put in place: ${e.message}`);
       return false;
+    }
+    if (usedSibling && aside) {
+      // Trash via Finder/NSFileManager (works without Full Disk Access); if unavailable, remove cleanly.
+      const trashPromise = shell && typeof shell.trashItem === 'function' ? shell.trashItem(aside) : Promise.reject(new Error('no trashItem'));
+      Promise.resolve(trashPromise).catch(() => { try { fs.rmSync(aside, { recursive: true, force: true }); } catch {} });
     }
     dropCopy(staged);
     staged = null;
@@ -350,19 +387,32 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
     if (state.state !== 'ready' || !staged) return state;
     const reason = canInterrupt && canInterrupt();
     if (reason) { push({ error: reason }); return state; }
-    const where = target();
+    const where = target({ allowRelocate: true });
     if (where.blocked) { push({ state: 'idle', blocked: where.blocked === 'readonly' ? 'readonly' : '', error: '' }); return state; }
-    const live = where.live;
+    let live = where.live;
     if (wouldDowngrade(live)) { dropCopy(staged); staged = null; push({ state: 'idle', error: '' }); return state; }
     if (MAC) {
       if (!stillOurs()) { push({ state: 'idle', error: '' }); return state; }
-      if (!swapMac(live)) { push({ state: 'error', error: SAY.install }); return state; }
+      let ok = swapMac(live);
+      if (!ok) {
+        // Fallback for non-admin Macs where /Applications cannot be written directly:
+        // install cleanly into ~/Applications/Cue.app so every user can still update!
+        const userBundle = path.join(homedir, 'Applications', 'Cue.app');
+        if (path.resolve(live) !== path.resolve(userBundle) && swapMac(userBundle)) {
+          live = userBundle;
+          ok = true;
+        }
+      }
+      if (!ok) { push({ state: 'error', error: SAY.install }); return state; }
       await settleFirst();
       app.relaunch({ execPath: path.join(live, 'Contents', 'MacOS', 'Cue') });
       app.exit(0);
       return state;
     }
     if (PLATFORM === 'win32') {
+      if (where.relocate) {
+        try { fs.mkdirSync(live, { recursive: true }); ensureEntries({ platform: 'win32', home: live, env: env || process.env, homedir, shell }); } catch (e) { say(e); }
+      }
       if (!winSwap(where, true)) { push({ state: 'error', error: SAY.install }); return state; }
       await settleFirst();
       app.exit(0);
@@ -373,10 +423,12 @@ function createUpdater({ onState, canInterrupt, beforeExit, log, auto, appsDir, 
     // before the new Chromium process starts, including on current Ubuntu.
     const launchEnv = env || process.env;
     if (live === core.perUserHome('linux', launchEnv, homedir)) {
+      if (!linuxSwap(where)) { push({ state: 'error', error: SAY.install }); return state; }
       try { launcher = ensureEntries({ platform: 'linux', home: live, env: launchEnv, homedir }).launcher; }
-      catch (e) { say(e); push({ state: 'error', error: SAY.install }); return state; }
+      catch (e) { say(e); }
+    } else {
+      if (!linuxSwap(where)) { push({ state: 'error', error: SAY.install }); return state; }
     }
-    if (!linuxSwap(where)) { push({ state: 'error', error: SAY.install }); return state; }
     await settleFirst();
     app.relaunch({ execPath: launcher, args: process.argv.slice(1) });
     app.exit(0);
